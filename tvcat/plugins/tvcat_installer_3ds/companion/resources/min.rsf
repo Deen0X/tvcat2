@@ -1,0 +1,13 @@
+BasicInfo:
+  Title                   : TVCat Companion
+  ProductCode             : CTR-P-TVCT
+
+TitleInfo:
+  Category                : Application
+  UniqueId                : 0xff3ff
+
+Option:
+  UseOnSD                 : true
+  FreeProductCode         : true
+  EnableCrypt             : false
+  EnableCompress          : true

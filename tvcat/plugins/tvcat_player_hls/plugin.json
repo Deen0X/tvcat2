@@ -1,0 +1,341 @@
+{
+    "name":  "tvcat_player_hls",
+    "version":  "1.0.11",
+    "type":  "player",
+    "displayName":  "Player HLS",
+    "description":  "Reproductor basado en HLS nativo para SmartTVs antiguas (Tizen 2.4 / WebKit 538.1). Resuelve el seek en dispositivos que no soportan Range requests progresivos. Requiere que el servidor tenga ffmpeg instalado.",
+    "icon":  "static/plugin_icon.png",
+    "iconEmoji":  "Ã°Å¸â€œÂ¡",
+    "defaultEnabled":  true,
+    "action_category":  "playback",
+    "single_button":  true,
+    "priority":  3,
+    "js":  [
+               "hls.min.js?v=20260935z21",
+               "player_hls.js?v=20260935"
+           ],
+    "css":  [
+
+            ],
+    "applies_to":  [
+                       "media",
+                       "series",
+                       "video"
+                   ],
+    "settings_schema":  [
+                            {
+                                "id":  "force_hls",
+                                "label":  "Forzar HLS en todos los dispositivos",
+                                "type":  "checkbox",
+                                "default":  false,
+                                "description":  "Activa este reproductor en todos los dispositivos, no solo en SmartTVs antiguas. Util para pruebas."
+                            },
+                            {
+                                "id":  "prefetch_ahead",
+                                "label":  "Prefetch (segmentos por delante)",
+                                "type":  "select",
+                                "default":  2,
+                                "options":  [
+                                                {
+                                                    "value":  0,
+                                                    "label":  "0 - Sin precarga"
+                                                },
+                                                {
+                                                    "value":  1,
+                                                    "label":  "1 - Precarga 1 segmento"
+                                                },
+                                                {
+                                                    "value":  2,
+                                                    "label":  "2 - Precarga 2 segmentos"
+                                                },
+                                                {
+                                                    "value":  3,
+                                                    "label":  "3 - Precarga 3 segmentos"
+                                                },
+                                                {
+                                                    "value":  4,
+                                                    "label":  "4 - Precarga 4 segmentos"
+                                                },
+                                                {
+                                                    "value":  5,
+                                                    "label":  "5 - Precarga 5 segmentos"
+                                                }
+                                            ],
+                                "description":  "NÃƒÂºmero de segmentos que se descargan y procesan por delante para evitar cortes."
+                            },
+                            {
+                                "id":  "prio1_audio",
+                                "label":  "Prioridad 1 - Audio",
+                                "type":  "select",
+                                "default":  "spa",
+                                "options":  [
+                                                {
+                                                    "value":  "spa",
+                                                    "label":  "EspaÃƒÂ±ol"
+                                                },
+                                                {
+                                                    "value":  "eng",
+                                                    "label":  "InglÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "jpn",
+                                                    "label":  "JaponÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "kor",
+                                                    "label":  "Coreano"
+                                                },
+                                                {
+                                                    "value":  "zho",
+                                                    "label":  "Chino"
+                                                },
+                                                {
+                                                    "value":  "fra",
+                                                    "label":  "FrancÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "deu",
+                                                    "label":  "AlemÃƒÂ¡n"
+                                                },
+                                                {
+                                                    "value":  "ita",
+                                                    "label":  "Italiano"
+                                                },
+                                                {
+                                                    "value":  "por",
+                                                    "label":  "PortuguÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "und",
+                                                    "label":  "Original / Por defecto"
+                                                }
+                                            ]
+                            },
+                            {
+                                "id":  "prio1_subs",
+                                "label":  "Prioridad 1 - SubtÃƒÂ­tulos",
+                                "type":  "select",
+                                "default":  "spa",
+                                "options":  [
+                                                {
+                                                    "value":  "spa",
+                                                    "label":  "EspaÃƒÂ±ol"
+                                                },
+                                                {
+                                                    "value":  "eng",
+                                                    "label":  "InglÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "jpn",
+                                                    "label":  "JaponÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "kor",
+                                                    "label":  "Coreano"
+                                                },
+                                                {
+                                                    "value":  "fra",
+                                                    "label":  "FrancÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "none",
+                                                    "label":  "Desactivado"
+                                                }
+                                            ]
+                            },
+                            {
+                                "id":  "prio2_audio",
+                                "label":  "Prioridad 2 - Audio (fallback)",
+                                "type":  "select",
+                                "default":  "eng",
+                                "options":  [
+                                                {
+                                                    "value":  "spa",
+                                                    "label":  "EspaÃƒÂ±ol"
+                                                },
+                                                {
+                                                    "value":  "eng",
+                                                    "label":  "InglÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "jpn",
+                                                    "label":  "JaponÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "kor",
+                                                    "label":  "Coreano"
+                                                },
+                                                {
+                                                    "value":  "zho",
+                                                    "label":  "Chino"
+                                                },
+                                                {
+                                                    "value":  "fra",
+                                                    "label":  "FrancÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "deu",
+                                                    "label":  "AlemÃƒÂ¡n"
+                                                },
+                                                {
+                                                    "value":  "ita",
+                                                    "label":  "Italiano"
+                                                },
+                                                {
+                                                    "value":  "por",
+                                                    "label":  "PortuguÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "und",
+                                                    "label":  "Original / Por defecto"
+                                                },
+                                                {
+                                                    "value":  "none",
+                                                    "label":  "Sin fallback"
+                                                }
+                                            ]
+                            },
+                            {
+                                "id":  "prio2_subs",
+                                "label":  "Prioridad 2 - SubtÃƒÂ­tulos (fallback)",
+                                "type":  "select",
+                                "default":  "none",
+                                "options":  [
+                                                {
+                                                    "value":  "spa",
+                                                    "label":  "EspaÃƒÂ±ol"
+                                                },
+                                                {
+                                                    "value":  "eng",
+                                                    "label":  "InglÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "jpn",
+                                                    "label":  "JaponÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "kor",
+                                                    "label":  "Coreano"
+                                                },
+                                                {
+                                                    "value":  "fra",
+                                                    "label":  "FrancÃƒÂ©s"
+                                                },
+                                                {
+                                                    "value":  "none",
+                                                    "label":  "Desactivado"
+                                                }
+                                            ]
+                            },
+                            {
+                                "id":  "sub_font_size",
+                                "label":  "TamaÃƒÂ±o fuente subtÃƒÂ­tulos (px)",
+                                "type":  "number",
+                                "default":  20
+                            },
+                            {
+                                "id":  "sub_color",
+                                "label":  "Color fuente",
+                                "type":  "select",
+                                "default":  "#FFFF00",
+                                "options":  [
+                                                {
+                                                    "value":  "#FFFFFF",
+                                                    "label":  "Blanco"
+                                                },
+                                                {
+                                                    "value":  "#FFFF00",
+                                                    "label":  "Amarillo"
+                                                },
+                                                {
+                                                    "value":  "#00FFFF",
+                                                    "label":  "Cian"
+                                                },
+                                                {
+                                                    "value":  "#FF0000",
+                                                    "label":  "Rojo"
+                                                }
+                                            ]
+                            },
+                            {
+                                "id":  "sub_outline_color",
+                                "label":  "Color borde",
+                                "type":  "select",
+                                "default":  "#000000",
+                                "options":  [
+                                                {
+                                                    "value":  "#000000",
+                                                    "label":  "Negro"
+                                                },
+                                                {
+                                                    "value":  "#FFFFFF",
+                                                    "label":  "Blanco"
+                                                },
+                                                {
+                                                    "value":  "#FF0000",
+                                                    "label":  "Rojo"
+                                                },
+                                                {
+                                                    "value":  "#0000FF",
+                                                    "label":  "Azul"
+                                                }
+                                            ]
+                            },
+                            {
+                                "id":  "sub_bg_color",
+                                "label":  "Color fondo",
+                                "type":  "select",
+                                "default":  "#000000",
+                                "options":  [
+                                                {
+                                                    "value":  "#000000",
+                                                    "label":  "Negro"
+                                                },
+                                                {
+                                                    "value":  "#333333",
+                                                    "label":  "Gris oscuro"
+                                                },
+                                                {
+                                                    "value":  "transparent",
+                                                    "label":  "Transparente"
+                                                }
+                                            ]
+                            },
+                            {
+                                "id":  "sub_bg_alpha",
+                                "label":  "Transparencia fondo (0-100)",
+                                "type":  "number",
+                                "default":  70
+                            },
+                            {
+                                "id":  "custom_controls_timeout",
+                                "label":  "Timeout controles custom (s) - Pantalla",
+                                "type":  "select",
+                                "default":  3.5,
+                                "options":  [
+                                                {
+                                                    "value":  2,
+                                                    "label":  "2s"
+                                                },
+                                                {
+                                                    "value":  3.5,
+                                                    "label":  "3.5s"
+                                                },
+                                                {
+                                                    "value":  5,
+                                                    "label":  "5s"
+                                                },
+                                                {
+                                                    "value":  8,
+                                                    "label":  "8s"
+                                                }
+                                            ]
+                            }
+                        ],
+    "has_interface":  false,
+    "access":  {
+                   "admin":  true,
+                   "user":  true,
+                   "child":  true
+               }
+}

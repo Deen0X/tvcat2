@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>TVCat Player</title>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{background:#000;overflow:hidden;height:100vh}
+        video{position:absolute;top:0;left:0;width:100%;height:100%;background:#000;display:block}
+        #close{position:absolute;top:10px;right:10px;z-index:10;background:#333;border:none;color:#fff;font-size:18px;padding:8px 12px;border-radius:6px;cursor:pointer}
+        #error{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#e50914;text-align:center;padding:40px;font-family:Arial,sans-serif;font-size:18px}
+    </style>
+</head>
+<body>
+    <button id="close" onclick="window.history.back()">✕ Cerrar</button>
+    <video id="v" controls width="100%" height="100%"></video>
+    <div id="error"></div>
+    <script>
+        (function() {
+            var params = {};
+            var query = window.location.search.substring(1);
+            if (query) {
+                var pairs = query.split('&');
+                for (var i = 0; i < pairs.length; i++) {
+                    var eq = pairs[i].indexOf('=');
+                    if (eq > 0) {
+                        var k = decodeURIComponent(pairs[i].substring(0, eq));
+                        var val = decodeURIComponent(pairs[i].substring(eq + 1));
+                        params[k] = val;
+                    }
+                }
+            }
+
+            var src = params.src;
+            var v = document.getElementById('v');
+
+            if (!src) {
+                var chat_id = params.chat_id;
+                var msg_id = params.msg_id;
+                if (chat_id && msg_id) {
+                    src = '/api/stream/direct?chat_id=' + encodeURIComponent(chat_id) + '&msg_id=' + encodeURIComponent(msg_id);
+                }
+            }
+
+            if (!src) {
+                var err = document.getElementById('error');
+                err.style.display = 'block';
+                err.innerHTML = 'Falta el par\u00e1metro src o chat_id/msg_id en la URL.';
+                return;
+            }
+
+            v.src = src;
+            v.addEventListener('loadedmetadata', function() {
+                try { v.play(); } catch(e) {}
+            });
+            v.addEventListener('ended', function() {
+                window.history.back();
+            });
+        })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TVCat 2 - Iniciar Sesión</title>
+    <link rel="icon" type="image/png" href="TVCatLogo128x128.png">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background-color: #09090b;
+            color: #f4f4f5;
+            font-family: 'Segoe UI', system-ui, Arial, sans-serif;
+            min-height: 100vh;
+            overflow: hidden;
+            position: relative;
+        }
+        /* Background decorative blurs */
+        body::before {
+            content: '';
+            position: absolute;
+            width: 300px;
+            height: 300px;
+            background: radial-gradient(circle, rgba(225, 29, 72, 0.15) 0%, transparent 70%);
+            top: 10%;
+            left: 10%;
+            z-index: 0;
+        }
+        body::after {
+            content: '';
+            position: absolute;
+            width: 400px;
+            height: 400px;
+            background: radial-gradient(circle, rgba(225, 29, 72, 0.1) 0%, transparent 70%);
+            bottom: 10%;
+            right: 10%;
+            z-index: 0;
+        }
+        /* Login card - centered absolutely (compatible with old TVs) */
+        .login-card {
+            background-color: #18181b;
+            border: 1px solid #27272a;
+            padding: 40px;
+            border-radius: 16px;
+            width: 90%;
+            max-width: 400px;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            -webkit-transform: translate(-50%, -50%);
+            -ms-transform: translate(-50%, -50%);
+            transform: translate(-50%, -50%);
+            z-index: 10;
+        }
+        .logo-img {
+            width: 72px;
+            height: 72px;
+            object-fit: contain;
+            margin-bottom: 12px;
+            border-radius: 12px;
+        }
+        .logo {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 5px;
+            color: #f4f4f5;
+        }
+        .logo span { color: #e11d48; }
+        .subtitle {
+            color: #a1a1aa;
+            font-size: 0.9rem;
+            margin-bottom: 30px;
+        }
+        .input-group {
+            margin-bottom: 18px;
+            text-align: left;
+        }
+        label {
+            display: block;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #a1a1aa;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            padding: 12px 16px;
+            background-color: #09090b;
+            border: 1px solid #27272a;
+            border-radius: 8px;
+            color: #f4f4f5;
+            font-size: 0.95rem;
+        }
+        input[type="text"]:focus, input[type="password"]:focus {
+            outline: none;
+            border-color: #e11d48;
+        }
+        .btn-submit {
+            width: 100%;
+            padding: 14px;
+            background-color: #e11d48;
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn-submit:hover { background-color: #be123c; }
+        #error-msg {
+            color: #ff3344;
+            font-size: 0.85rem;
+            margin-top: 15px;
+            min-height: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div id="logo-area" onclick="toggleQrArea()" style="cursor:pointer;position:relative;">
+            <div id="logo-view">
+                <img src="TVCatLogo128x128.png" alt="TVCat" class="logo-img">
+                <h1 class="logo"><span>TV</span>Cat 2</h1>
+                <p class="subtitle">Inicia sesión en el Servidor de Catálogo</p>
+            </div>
+            <div id="logo-qr-view" style="display:none;padding:6px 0 12px 0;">
+                <img src="TVCatLogo128x128.png" alt="TVCat" class="logo-img" style="width:44px;height:44px;">
+                <div id="logo-qr-content" style="min-height:180px;display:flex;align-items:center;justify-content:center;flex-direction:column;">
+                    <span style="color:#71717a;font-size:0.8rem;">Pulsa el QR para volver al logo</span>
+                </div>
+            </div>
+            <div id="qr-corner-icon" title="Entrar con c&oacute;digo QR" style="position:absolute;top:8px;right:8px;width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:#a1a1aa;display:flex;align-items:center;justify-content:center;font-size:1.1rem;cursor:pointer;">▦</div>
+        </div>
+
+        <form id="login-form" onsubmit="submitLogin(event)">
+            <div class="input-group">
+                <label for="username">Usuario</label>
+                <input type="text" id="username" placeholder="Tu usuario..." required autocomplete="username">
+            </div>
+            <div class="input-group">
+                <label for="password">Contraseña</label>
+                <input type="password" id="password" placeholder="Tu contraseña..." required autocomplete="current-password">
+            </div>
+            <button type="submit" class="btn-submit">🔒 Iniciar Sesión</button>
+            <div id="error-msg"></div>
+        </form>
+
+        <div id="google-login-wrap" style="display:none;margin-top:14px;">
+            <div style="display:flex;align-items:center;gap:10px;margin:8px 0;">
+                <div style="flex:1;height:1px;background:#27272a;"></div>
+                <span style="color:#71717a;font-size:0.75rem;">o</span>
+                <div style="flex:1;height:1px;background:#27272a;"></div>
+            </div>
+            <button id="google-login-btn" onclick="window.location.href='/api/auth/google/start?action=login'" style="width:100%;padding:12px;background:#0d0d0f;border:1px solid #3f3f46;border-radius:8px;color:#f4f4f5;font-size:0.95rem;font-weight:600;cursor:pointer;">G Entrar con Google</button>
+            <div id="google-device" style="display:none;margin-top:12px;background:#0d0d0f;border:1px solid #3f3f46;border-radius:8px;padding:14px;font-size:0.85rem;color:#d4d4d8;text-align:left;"></div>
+        </div>
+    </div>
+
+    <script>
+        // QR auto-login: si viene ?t=TOKEN, intentar login autom\u00e1tico
+        (function() {
+            var m = location.search.match(/[?&]t=([A-Za-z0-9]+)/);
+            if (!m) return;
+            var token = m[1];
+            if (token.length < 4) return;
+            var errEl = document.getElementById('error-msg');
+            if (errEl) { errEl.textContent = 'Iniciando sesi\u00f3n v\u00eda QR...'; errEl.style.color = '#a1a1aa'; }
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/auth/qr-login', true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        try {
+                            var res = JSON.parse(xhr.responseText);
+                            if (res.success) {
+                                window.location.href = '/';
+                                return;
+                            }
+                        } catch(e) {}
+                    }
+                    if (errEl) { errEl.textContent = 'QR caducado o inv\u00e1lido. Inicia sesi\u00f3n manualmente.'; errEl.style.color = '#ff3344'; }
+                }
+            };
+            xhr.send(JSON.stringify({ token: token }));
+        })();
+    </script>
+    <script>
+        // Si venimos con ?auth={request_id}, es una TV autorizando login vía QR desde el móvil
+        var QR_REQUEST_ID = '';
+        (function() {
+            var m = location.search.match(/[?&]auth=([A-Za-z0-9_-]+)/);
+            if (m) QR_REQUEST_ID = m[1];
+        })();
+
+        function submitLogin(event) {
+            event.preventDefault();
+            var userEl = document.getElementById('username');
+            var passEl = document.getElementById('password');
+            var errEl = document.getElementById('error-msg');
+            var username = userEl.value.trim();
+            var password = passEl.value.trim();
+
+            if (!username || !password) {
+                errEl.textContent = 'Introduce usuario y contraseña';
+                return;
+            }
+
+            errEl.style.color = '#a1a1aa';
+            errEl.textContent = QR_REQUEST_ID ? 'Autorizando dispositivo...' : 'Iniciando sesi\u00f3n...';
+
+            var xhr = new XMLHttpRequest();
+            if (QR_REQUEST_ID) {
+                // Modo QR: validar credenciales y autorizar el dispositivo que mostró el QR
+                xhr.open('POST', '/api/auth/qr/authorize', true);
+            } else {
+                xhr.open('POST', '/api/auth/login', true);
+            }
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    try {
+                        var res = JSON.parse(xhr.responseText);
+                        if (xhr.status === 200 && res.success) {
+                            if (QR_REQUEST_ID) {
+                                errEl.style.color = '#22c55e';
+                                errEl.textContent = 'Dispositivo autorizado. Puedes cerrar esta p\u00e1gina.';
+                            } else {
+                                if (res.token) {
+                                    try { localStorage.setItem('tvcat_token', res.token); } catch(e) {}
+                                }
+                                window.location.href = '/?t=' + encodeURIComponent(res.token || '');
+                            }
+                        } else {
+                            errEl.style.color = '#ff3344';
+                            errEl.textContent = res.detail || 'Usuario o contrase\u00f1a incorrectos';
+                        }
+                    } catch(e) {
+                        errEl.style.color = '#ff3344';
+                        errEl.textContent = 'Error de conexi\u00f3n con el servidor';
+                    }
+                }
+            };
+            var payload = QR_REQUEST_ID
+                ? { request_id: QR_REQUEST_ID, username: username, password: password }
+                : { username: username, password: password };
+            xhr.send(JSON.stringify(payload));
+        }
+
+        // ─── Login QR (Diseño A): la TV genera QR, el móvil lo escanea y autoriza ───
+        var _qrTimer = null;
+        function toggleQrArea() {
+            var logoView = document.getElementById('logo-view');
+            var qrView = document.getElementById('logo-qr-view');
+            if (QR_REQUEST_ID) return; // en modo autorización no alternar
+            if (qrView.style.display === 'none') {
+                // Mostrar QR
+                logoView.style.display = 'none';
+                qrView.style.display = 'block';
+                startQrArea();
+            } else {
+                // Volver al logo (detener polling)
+                if (_qrTimer) { clearInterval(_qrTimer); _qrTimer = null; }
+                logoView.style.display = 'block';
+                qrView.style.display = 'none';
+            }
+        }
+
+        function startQrArea() {
+            var content = document.getElementById('logo-qr-content');
+            content.innerHTML = '<span style="color:#71717a;font-size:0.8rem;">Generando c\u00f3digo...</span>';
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/auth/qr/request', true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    try {
+                        var res = JSON.parse(xhr.responseText);
+                        if (res && res.request_id) {
+                            var base = location.origin;
+                            var authUrl = base + '/login?auth=' + res.request_id;
+                            content.innerHTML = '<div style="font-size:0.75rem;color:#a1a1aa;margin-bottom:6px;">Escanea con el m\u00f3vil</div>' +
+                                '<img src="/api/qr?data=' + encodeURIComponent(authUrl) + '&size=6" style="max-width:170px;border-radius:8px;margin:4px auto;display:block;" alt="QR">' +
+                                '<div style="color:#71717a;font-size:0.7rem;margin-top:8px;">Esperando autorizaci\u00f3n...</div>' +
+                                '<div style="color:#71717a;font-size:0.65rem;margin-top:2px;">Pulsa el QR para volver al logo</div>';
+                            pollQrArea(res.request_id);
+                        } else {
+                            content.innerHTML = '<span style="color:#ff3344;font-size:0.8rem;">Error generando el QR</span>';
+                        }
+                    } catch(e) {
+                        content.innerHTML = '<span style="color:#ff3344;font-size:0.8rem;">Error de conexi\u00f3n</span>';
+                    }
+                }
+            };
+            xhr.send();
+        }
+
+        function pollQrArea(requestId) {
+            var tries = 0;
+            _qrTimer = setInterval(function() {
+                tries++;
+                if (tries > 120) {
+                    clearInterval(_qrTimer); _qrTimer = null;
+                    var c = document.getElementById('logo-qr-content');
+                    if (c) c.innerHTML = '<span style="color:#ff3344;font-size:0.8rem;">Tiempo agotado. Pulsa para reintentar.</span>';
+                    return;
+                }
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', '/api/auth/qr/device?request_id=' + encodeURIComponent(requestId), true);
+                xhr.onreadystatechange = function() {
+                    if (xhr.readyState === 4) {
+                        if (xhr.status === 200) {
+                            clearInterval(_qrTimer); _qrTimer = null;
+                            var c = document.getElementById('logo-qr-content');
+                            if (c) c.innerHTML = '<span style="color:#22c55e;font-size:0.8rem;">Sesi\u00f3n iniciada. Redirigiendo...</span>';
+                            setTimeout(function() { window.location.href = '/'; }, 800);
+                        } else if (xhr.status === 401) {
+                            // Todavía no autorizado: seguir esperando
+                        } else {
+                            clearInterval(_qrTimer); _qrTimer = null;
+                            var c = document.getElementById('logo-qr-content');
+                            if (c) c.innerHTML = '<span style="color:#ff3344;font-size:0.8rem;">Error al verificar</span>';
+                        }
+                    }
+                };
+                xhr.send();
+            }, 3000);
+        }
+
+        // En modo autorización (?auth=): el form debe indicarlo, no hay toggle de QR
+        if (QR_REQUEST_ID) {
+            var subEl = document.querySelector('.subtitle');
+            if (subEl) subEl.innerHTML = 'Autorizando este dispositivo.<br>Introduce tus credenciales para completar el acceso.';
+            document.getElementById('login-form').style.display = 'block';
+        }
+    </script>
+    <script>
+        // ─── Login con Google (redirect directo a la pantalla de selección de cuenta) ───
+        function checkGoogleConfig() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/api/auth/google/config', true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    try {
+                        var res = JSON.parse(xhr.responseText);
+                        if (res && res.enabled) {
+                            document.getElementById('google-login-wrap').style.display = 'block';
+                        }
+                    } catch(e) {}
+                }
+            };
+            xhr.send();
+        }
+
+        // Mostrar errores devueltos por el callback de Google (?g_error=)
+        (function() {
+            var m = location.search.match(/[?&]g_error=([^&]*)/);
+            if (m) {
+                try {
+                    var msg = decodeURIComponent(m[1]).replace(/\+/g, ' ');
+                    var errEl = document.getElementById('error-msg');
+                    if (errEl) {
+                        errEl.style.color = '#ff3344';
+                        errEl.textContent = 'Login con Google: ' + msg;
+                    }
+                } catch(e) {}
+            }
+        })();
+
+        checkGoogleConfig();
+    </script>
+</body>
+</html>

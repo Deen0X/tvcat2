@@ -1,0 +1,21 @@
+{
+  "default_template": "{ftagtitle}{ftitle}{fepisodes}{fyear}{frating}{frating_count}{fcategory}{fgenres}{fsinopsis}",
+  "ftags": {
+    "tagtitle": "{value}",
+    "title": "Title: {value}",
+    "year": "Year: {value}",
+    "rating": "Rating: {value}",
+    "rating_count": "Rating count: {value}",
+    "genres": "Genres: {value}",
+    "themes": "Themes: {value}",
+    "author": "Author: {value}",
+    "release_date": "Release date: {value}",
+    "category": "Category: {value}",
+    "id": "ID: {value}",
+    "cover": "Cover: {value}",
+    "episodes": "Episodes: {value}",
+    "description": "\nDescription:\n{value}",
+    "sinopsis": "\nSinopsis:\n{value}",
+    "overview": "\nOverview:\n{value}"
+  }
+}

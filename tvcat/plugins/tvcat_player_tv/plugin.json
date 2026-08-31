@@ -1,0 +1,32 @@
+{
+  "name": "tvcat_player_tv",
+  "version": "1.0.0",
+  "type": "player",
+  "displayName": "Reproductor TVCat TV",
+  "description": "Copia del reproductor normal con fix del video plane HW para Smart TVs Tizen (vídeo negro con audio). Aplica applyTizenPlaneFix + fullscreen nativo del video en SmartTVs; comportamiento idéntico al reproductor normal en el resto de dispositivos.",
+  "icon": "📺",
+  "defaultEnabled": true,
+  "action_category": "playback",
+  "single_button": true,
+  "priority": 9,
+  "js": ["player.js"],
+  "css": [],
+  "applies_to": ["media", "series", "video"],
+  "settings_schema": [
+    {
+      "id": "mode",
+      "label": "Modo de reproducción",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        {"value": "auto", "label": "Auto (detección automática según el dispositivo)"},
+        {"value": "plyr", "label": "Plyr (controles modernos)"},
+        {"value": "native", "label": "Nativo (reproductor HTML5 del navegador)"},
+        {"value": "basic", "label": "Básico (modo mínimo para Smart TVs antiguas)"}
+      ],
+      "description": "Selecciona el tipo de reproductor. Auto elige Plyr si está disponible, Nativo en Smart TVs, o Básico en dispositivos muy antiguos."
+    }
+  ],
+  "has_interface": false,
+  "access": { "admin": true, "user": true, "child": true }
+}

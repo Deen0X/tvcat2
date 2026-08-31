@@ -1,0 +1,21 @@
+{
+  "delay_seconds": 3.0,
+  "resume_on_startup": false,
+  "credential_name": "",
+  "upload_threads": 16,
+  "download_chunk_size_kb": 1024,
+  "real_copy_if_owner": true,
+  "real_copy_rest": false,
+  "normalize_mp4": true,
+  "streaming_mkv": true,
+  "pyro_workers": 16,
+  "download_threads": 8,
+  "extract_archives": true,
+  "archive_passwords": [],
+  "seven_zip_path": "",
+  "unrar_path": "",
+  "archive_parallel": true,
+  "max_pending_archives": 5,
+  "default_audio_lang": "",
+  "default_sub_lang": ""
+}

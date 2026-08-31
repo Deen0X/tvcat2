@@ -1,0 +1,25 @@
+{
+  "name": "tvcat_grid_blur",
+  "version": "1.0.0",
+  "type": "grid-decorator",
+  "displayName": "Efecto Blur",
+  "description": "Aplica un efecto de desenfoque (blur) a las carátulas para capturas de pantalla sin títulos visibles.",
+  "icon": "static/plugin_icon.png",
+  "iconEmoji": "\ud83c\udf2b\ufe0f",
+  "defaultEnabled": false,
+  "priority": 50,
+  "js": ["grid_blur.js"],
+  "css": [],
+  "has_interface": false,
+  "tray": [
+    {
+      "id": "blur",
+      "label": "Efecto Blur",
+      "icon": "static/plugin_button.png",
+      "iconEmoji": "\ud83c\udf2b\ufe0f",
+      "color": "#a855f7",
+      "action": "toggle-plugin"
+    }
+  ],
+  "access": { "admin": true, "user": true, "child": false }
+}

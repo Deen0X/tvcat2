@@ -1,0 +1,24 @@
+{
+  "name": "tvcat_tgindex",
+  "version": "3.0.0",
+  "type": "source",
+  "displayName": "TGIndex (Telegram Index)",
+  "description": "Escanea e indexa tus canales de Telegram privados como una biblioteca multimedia personal.",
+  "icon": "📡",
+  "defaultEnabled": false,
+  "item_id_prefix": "USER-",
+  "api_prefix": "",
+  "priority": 10,
+  "js": [],
+  "css": [],
+  "settings_schema": [],
+  "settings_ui": "",
+  "has_interface": false,
+  "interface_icon": "",
+  "applies_to": ["media", "series", "comic", "aplicaciones", "juegos"],
+  "access": {
+    "admin": true,
+    "user": true,
+    "child": false
+  }
+}

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>TVCat Instalador 3DS — Configuración</title>
+<style>
+    body { background:#0d0d0f; color:#f4f4f5; font-family:'Segoe UI',system-ui,Arial,sans-serif; margin:0; padding:16px; font-size:14px; }
+    h3 { margin:0 0 12px; color:#f4f4f5; }
+    .card { background:#18181b; border:1px solid #27272a; border-radius:8px; padding:12px; margin-bottom:12px; }
+    .btn { background:#e11d48; border:none; color:#fff; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:13px; }
+    .btn2 { background:#27272a; border:1px solid #3f3f46; color:#fff; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:12px; }
+    .muted { color:#a1a1aa; font-size:12px; }
+    .code { font-family:monospace; font-size:1.6rem; font-weight:bold; letter-spacing:0.3em; color:#f4f4f5; }
+    .row { display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid #1f1f22; }
+    .led { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+    .name { flex:1; font-weight:600; }
+    .peer-img { width:28px; height:28px; border-radius:50%; object-fit:cover; flex-shrink:0; }
+</style>
+</head>
+<body>
+<h3>Instalador 3DS</h3>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Instalar el companion en la 3DS</b></div>
+    <div class="muted" style="margin-bottom:8px;">Escanea el QR con FBI (Remote Install) o descarga el fichero y c&oacute;pialo a <code>sdmc:/3ds/tvcat_companion/</code>. Si es un .3dsx, ejec&uacute;talo desde el Homebrew Launcher (Luma).</div>
+    <div style="text-align:center;"><img id="cia-qr" src="" style="max-width:150px;border-radius:8px;background:#fff;padding:4px;" alt="QR CIA"></div>
+    <div class="muted" id="cia-status" style="margin-top:6px;"></div>
+</div>
+
+<div class="card" style="text-align:center;">
+    <div style="margin-bottom:8px;"><b>Emparejar una consola</b></div>
+    <div style="margin:10px 0;"><img id="pair-qr" src="" style="max-width:180px;border-radius:8px;background:#fff;padding:6px;" alt="QR"></div>
+    <div class="code" id="pair-code">...</div>
+    <div class="muted" style="margin:4px 0 8px;">Introduce este c&oacute;digo en el companion (o escanea el QR)</div>
+    <div class="muted" id="pair-url" style="margin-bottom:10px;word-break:break-all;"></div>
+    <button class="btn" onclick="generatePair()">Generar nuevo c&oacute;digo</button>
+    <div id="pair-status" class="muted" style="margin-top:6px;"></div>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Consolas emparejadas</b></div>
+    <div id="consoles-list"><span class="muted">Cargando...</span></div>
+</div>
+
+<script>
+var API = '/api/installer/3ds';
+var COLORS = ['transparent', '#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899', '#84cc16'];
+
+function api(url, opts, cb) {
+    opts = opts || {};
+    var xhr = new XMLHttpRequest();
+    xhr.open(opts.method || 'GET', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() { var b = {}; try { b = JSON.parse(xhr.responseText || '{}'); } catch(e) {} if (cb) cb(b, xhr.status); };
+    xhr.onerror = function() { if (cb) cb({}, 0); };
+    xhr.send(opts.data ? JSON.stringify(opts.data) : null);
+}
+
+function generatePair() {
+    api(API + '/pair', {}, function(res) {
+        var st = document.getElementById('pair-status');
+        if (res && res.token) {
+            document.getElementById('pair-code').textContent = res.token;
+            var urlEl = document.getElementById('pair-url');
+            urlEl.textContent = res.short_url || res.pair_url || '';
+            var qrData = res.short_url || res.qr || res.pair_url || '';
+            document.getElementById('pair-qr').src = '/api/qr?data=' + encodeURIComponent(qrData);
+            if (st) st.textContent = 'C\u00f3digo generado. Escanea el QR o introduce el c\u00f3digo en el companion.';
+        } else {
+            if (st) st.textContent = 'Error: ' + (res.detail || 'no autorizado');
+        }
+    });
+}
+
+function loadCiaQr() {
+    var qr = document.getElementById('cia-qr');
+    var st = document.getElementById('cia-status');
+    if (!qr) return;
+    var ciaUrl = location.origin + '/api/installer/3ds/companion.cia';
+    qr.src = '/api/qr?data=' + encodeURIComponent(ciaUrl);
+    if (st) st.textContent = 'FBI Remote Install no compatible con este servidor. Descarga el .cia y usa FBI \u2192 Install CIA desde SD.';
+}
+
+function ledClass(status, state) {
+    if (status === 'offline') return '#52525b';
+    if (state === 'downloading') return '#eab308';
+    return '#22c55e';
+}
+
+function refresh() {
+    api(API + '/consoles', {}, function(res) {
+        var list = document.getElementById('consoles-list');
+        var consoles = (res && res.consoles) || [];
+        if (consoles.length === 0) { list.innerHTML = '<span class="muted">Ninguna consola 3DS emparejada.</span>'; return; }
+        var html = '';
+        for (var i = 0; i < consoles.length; i++) {
+            var c = consoles[i];
+            var color = COLORS[i % COLORS.length];
+            var bg = color === 'transparent' ? 'background:#27272a;' : ('background:' + color + ';');
+            var led = '<span class="led" style="background:' + ledClass(c.status, c.state) + ';"></span>';
+            var img = '<span class="peer-img" style="' + bg + 'display:inline-block;text-align:center;line-height:28px;color:#fff;font-weight:700;">' + (c.name || '?').charAt(0).toUpperCase() + '</span>';
+            var speed = c.speed_bps > 0 ? (c.speed_bps / 1048576).toFixed(1) + ' MB/s' : '-';
+            html += '<div class="row">' + led + img +
+                '<span class="name" id="cname-' + c.id + '" onclick="editConsole(\'' + c.id + '\')" title="Clic para editar nombre">' + c.name + '</span>' +
+                (c.console_name ? '<span class="muted">' + c.console_name + '</span>' : '') +
+                '<button class="btn2" onclick="editConsole(\'' + c.id + '\')">Editar</button>' +
+                '<button class="btn2" onclick="delConsole(\'' + c.id + '\')">Borrar</button>' +
+                '</div>' +
+                '<div class="muted" style="padding:0 0 6px 0;">' + c.state + ' | ' + Math.round(c.progress * 100) + '% | ' + speed + ' | cola:' + c.queued + '</div>';
+        }
+        list.innerHTML = html;
+    });
+}
+
+function editConsole(cid) {
+    var el = document.getElementById('cname-' + cid);
+    var current = el ? el.textContent : '';
+    var newName = prompt('Nombre de la consola:', current);
+    if (newName === null || !newName.trim()) return;
+    api(API + '/consoles/' + cid, { method: 'PATCH', data: { name: newName.trim() } }, function() { refresh(); });
+}
+
+function delConsole(cid) {
+    if (!confirm('\u00bfBorrar esta consola?')) return;
+    api(API + '/consoles/' + cid, { method: 'DELETE' }, function() { refresh(); });
+}
+
+generatePair();
+loadCiaQr();
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

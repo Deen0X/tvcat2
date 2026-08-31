@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TGHirayi — Configuraci&oacute;n</title>
+<style>
+    body { background:#0d0d0f; color:#f4f4f5; font-family:'Segoe UI',system-ui,Arial,sans-serif; margin:0; padding:16px; font-size:14px; }
+    h3 { margin:0 0 12px; color:#f4f4f5; }
+    .card { background:#18181b; border:1px solid #27272a; border-radius:8px; padding:12px; margin-bottom:12px; }
+    .btn { background:#22c55e; border:none; color:#fff; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:13px; }
+    .btn2 { background:#27272a; border:1px solid #3f3f46; color:#fff; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:12px; }
+    .btn-del { background:#27272a; border:1px solid #ef4444; color:#ef4444; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:12px; }
+    .muted { color:#a1a1aa; font-size:12px; }
+    .row { display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid #1f1f22; }
+    label { display:flex; align-items:center; gap:8px; margin:4px 0; }
+    select, input { background:#27272a; border:1px solid #3f3f46; color:#f4f4f5; border-radius:4px; padding:6px 8px; font-size:13px; width:100%; box-sizing:border-box; }
+    input[type="checkbox"] { width:auto; accent-color:#22c55e; }
+    .tag { display:inline-block; background:#27272a; border-radius:4px; padding:2px 8px; font-size:11px; color:#a1a1aa; }
+    .info-row { display:flex; gap:6px; flex-wrap:wrap; margin:4px 0; }
+    .info-badge { background:#1f1f22; border:1px solid #2a2a2e; border-radius:4px; padding:3px 8px; font-size:11px; color:#a1a1aa; font-family:monospace; }
+</style>
+</head>
+<body>
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+    <button onclick="cerrarConfig()" style="background:none;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:16px;line-height:1;">&times;</button>
+    <h3 style="margin:0;flex:1;">TGHirayi</h3>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Credencial de Telegram</b></div>
+    <div class="muted" style="margin-bottom:6px;">Selecciona la cuenta de Telegram para descargar y subir contenidos.</div>
+    <select id="credential-select"></select>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Delay entre llamadas API</b></div>
+    <div class="muted" style="margin-bottom:6px;">Tiempo de espera entre cada operaci&oacute;n en la API de Telegram para evitar FloodWait.</div>
+    <select id="delay-select">
+        <option value="0.5">0.5 segundos</option>
+        <option value="1">1 segundo</option>
+        <option value="1.5">1.5 segundos</option>
+        <option value="2">2 segundos</option>
+        <option value="2.5">2.5 segundos</option>
+        <option value="3" selected>3 segundos</option>
+        <option value="4">4 segundos</option>
+        <option value="5">5 segundos</option>
+    </select>
+</div>
+
+<div class="card">
+    <label>
+        <input type="checkbox" id="resume-startup">
+        <span>Reiniciar cola al iniciar TVCat</span>
+    </label>
+    <div class="muted" style="margin-top:4px;">Si est&aacute; activo, el worker se reanudar&aacute; autom&aacute;ticamente al arrancar el servidor.</div>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Hilos de descarga (Telethon)</b></div>
+    <div class="muted" style="margin-bottom:6px;">Conexiones TCP paralelas para descargar archivos grandes (1-16). Solo afecta a ficheros de m&aacute;s de 20MB.</div>
+    <select id="download-threads-select">
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="4">4</option>
+        <option value="8" selected>8</option>
+        <option value="16">16</option>
+    </select>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Hilos de subida (Telethon, &lt;2GB)</b></div>
+    <div class="muted" style="margin-bottom:6px;">Workers paralelos para subir archivos con Telethon (1-16).</div>
+    <select id="upload-threads-select">
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="4" selected>4</option>
+        <option value="8">8</option>
+        <option value="16">16</option>
+    </select>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Hilos de subida (Pyrofork, &gt;2GB)</b></div>
+    <div class="muted" style="margin-bottom:6px;">Workers de red del cliente Pyrofork para archivos grandes (1-64).</div>
+    <select id="pyro-workers-select">
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="4">4</option>
+        <option value="8">8</option>
+        <option value="16" selected>16</option>
+        <option value="32">32</option>
+        <option value="64">64</option>
+    </select>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Copia del contenido (firewall de baneo)</b></div>
+    <div class="muted" style="margin-bottom:6px;">Si el origen <b>NO</b> es de tu propiedad, siempre se generar&aacute; una copia real (descarga y subida) al canal destino, para no propagar un posible baneo de Telegram al contenido original.</div>
+    <label style="display:block;margin:6px 0;">
+        <input type="checkbox" id="real-copy-owner">
+        <span>Si el origen es del usuario, generar copia REAL en el primer destino</span>
+    </label>
+    <div class="muted" style="margin-top:2px;">Si est&aacute; activo, incluso con origen propio se descarga y re-subir&aacute; (nuevo file_id). Si no, con origen propio se har&aacute; copia de Telegram directa (sin descargar).</div>
+    <label style="display:block;margin:8px 0 0 0;">
+        <input type="checkbox" id="real-copy-rest">
+        <span>Generar copia REAL en el resto de destinos</span>
+    </label>
+    <div class="muted" style="margin-top:2px;">Se habilita solo si hay primera copia real (origen de terceros, o CB1 activo con origen propio). Si est&aacute; activo, cada destino recibe su propia copia completa. Si no, el resto se copia por Telegram desde el primer destino (sin atribuci&oacute;n).</div>
+</div>
+
+<div class="card">
+    <label>
+        <input type="checkbox" id="normalize-mp4">
+        <span>Normalizar v&iacute;deos a MP4 (compatible con stream de Telegram)</span>
+    </label>
+    <div class="muted" style="margin-top:4px;">Al descargar un v&iacute;deo: si ya es MP4 compatible, se re-mapea sin re-encode; si es AVI/MKV u otro, se convierte; si supera ~3.9GB, se comprime en 2 pasadas para caber en un &uacute;nico mensaje. El idioma de audio y subt&iacute;tulos se elige por t&iacute;tulo en la cola.</div>
+</div>
+
+<div class="card">
+    <label>
+        <input type="checkbox" id="streaming-mkv">
+        <span>Subir MKV en modo streaming (Experimental)</span>
+    </label>
+    <div class="muted" style="margin-top:4px;">Si est&aacute; activo, los MKV se suben tal cual (sin convertir a MP4) para que Telegram los reproduzca con sus pistas originales. Tiene prioridad sobre &quot;Normalizar a MP4&quot;. En la cola podr&aacute;s elegir la pista de audio y de subt&iacute;tulos por defecto (se aplica un remux r&aacute;pido sin re-encode).</div>
+    <div style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap;">
+        <label style="justify-content:space-between;flex:1;min-width:180px;">Audio por defecto
+            <input type="text" list="tgcopy-cfg-langs" id="default-audio-lang" placeholder="original (vac&iacute;o)" style="width:100px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:6px;padding:4px 8px;font-size:0.8rem;">
+        </label>
+        <label style="justify-content:space-between;flex:1;min-width:180px;">Subt&iacute;tulos por defecto
+            <input type="text" list="tgcopy-cfg-langs" id="default-sub-lang" placeholder="ninguno (vac&iacute;o)" style="width:100px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:6px;padding:4px 8px;font-size:0.8rem;">
+        </label>
+    </div>
+    <div class="muted" style="margin-top:4px;">Valores por defecto que tomar&aacute;n los jobs al a&ntilde;adirse a la cola. Vac&iacute;o = pista original / sin subt&iacute;tulos.</div>
+    <datalist id="tgcopy-cfg-langs">
+        <option value="spa"></option><option value="eng"></option><option value="jpn"></option><option value="kor"></option><option value="chi"></option><option value="fra"></option><option value="deu"></option><option value="ita"></option><option value="por"></option><option value="rus"></option><option value="ara"></option><option value="hin"></option><option value="tur"></option><option value="pol"></option><option value="nld"></option><option value="swe"></option><option value="nor"></option><option value="dan"></option><option value="fin"></option><option value="ces"></option><option value="ell"></option><option value="hun"></option><option value="heb"></option><option value="tha"></option><option value="vie"></option><option value="ind"></option><option value="zho"></option>
+    </datalist>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Extracci&oacute;n de archives</b></div>
+    <div class="muted" style="margin-bottom:6px;">T&iacute;tulos cuyos episodios son archivos comprimidos (.zip, .rar, .7z, multiparte...). Se extraen con 7z y cada v&iacute;deo resultante se sube como episodio.</div>
+    <label>
+        <input type="checkbox" id="extract-archives">
+        <span>Extraer archives autom&aacute;ticamente</span>
+    </label>
+    <label style="display:block;margin:8px 0 0 0;">
+        <input type="checkbox" id="archive-parallel">
+        <span>Procesar archives en paralelo (mientras la cola sigue con otros trabajos)</span>
+    </label>
+    <div class="muted" style="margin-top:2px;">La extracci&oacute;n y recodificaci&oacute;n se ejecuta en 2&ordm; plano (un &uacute;nico slot) y el job vuelve a la cola en su posici&oacute;n cuando los v&iacute;deos est&aacute;n listos para subir.</div>
+    <div style="margin-top:8px;">
+        <label style="justify-content:space-between;">M&aacute;x. archives pendientes
+            <input type="number" id="max-pending-archives" min="1" max="50" style="width:90px;">
+        </label>
+        <div class="muted" style="margin-top:2px;">L&iacute;mite de archives en procesado/esperando subir. Superado el l&iacute;mite, el worker se salta su descarga.</div>
+    </div>
+    <div style="margin-top:10px;"><b>Diccionario global de contrase&ntilde;as</b></div>
+    <div class="muted" style="margin-bottom:6px;">Si un archive est&aacute; protegido, se prueban estas contrase&ntilde;as autom&aacute;ticamente (adem&aacute;s de las detectadas en los mensajes). Cada una en una l&iacute;nea.</div>
+    <textarea id="archive-passwords" rows="4" placeholder="password1&#10;password2&#10;..." style="width:100%;box-sizing:border-box;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:6px;padding:6px 8px;font-size:0.8rem;font-family:monospace;resize:vertical;"></textarea>
+    <div style="display:flex;gap:8px;margin-top:8px;">
+        <input type="text" id="seven-zip-path" placeholder="Ruta 7z (opcional)" style="flex:1;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:6px;padding:6px 8px;font-size:0.8rem;">
+        <input type="text" id="unrar-path" placeholder="Ruta unrar (opcional)" style="flex:1;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:6px;padding:6px 8px;font-size:0.8rem;">
+    </div>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Tama&ntilde;o de bloque de descarga (KB)</b></div>
+    <div class="muted" style="margin-bottom:6px;">Tama&ntilde;o del chunk para descargas de Telegram (64-4096 KB).</div>
+    <select id="download-chunk-select">
+        <option value="64">64 KB</option>
+        <option value="128">128 KB</option>
+        <option value="256">256 KB</option>
+        <option value="512">512 KB</option>
+        <option value="1024" selected>1024 KB (1 MB)</option>
+        <option value="2048">2048 KB (2 MB)</option>
+        <option value="4096">4096 KB (4 MB)</option>
+    </select>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Destinos</b></div>
+    <div class="muted" style="margin-bottom:8px;">Canales Telegram donde se copiar&aacute;n los contenidos.</div>
+    <div id="destinations-list"><span class="muted">Cargando...</span></div>
+    <button class="btn" onclick="showAddDestination()" style="margin-top:8px;width:100%;">+ A&ntilde;adir destino</button>
+</div>
+
+<div class="card" style="text-align:center;">
+    <button class="btn" onclick="abrirColaTrabajos()" style="width:100%;">Abrir cola de trabajos</button>
+</div>
+
+<script>
+// Ocultar tabs/footer del panel de configuracion al cargar
+(function() {
+    try {
+        if (window.parent && window.parent.enterPluginFullScreen) {
+            window.parent.enterPluginFullScreen();
+        }
+    } catch(e) {}
+})();
+// NO usar beforeunload — causa race conditions al destruir el iframe
+
+var API = '/api/telegram-copy';
+
+function api(url, opts, cb) {
+    opts = opts || {};
+    var xhr = new XMLHttpRequest();
+    xhr.open(opts.method || 'GET', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+        var b = {};
+        try { b = JSON.parse(xhr.responseText || '{}'); } catch(e) {}
+        if (cb) cb(b, xhr.status);
+    };
+    xhr.onerror = function() { if (cb) cb({}, 0); };
+    xhr.send(opts.data ? JSON.stringify(opts.data) : null);
+}
+
+function parseTelegramLink(link) {
+    var result = { channel_id: null, topic_id: null, msg_id: null, display: '' };
+    if (!link) return result;
+    var m;
+    // Formato: t.me/c/ID/topic/msg
+    m = link.match(/t\.me\/c\/(\d+)\/(\d+)\/(\d+)/);
+    if (m) {
+        result.channel_id = m[1].length <= 13 ? '-100' + m[1] : m[1];
+        result.topic_id = parseInt(m[2]);
+        result.msg_id = parseInt(m[3]);
+        result.display = 'canal: ' + result.channel_id + ' | topic: ' + result.topic_id + ' | msg: ' + result.msg_id;
+        return result;
+    }
+    // Formato: t.me/c/ID/msg
+    m = link.match(/t\.me\/c\/(\d+)\/(\d+)/);
+    if (m) {
+        result.channel_id = m[1].length <= 13 ? '-100' + m[1] : m[1];
+        result.msg_id = parseInt(m[2]);
+        // Buscar ?thread=
+        var t = link.match(/[?&]thread=(\d+)/);
+        if (t) result.topic_id = parseInt(t[1]);
+        result.display = 'canal: ' + result.channel_id + (result.topic_id ? ' | topic: ' + result.topic_id : '') + ' | msg: ' + result.msg_id;
+        return result;
+    }
+    // Formato: t.me/nombre/msg
+    m = link.match(/t\.me\/([a-zA-Z0-9_]+)\/(\d+)/);
+    if (m) {
+        result.channel_id = m[1];
+        result.msg_id = parseInt(m[2]);
+        var t = link.match(/[?&]thread=(\d+)/);
+        if (t) result.topic_id = parseInt(t[1]);
+        result.display = 'canal: ' + result.channel_id + (result.topic_id ? ' | topic: ' + result.topic_id : '') + ' | msg: ' + result.msg_id;
+        return result;
+    }
+    return result;
+}
+
+function loadConfig() {
+    api(API + '/config', {}, function(res) {
+        var cfg = (res && res.config) || {};
+        var sel = document.getElementById('credential-select');
+        if (sel && res.sessions) {
+            var html = '<option value="">-- Usar cuenta activa por defecto --</option>';
+            for (var i = 0; i < res.sessions.length; i++) {
+                var s = res.sessions[i];
+                var selected = s.name === cfg.credential_name ? 'selected' : '';
+                html += '<option value="' + s.name + '" ' + selected + '>' + s.name + (s.tg_name ? ' (' + s.tg_name + ')' : '') + '</option>';
+            }
+            sel.innerHTML = html;
+        }
+        if (cfg.delay_seconds) {
+            var dSel = document.getElementById('delay-select');
+            if (dSel) dSel.value = String(cfg.delay_seconds);
+        }
+        var cb = document.getElementById('resume-startup');
+        if (cb) cb.checked = cfg.resume_on_startup || false;
+        // Hilos de descarga
+        var dt = document.getElementById('download-threads-select');
+        if (dt && cfg.download_threads) dt.value = String(cfg.download_threads);
+        // Hilos de subida
+        var ut = document.getElementById('upload-threads-select');
+        if (ut && cfg.upload_threads) ut.value = String(cfg.upload_threads);
+        // Workers de red Pyrofork
+        var pw = document.getElementById('pyro-workers-select');
+        if (pw && cfg.pyro_workers) pw.value = String(cfg.pyro_workers);
+        // Tamaño de bloque de descarga
+        var dc = document.getElementById('download-chunk-select');
+        if (dc && cfg.download_chunk_size_kb) dc.value = String(cfg.download_chunk_size_kb);
+        // Copia real si origen propio (CB1) y copia real en resto (CB2, gated)
+        var rco = document.getElementById('real-copy-owner');
+        if (rco) rco.checked = cfg.real_copy_if_owner || false;
+        var rcr = document.getElementById('real-copy-rest');
+        if (rcr) {
+            rcr.checked = cfg.real_copy_rest || false;
+            updateRealCopyGating();
+        }
+        // Normalizador MP4
+        var nm = document.getElementById('normalize-mp4');
+        if (nm) nm.checked = cfg.normalize_mp4 || false;
+        // Streaming MKV
+        var sm = document.getElementById('streaming-mkv');
+        if (sm) sm.checked = cfg.streaming_mkv || false;
+        var da = document.getElementById('default-audio-lang');
+        if (da) da.value = cfg.default_audio_lang || '';
+        var ds = document.getElementById('default-sub-lang');
+        if (ds) ds.value = cfg.default_sub_lang || '';
+        // Extracción de archives
+        var ea = document.getElementById('extract-archives');
+        if (ea) ea.checked = cfg.extract_archives !== false;
+        var apar = document.getElementById('archive-parallel');
+        if (apar) apar.checked = cfg.archive_parallel !== false;
+        var mpa = document.getElementById('max-pending-archives');
+        if (mpa) mpa.value = String(cfg.max_pending_archives || 5);
+        var ap = document.getElementById('archive-passwords');
+        if (ap && cfg.archive_passwords) ap.value = cfg.archive_passwords.join('\n');
+        var szp = document.getElementById('seven-zip-path');
+        if (szp) szp.value = cfg.seven_zip_path || '';
+        var urp = document.getElementById('unrar-path');
+        if (urp) urp.value = cfg.unrar_path || '';
+    });
+    loadDestinations();
+}
+
+function updateRealCopyGating() {
+    // CB2 (copia real en el resto) siempre disponible; el backend lo habilita
+    // realmente solo si existe "primera copia real" (origen de terceros o CB1 con origen propio).
+    var rcr = document.getElementById('real-copy-rest');
+    if (rcr) rcr.disabled = false;
+}
+
+function loadDestinations() {
+    api(API + '/destinations', {}, function(res) {
+        var list = document.getElementById('destinations-list');
+        var dests = (res && res.destinations) || [];
+        if (dests.length === 0) {
+            list.innerHTML = '<span class="muted">No hay destinos configurados. A&ntilde;ade uno pulsando el bot&oacute;n de abajo.</span>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < dests.length; i++) {
+            var d = dests[i];
+            var topoLabel = 'Topo ' + d.topology;
+            html += '<div class="row">' +
+                '<span style="flex:1;font-weight:600;">' + d.name + '</span>' +
+                '<span class="tag">' + topoLabel + '</span>' +
+                '<button class="btn2" onclick="editDestination(\'' + d.id + '\')">Editar</button>' +
+                '<button class="btn-del" onclick="delDestination(\'' + d.id + '\')">Borrar</button>' +
+                '</div>';
+            html += '<div class="muted" style="padding:0 0 4px 0;">' + (d.channel_title || d.channel_id || '') + '</div>';
+        }
+        list.innerHTML = html;
+    });
+}
+
+function saveConfig() {
+    var sel = document.getElementById('credential-select');
+    var dSel = document.getElementById('delay-select');
+    var cb = document.getElementById('resume-startup');
+    var ut = document.getElementById('upload-threads-select');
+    var pw = document.getElementById('pyro-workers-select');
+    var dt = document.getElementById('download-threads-select');
+    var dc = document.getElementById('download-chunk-select');
+    var rco = document.getElementById('real-copy-owner');
+    var rcr = document.getElementById('real-copy-rest');
+    var nm = document.getElementById('normalize-mp4');
+    var sm = document.getElementById('streaming-mkv');
+    var da = document.getElementById('default-audio-lang');
+    var ds = document.getElementById('default-sub-lang');
+    var ea = document.getElementById('extract-archives');
+    var apar = document.getElementById('archive-parallel');
+    var mpa = document.getElementById('max-pending-archives');
+    var ap = document.getElementById('archive-passwords');
+    var szp = document.getElementById('seven-zip-path');
+    var urp = document.getElementById('unrar-path');
+    var passwords = ap ? ap.value.split(/\n+/).map(function(s) { return s.trim(); }).filter(Boolean) : [];
+    api(API + '/config', { method: 'POST', data: {
+        credential_name: sel ? sel.value : '',
+        delay_seconds: dSel ? parseFloat(dSel.value) : 3.0,
+        resume_on_startup: cb ? cb.checked : false,
+        upload_threads: ut ? parseInt(ut.value) : 4,
+        pyro_workers: pw ? parseInt(pw.value) : 16,
+        download_threads: dt ? parseInt(dt.value) : 8,
+        download_chunk_size_kb: dc ? parseInt(dc.value) : 1024,
+        real_copy_if_owner: rco ? rco.checked : false,
+        real_copy_rest: rcr ? (rcr.checked && !rcr.disabled) : false,
+        normalize_mp4: nm ? nm.checked : false,
+        streaming_mkv: sm ? sm.checked : false,
+        default_audio_lang: da ? da.value.trim() : '',
+        default_sub_lang: ds ? ds.value.trim() : '',
+        extract_archives: ea ? ea.checked : true,
+        archive_parallel: apar ? apar.checked : true,
+        max_pending_archives: mpa ? parseInt(mpa.value) || 5 : 5,
+        archive_passwords: passwords,
+        seven_zip_path: szp ? szp.value.trim() : '',
+        unrar_path: urp ? urp.value.trim() : '',
+    }}, function(r) {
+        if (r && r.ok) showToast('Configuraci\u00f3n guardada');
+        else showToast('Error al guardar configuraci\u00f3n');
+    });
+}
+
+function showToast(msg) {
+    var el = document.createElement('div');
+    el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:999999;background:#18181b;border:1px solid #3f3f46;border-radius:8px;padding:10px 16px;color:#f4f4f5;font-size:13px;';
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(function() { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(function() { el.remove(); }, 300); }, 3000);
+}
+
+function abrirColaTrabajos() {
+    // Intentar llamar a la funcion del padre si existe
+    if (window.parent && window.parent._tgcopyTrayQueue) {
+        window.parent._tgcopyTrayQueue();
+    } else {
+        showToast('La cola de trabajos se abre desde el panel lateral');
+    }
+}
+
+function cerrarConfig() {
+    // Cierra el panel de configuracion del plugin y restaura tabs/footer
+    try {
+        if (window.parent && window.parent.exitPluginFullScreen) {
+            window.parent.exitPluginFullScreen();
+        }
+    } catch(e) {}
+    // Volver a la lista de plugins
+    try {
+        if (window.parent && window.parent.loadPluginsList) {
+            window.parent.loadPluginsList();
+        }
+    } catch(e) {
+        history.back();
+    }
+}
+
+function showAddDestination() {
+    showDestinationModal(null);
+}
+
+function editDestination(did) {
+    api(API + '/destinations', {}, function(res) {
+        var dests = (res && res.destinations) || [];
+        for (var i = 0; i < dests.length; i++) {
+            if (dests[i].id === did) {
+                showDestinationModal(dests[i]);
+                return;
+            }
+        }
+        showToast('Destino no encontrado');
+    });
+}
+
+function showDestinationModal(dest) {
+    var isEdit = dest !== null;
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:999999;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;';
+    var panel = document.createElement('div');
+    panel.style.cssText = 'background:#0d0d0f;border:1px solid #3f3f46;border-radius:10px;padding:16px;min-width:380px;max-width:520px;color:#f4f4f5;';
+    panel.innerHTML = '<div style="font-weight:600;margin-bottom:12px;">' + (isEdit ? 'Editar destino' : 'A\u00f1adir destino') + '</div>';
+
+    // Nombre UI
+    panel.innerHTML += '<label style="margin-top:4px;">Nombre UI</label>';
+    panel.innerHTML += '<input id="dest-name" type="text" value="' + (isEdit ? (dest.name || '') : '') + '" placeholder="Ej: Canal Series" style="margin-bottom:4px;">';
+
+    // Link Destino
+    panel.innerHTML += '<label style="margin-top:4px;">Link Destino</label>';
+    panel.innerHTML += '<input id="dest-link" type="text" value="' + (isEdit ? (dest.link || '') : '') + '" placeholder="https://t.me/c/123456789/1213/1214" style="margin-bottom:4px;">';
+
+    // Info del parse (se actualiza al escribir)
+    panel.innerHTML += '<div id="dest-link-info" class="info-row" style="min-height:18px;"></div>';
+
+    // Topologia
+    panel.innerHTML += '<label style="margin-top:6px;">Topolog\u00eda</label>';
+    panel.innerHTML += '<select id="dest-topology">' +
+        '<option value="1" ' + (isEdit && dest.topology === 1 ? 'selected' : '') + '>1 — Todo en un mismo chat (secuencial)</option>' +
+        '<option value="2" ' + (isEdit && dest.topology === 2 ? 'selected' : '') + '>2 — Topic fijo (especificar ID)</option>' +
+        '<option value="3" ' + (isEdit && dest.topology === 3 ? 'selected' : '') + '>3 — Topic por t\u00edtulo (crea topic con el nombre del t\u00edtulo)</option>' +
+        '</select>';
+
+    // Mensaje de ayuda para topologia 2
+    panel.innerHTML += '<div id="topo-2-warning" class="muted" style="margin-top:4px;display:none;">Para topolog\u00eda 2 es necesario que el link contenga un ID de topic. Sugerencia: pega la URL de un mensaje dentro del topic destino en el campo Link Destino.</div>';
+
+    panel.innerHTML += '<div id="dest-error" class="muted" style="color:#ef4444;margin-top:6px;display:none;"></div>';
+
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:8px;margin-top:12px;';
+
+    var testBtn = document.createElement('button');
+    testBtn.textContent = 'Probar';
+    testBtn.style.cssText = 'padding:8px 12px;background:#2563eb;border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:13px;';
+    testBtn.onclick = function() { testDestination(); };
+    btnRow.appendChild(testBtn);
+
+    var save = document.createElement('button');
+    save.textContent = 'Guardar';
+    save.style.cssText = 'flex:1;padding:8px;background:#22c55e;border:none;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;';
+    save.onclick = function(e) {
+        if (e) { e.preventDefault(); e.stopPropagation(); }
+        var name = document.getElementById('dest-name').value.trim();
+        var link = document.getElementById('dest-link').value.trim();
+        var topology = parseInt(document.getElementById('dest-topology').value);
+
+        if (!name) { showError('El nombre es obligatorio'); return; }
+        if (!link) { showError('El link del canal es obligatorio'); return; }
+
+        var parsed = parseTelegramLink(link);
+        if (!parsed.channel_id) { showError('Link inv\u00e1lido. Debe ser un enlace de Telegram (t.me/c/.../... o t.me/.../...)'); return; }
+
+        if (topology === 2 && !parsed.topic_id) { showError('Topolog\u00eda 2 requiere un topic ID. Pega la URL de un mensaje dentro del topic destino (formato: t.me/c/ID/topic/msg)'); return; }
+
+        var data = { name: name, link: link, topology: topology };
+        if (parsed.topic_id) data.topic_id = parsed.topic_id;
+
+        var method = isEdit ? 'PUT' : 'POST';
+        var url = isEdit ? (API + '/destinations/' + dest.id) : (API + '/destinations');
+
+        try { if (window.parent) window.parent._tghirayiSaving = true; } catch(e) {}
+        api(url, { method: method, data: data }, function(r, status) {
+            if (status >= 200 && status < 300) {
+                if (overlay && overlay.parentNode) overlay.remove();
+                loadDestinations();
+                showToast(isEdit ? 'Destino actualizado' : 'Destino a\u00f1adido');
+            } else {
+                showError(r.detail || 'Error al guardar');
+            }
+            setTimeout(function() { try { if (window.parent) window.parent._tghirayiSaving = false; } catch(e) {} }, 200);
+        });
+    };
+    function showError(msg) {
+        var el = document.getElementById('dest-error');
+        if (el) { el.textContent = msg; el.style.display = 'block'; }
+    }
+
+    var cancel = document.createElement('button');
+    cancel.textContent = 'Cancelar';
+    cancel.style.cssText = 'padding:8px 14px;background:none;border:1px solid #3f3f46;color:rgba(255,255,255,0.6);border-radius:6px;cursor:pointer;';
+    cancel.onclick = function() { overlay.remove(); };
+    btnRow.appendChild(save);
+    btnRow.appendChild(cancel);
+    panel.appendChild(btnRow);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    // Parsear link en tiempo real
+    var linkInput = document.getElementById('dest-link');
+    var infoEl = document.getElementById('dest-link-info');
+    function updateLinkInfo() {
+        var parsed = parseTelegramLink(linkInput.value);
+        if (parsed.channel_id) {
+            infoEl.innerHTML = '<span class="info-badge">' + parsed.display + '</span>';
+        } else {
+            infoEl.innerHTML = '';
+        }
+        // Actualizar warning de topologia 2 segun si hay topic_id
+        var topoVal = parseInt(document.getElementById('dest-topology').value);
+        var warn = document.getElementById('topo-2-warning');
+        if (warn) {
+            if (topoVal === 2 && !parsed.topic_id) {
+                warn.style.display = 'block';
+            } else {
+                warn.style.display = 'none';
+            }
+        }
+    }
+    linkInput.oninput = updateLinkInfo;
+    updateLinkInfo();
+
+    // Evento: cambio de topologia
+    var topoSelect = document.getElementById('dest-topology');
+    if (topoSelect) {
+        topoSelect.onchange = function() {
+            updateLinkInfo();
+        };
+    }
+}
+
+function testDestination() {
+    var link = document.getElementById('dest-link').value.trim();
+    if (!link) { showErrorDest('Primero pega un link de destino'); return; }
+    var parsed = parseTelegramLink(link);
+    if (!parsed.channel_id) { showErrorDest('Link inv\u00e1lido'); return; }
+
+    api(API + '/destinations/test', { method: 'POST', data: { link: link } }, function(r, status) {
+        if (status >= 200 && status < 300) {
+            showToast('Conexi\u00f3n OK: ' + (r.channel_title || 'canal accesible') + (r.has_topics ? ' (tiene topics)' : ''));
+            // Actualizar informacion del parse
+            var infoEl = document.getElementById('dest-link-info');
+            if (infoEl && r.channel_title) {
+                infoEl.innerHTML = '<span class="info-badge">' + (parsed.display || '') + '</span> <span class="info-badge" style="color:#22c55e;">' + r.channel_title + (r.has_topics ? ' [Topics]' : '') + '</span>';
+            }
+        } else {
+            showErrorDest(r.detail || 'Error de conexi\u00f3n');
+        }
+    });
+}
+
+function showErrorDest(msg) {
+    var el = document.getElementById('dest-error');
+    if (el) { el.textContent = msg; el.style.display = 'block'; }
+}
+
+function delDestination(did) {
+    if (!confirm('\u00bfBorrar este destino?')) return;
+    api(API + '/destinations/' + did, { method: 'DELETE' }, function(r) {
+        loadDestinations();
+        showToast('Destino eliminado');
+    });
+}
+
+// Auto-save on changes
+document.addEventListener('change', function(e) {
+    if (e.target.id === 'credential-select' || e.target.id === 'delay-select' || e.target.id === 'resume-startup' ||
+        e.target.id === 'upload-threads-select' || e.target.id === 'pyro-workers-select' || e.target.id === 'download-threads-select' || e.target.id === 'download-chunk-select' ||
+        e.target.id === 'real-copy-owner' || e.target.id === 'real-copy-rest' || e.target.id === 'normalize-mp4' || e.target.id === 'streaming-mkv' ||
+        e.target.id === 'extract-archives' || e.target.id === 'archive-parallel' || e.target.id === 'max-pending-archives') {
+        if (e.target.id === 'real-copy-owner') updateRealCopyGating();
+        saveConfig();
+    }
+});
+
+loadConfig();
+</script>
+</body>
+</html>

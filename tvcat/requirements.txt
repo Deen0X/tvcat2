@@ -1,0 +1,22 @@
+# TVCat 2 - Dependencias de Python
+fastapi>=0.109.0
+uvicorn>=0.27.0
+pydantic>=2.0.0
+zeroconf>=0.132.0
+python-multipart
+aiofiles
+httpx
+Pillow>=10.0.0
+telethon>=1.36.0
+pyrofork>=2.3.69
+cryptg>=0.4.0
+qrcode>=8.0
+requests>=2.31.0
+python-dotenv
+cryptography
+rarfile
+yt-dlp
+jinja2
+tgcrypto
+pycryptodome
+pycryptodomex

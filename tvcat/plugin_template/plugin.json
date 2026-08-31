@@ -1,0 +1,25 @@
+{
+  "name": "my_plugin",
+  "version": "1.0.0",
+  "type": "source",
+  "displayName": "Mi Plugin",
+  "description": "Descripción del plugin",
+  "icon": "🔌",
+  "defaultEnabled": false,
+  "api_prefix": "",
+  "priority": 100,
+  "js": ["plugin.js"],
+  "css": [],
+  "settings_schema": [],
+  "settings_ui": "",
+  "has_interface": false,
+  "interface_icon": "",
+  "action_category": "",
+  "single_button": true,
+  "applies_to": [],
+  "access": {
+    "admin": true,
+    "user": true,
+    "child": false
+  }
+}

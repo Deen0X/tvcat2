@@ -1,0 +1,45 @@
+# TVCat2 — .gitignore para proyecto tvcat2 (público)
+# Ignora bases de datos activas, conserva plantillas _default.db
+*.db
+!*_default.db
+**/*.db
+!**/*_default.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Backups locales — nunca versionar
+*.backup
+**/*.backup
+*.bak
+**/*.bak
+
+# Caches y temporales
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+logs/
+cache/
+hls_segments/
+hls_subs/
+tmp/
+temp/
+
+# Config y sesiones locales
+config/
+*.session
+*.session-journal
+.env
+
+# Binarios externos
+ffmpeg/
+tools/ffmpeg/
+*.exe
+*.dll
+
+# IDEs
+.vs/
+.vscode/
+.idea/

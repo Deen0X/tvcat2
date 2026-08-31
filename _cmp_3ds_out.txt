@@ -1,0 +1,6 @@
+TVCat Companion PC
+server_url: http://127.0.0.1:8093
+download_dir: ./_dl_3ds
+[pair] registrada como pc-3ds
+[download] TVCatLogo.png -> _dl_3ds\TVCatLogo.png (size 355781)
+[download] fin: _dl_3ds\TVCatLogo.png 355781 bytes

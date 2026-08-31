@@ -1,0 +1,11 @@
+{
+    "name": "tvcat_show_in_telegram",
+    "displayName": "Mostrar en Telegram",
+    "description": "Agrega un bot\u00f3n para abrir el contenido directamente en Telegram desde la p\u00e1gina del h\u00e9roe.",
+    "type": "heropage-action",
+    "version": "1.0.0",
+    "defaultEnabled": true,
+    "icon": "static/plugin_icon.png",
+    "iconEmoji": "\ud83d\udd17",
+    "js": ["hero_actions.js"]
+}

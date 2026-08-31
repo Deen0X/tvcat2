@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="TVCat 2">TVCat 2</title>
+    <link rel="icon" type="image/png" href="static/TVCat.png">
+    <link rel="stylesheet" href="style.css?v=20260901">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css">
+    <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
+</head>
+<body>
+    <!-- Boot Screen -->
+    <div id="boot-screen" class="boot-screen">
+        <div class="boot-content">
+            <img src="TVCatLogo128x128.png" alt="TVCat" class="boot-logo">
+            <h1 data-i18n="Cargando...">Cargando...</h1>
+            <div class="boot-spinner"></div>
+        </div>
+    </div>
+
+    <!-- Navbar -->
+    <header class="navbar">
+        <div class="nav-left" id="nav-left">
+            <button class="profile-header-btn" onclick="toggleSideMenu()" title="Menú">
+                <div id="header-profile-icon" class="header-profile-icon">
+                    <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:currentColor;"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                </div>
+                <span id="header-profile-name" class="nav-username">Usuario</span>
+            </button>
+        </div>
+        <div class="search-container">
+            <input type="text" id="global-search" placeholder="Buscar..." oninput="handleSearch(this.value)">
+            <span id="clear-search-btn" class="clear-search-btn hidden" onclick="clearSearch()">&times;</span>
+            <button id="filter-btn" class="filter-btn" onclick="toggleFilterModal()" title="Filtros de búsqueda">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+            </button>
+        </div>
+        <div class="nav-right" id="nav-right">
+            <div class="logo" id="main-logo">
+                <img src="static/TVCatLogo.png" alt="" onclick="refreshCatalog()" style="cursor:pointer;">
+                <span onclick="refreshCatalog()" style="cursor:pointer;"><span class="logo-highlight">TV</span>Cat 2</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Sidebar Overlay Background -->
+    <div id="side-menu-overlay" class="side-menu-overlay"></div>
+
+    <!-- Side Menu (Overlay Panel) -->
+    <div id="side-menu" class="side-menu">
+        <div class="side-menu-header">
+            <div class="side-header-left" onclick="toggleSideMenu()" style="cursor:pointer;">
+                <div id="side-avatar" class="side-avatar">U</div>
+                <div id="side-profile-name" class="side-profile-name">Usuario</div>
+            </div>
+            <div class="side-header-actions">
+                <button class="side-icon-btn" onclick="toggleSettingsModal()" title="Configuración">
+                    <svg viewBox="0 0 24 24" style="width:18px; height:18px; fill:currentColor;"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+                </button>
+                <button class="side-icon-btn" onclick="refreshCatalog()" title="Sincronizar">
+                    <svg viewBox="0 0 24 24" style="width:18px; height:18px; fill:currentColor;"><path d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z"/></svg>
+                </button>
+                <button class="side-icon-btn" onclick="toggleSideMenu()" title="Cerrar">
+                    <svg viewBox="0 0 24 24" style="width:18px; height:18px; fill:currentColor;"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- Plugin Icons Tray (poblado dinámicamente desde plugin.json tray) -->
+        <div id="sidebar-plugin-tray" class="sidebar-plugin-tray">
+            <span class="plugin-tray-label">Plugins</span>
+            <div class="plugin-tray-icons" id="plugin-tray-icons"></div>
+        </div>
+
+        <div class="side-menu-nav">
+            <a href="#" data-category="home" onclick="selectSection('home', this)">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg> Inicio
+            </a>
+            <a href="#" data-category="favorites" onclick="selectSection('favorites', this)">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg> Favoritos
+            </a>
+            <a href="#" data-category="continue" onclick="selectSection('continue', this)">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg> Seguir Viendo
+            </a>
+            <a href="#" data-category="completed" onclick="selectSection('completed', this)">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg> Vistos
+            </a>
+        </div>
+
+        <hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 4px 0;">
+
+        <div class="tree-title">Catálogo</div>
+        <div class="side-menu-tree-area" id="categories-tree-container">
+            <!-- Poblado dinámicamente -->
+        </div>
+
+        <div class="side-menu-footer">
+            <button class="side-logout-btn" onclick="logout()">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M10.09 15.59L11.5 17l5-5-5-5-1.41 1.41L12.67 11H3v2h9.67l-2.58 2.59zM19 3H5c-1.11 0-2 .9-2 2v4h2V5h14v14H5v-4H3v4c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg> Cerrar Sesión
+            </button>
+        </div>
+    </div>
+
+    <!-- Main Catalog Area -->
+    <main id="catalog-container">
+        <div class="section-header">
+            <h1 id="category-title" class="section-title">Catálogo</h1>
+            <span id="results-count" class="results-badge">0 ítems</span>
+        </div>
+        <div id="catalog-grid" class="catalog-grid">
+            <!-- Poblado dinámicamente -->
+        </div>
+    </main>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal hidden">
+        <div class="modal-content settings-content">
+            <div class="settings-header">
+                <h2><span id="settings-title-icon">⚙️</span> <span id="settings-title-text">Configuración</span></h2>
+                <span class="close-btn-mini" onclick="toggleSettingsModal()">&times;</span>
+            </div>
+            <div class="settings-tabs" id="settings-tabs-container">
+                <button class="tab-btn active" id="tab-btn-profile" onclick="switchSettingsTab('profile')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                    <span class="tab-btn-text">Perfil</span>
+                </button>
+                <button class="tab-btn" id="tab-btn-security" onclick="switchSettingsTab('security')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+                    <span class="tab-btn-text">Seguridad</span>
+                </button>
+                <button class="tab-btn" id="tab-btn-screen" onclick="switchSettingsTab('screen')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7l-2 3v1h8v-1l-2-3h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 12H3V4h18v10z"/></svg>
+                    <span class="tab-btn-text">Pantalla</span>
+                </button>
+                <button class="tab-btn" id="tab-btn-cache" onclick="switchSettingsTab('cache')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M21 18c0 1.1-.9 2-2 2H5c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2h14c1.1 0 2 .9 2 2v12zM5 6v1h14V6H5zm0 3v1h14V9H5zm0 3v1h14v-1H5z"/></svg>
+                    <span class="tab-btn-text">Caché</span>
+                </button>
+                <!-- Admin tabs (yellow) -->
+                <button class="tab-btn tab-admin" id="tab-btn-userbot" onclick="switchSettingsTab('userbot')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v2h2v-2h2v-2H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
+                    <span class="tab-btn-text">Userbot</span>
+                </button>
+                <button class="tab-btn tab-admin" id="tab-btn-plugins" onclick="switchSettingsTab('plugins')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5V5H6c-1.1 0-2 .9-2 2v4H2.5c-.83 0-1.5.67-1.5 1.5s.67 1.5 1.5 1.5H4v4c0 1.1.9 2 2 2h4v1.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5V19h4c1.1 0 2-.9 2-2v-4h1.5c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5z"/></svg>
+                    <span class="tab-btn-text">Plugins</span>
+                </button>
+                <button class="tab-btn tab-admin" id="tab-btn-admin" onclick="switchSettingsTab('admin')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+                    <span class="tab-btn-text">Usuarios</span>
+                </button>
+                <button class="tab-btn" id="tab-btn-mobile" onclick="switchSettingsTab('mobile')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M17 1.01L7 1c-1.1 0-2 .9-2 2v18c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V3c0-1.1-.9-1.99-2-1.99zM17 19H7V5h10v14z"/></svg>
+                    <span class="tab-btn-text">Móvil</span>
+                </button>
+                <button class="tab-btn" id="tab-btn-remote" onclick="switchSettingsTab('remote')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M21.58 16c-.57-2.18-2.03-3.99-4.1-4.99L17 11H7l-.48.01c-2.07 1-3.53 2.81-4.1 4.99-.3 1.15.26 2.33 1.3 2.77l1.79.75c1.01.42 2.16-.06 2.59-1.07L9.3 16h5.4l1.22 2.46c.43 1.01 1.58 1.49 2.59 1.07l1.79-.75c1.04-.44 1.6-1.62 1.3-2.77z M7 15H5v-2h2v2zm3-3H9v3H8v-3H7v-1h3v1z M15 15h-2v-2h2v2zm3-3h-2v-1h2v1z"/></svg>
+                    <span class="tab-btn-text">Mando</span>
+                </button>
+                <button class="tab-btn tab-admin" id="tab-btn-contents" onclick="switchSettingsTab('contents')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>
+                    <span class="tab-btn-text">Contenidos</span>
+                </button>
+                <button class="tab-btn tab-admin" id="tab-btn-administration" onclick="switchSettingsTab('administration')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94L14.4 2.81c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.55 2.54c-.6.24-1.13.57-1.62.94L5.05 5.33c-.22-.08-.47 0-.59.22L2.54 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.55 2.54c.04.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.55-2.54c.6-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c-.12-.22-.17-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+                    <span class="tab-btn-text">Mantenimiento</span>
+                </button>
+            </div>
+            <div class="settings-tab-container">
+                <div class="tab-pane" id="pane-profile">
+                    <div class="settings-input-group">
+                        <label for="profile-display-name">Nombre de pantalla</label>
+                        <input type="text" id="profile-display-name" class="settings-input" placeholder="Tu nombre...">
+                    </div>
+                    <div class="settings-input-group">
+                        <label>Personaliza tu Avatar</label>
+                        <div class="avatar-tabs">
+                            <button type="button" class="avatar-tab-btn active" onclick="switchAvatarTab('presets')">Emojis</button>
+                            <button type="button" class="avatar-tab-btn" onclick="switchAvatarTab('url')">URL</button>
+                        </div>
+                        <div id="avatar-pane-presets" class="avatar-tab-pane">
+                            <div class="avatar-presets-grid" id="avatar-presets"></div>
+                        </div>
+                        <div id="avatar-pane-url" class="avatar-tab-pane hidden">
+                            <input type="text" id="profile-avatar-url" class="settings-input" placeholder="https://ejemplo.com/foto.jpg" oninput="selectAvatarUrl(this.value)">
+                        </div>
+                    </div>
+                    <div class="settings-input-group">
+                        <label>Color de perfil</label>
+                        <div class="color-presets-grid" id="color-presets"></div>
+                    </div>
+                </div>
+                <div class="tab-pane hidden" id="pane-security">
+                    <div class="settings-input-group">
+                        <label>Cambiar Contraseña</label>
+                        <input type="password" id="profile-current-password" class="settings-input" placeholder="Contraseña actual" autocomplete="off">
+                        <input type="password" id="profile-new-password" class="settings-input" placeholder="Nueva contraseña" autocomplete="new-password">
+                        <input type="password" id="profile-confirm-password" class="settings-input" placeholder="Confirmar nueva contraseña" autocomplete="new-password">
+                        <button class="btn-primary" style="margin-top:12px;padding:10px 20px;" onclick="changePassword()">Cambiar contraseña</button>
+                    </div>
+                    <div class="settings-input-group">
+                        <label>Cuenta Google</label>
+                        <div id="google-account-box" style="font-size:0.8rem;color:var(--text-secondary);">
+                            <p style="margin:0 0 8px;">Asocia tu cuenta Google para poder iniciar sesi&oacute;n con ella. Cada usuario puede asociar una &uacute;nica cuenta.</p>
+                            <div style="display:flex;gap:6px;margin-bottom:8px;">
+                                <input type="email" id="profile-google-email" class="settings-input" placeholder="tucorreo@gmail.com" style="flex:1;padding:8px 10px;font-size:0.8rem;">
+                                <button class="btn-primary" style="padding:8px 14px;" onclick="linkGoogleEmailManual()">Asociar</button>
+                            </div>
+                            <button class="btn-primary" style="padding:10px 20px;margin-bottom:6px;" onclick="linkGoogleAccount()">Asociar con Google (autenticaci&oacute;n)</button>
+                            <button class="btn-primary" id="google-unlink-btn" style="padding:10px 20px;display:none;background:#27272a;color:#f87171;" onclick="unlinkGoogleAccount()">Desvincular cuenta Google</button>
+                            <div id="google-account-status" style="margin-top:8px;min-height:18px;font-size:0.8rem;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-pane hidden" id="pane-screen">
+                    <div class="settings-input-group">
+                        <label for="screen-columns-select">Columnas de Carátulas en Pantalla</label>
+                        <p class="setting-desc" style="margin-bottom: 12px;">Configura cuántas columnas quieres forzar en este dispositivo de forma local.</p>
+                        <select id="screen-columns-select" class="variant-select" style="max-width: 100%;" onchange="changeScreenColumns(this.value)">
+                            <option value="auto">Automático (Predeterminado responsivo)</option>
+                            <option value="2">2 Columnas</option>
+                            <option value="3">3 Columnas</option>
+                            <option value="4">4 Columnas</option>
+                            <option value="5">5 Columnas</option>
+                            <option value="6">6 Columnas</option>
+                            <option value="7">7 Columnas</option>
+                            <option value="8">8 Columnas</option>
+                            <option value="9">9 Columnas</option>
+                            <option value="10">10 Columnas</option>
+                        </select>
+                    </div>
+
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <label for="player-chunk-size-select">Tamaño de Búfer (Chunk Size)</label>
+                        <p class="setting-desc" style="margin-bottom: 12px;">Configura el tamaño del bloque de descarga. Los bloques pequeños evitan cortes en conexiones lentas o Smart TVs.</p>
+                        <select id="player-chunk-size-select" class="variant-select" style="max-width: 100%;" onchange="window.changeDownloadChunkSize(this.value)">
+                            <option value="32">32 KB (Conexiones muy lentas)</option>
+                            <option value="64">64 KB (Estable y rápido)</option>
+                            <option value="128">128 KB (Recomendado/Por defecto)</option>
+                            <option value="256">256 KB (Conexiones rápidas)</option>
+                            <option value="512">512 KB (Máximo rendimiento local)</option>
+                            <option value="1024">1024 KB (Streaming eficiente)</option>
+                        </select>
+                    </div>
+
+                    <div class="settings-input-group hidden" id="episode-cache-settings-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                            <div>
+                                <label style="margin-bottom: 4px; display: block;">Permitir caché para capítulos</label>
+                                <p class="setting-desc" style="margin-bottom: 0;">Descarga múltiples capítulos de la misma serie y limpia automáticamente los más antiguos.</p>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="screen-episode-cache-enable" onchange="window.UI.toggleEpisodeCacheEnable(this.checked)">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                        <div id="episode-cache-size-container" style="margin-top: 12px; display: flex; align-items: center; justify-content: space-between;" class="hidden">
+                            <span class="setting-desc">Límite del caché (GB):</span>
+                            <select id="screen-episode-cache-size" class="variant-select" style="max-width: 120px;" onchange="window.UI.changeEpisodeCacheSize(this.value)">
+                                <option value="1">1 GB</option>
+                                <option value="2">2 GB</option>
+                                <option value="5">5 GB (Predeterminado)</option>
+                                <option value="10">10 GB</option>
+                                <option value="20">20 GB</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                            <div>
+                                <label style="margin-bottom: 4px; display: block;">Abrir última sección visitada</label>
+                                <p class="setting-desc" style="margin-bottom: 0;">Al cargar la página, se abrirá automáticamente la última sección que estabas viendo.</p>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="screen-open-last-section-toggle" checked onchange="window.UI.toggleOpenLastSectionPreference(this.checked)">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                            <div>
+                                <label style="margin-bottom: 4px; display: block;">Avatar a la derecha</label>
+                                <p class="setting-desc" style="margin-bottom: 0;">Mueve el avatar de usuario al lado derecho de la barra. Útil si usas el dispositivo con la mano derecha.</p>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="screen-avatar-right-toggle" onchange="window.UI.toggleAvatarRight(this.checked)">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                    </div>
+                    
+
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <label for="screen-max-elements">Máximo de Elementos en Catálogo</label>
+                        <p class="setting-desc" style="margin-bottom: 12px;">Limita la cantidad de ítems visibles para mejorar rendimiento en Smart TVs antiguas. Máximo 200.</p>
+                        <input type="number" id="screen-max-elements" class="settings-input" style="max-width: 120px;" min="10" max="200" value="200" onchange="window.UI.changeMaxElements(this.value)">
+                    </div>
+
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <label style="font-weight: 700; margin-bottom: 12px; display: block;">Comportamiento del Reproductor</label>
+                        <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                            <div style="flex: 1; min-width: 120px;">
+                                <label for="player-jump-short" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Salto corto (segundos)</label>
+                                <input type="number" id="player-jump-short" class="settings-input" style="max-width: 100%;" min="1" max="100" value="5" onchange="window.changePlayerJumpShort(this.value)">
+                            </div>
+                            <div style="flex: 1; min-width: 120px;">
+                                <label for="player-jump-long" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Salto largo (segundos)</label>
+                                <input type="number" id="player-jump-long" class="settings-input" style="max-width: 100%;" min="1" max="600" value="20" onchange="window.changePlayerJumpLong(this.value)">
+                            </div>
+                            <div style="flex: 1; min-width: 120px;">
+                                <label for="player-skip-intro" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Skip intro (segundos)</label>
+                                <input type="number" id="player-skip-intro" class="settings-input" style="max-width: 100%;" min="1" max="1200" value="80" onchange="window.changePlayerSkipIntro(this.value)">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-pane hidden" id="pane-cache">
+                    <div class="settings-input-group">
+                        <div class="settings-section" style="margin-bottom:12px;padding:10px;background:var(--bg-surface);border-radius:8px;border:1px solid var(--border-color);">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                                <span style="font-size:1.2rem;">💾</span>
+                                <h4 style="margin:0;">Caché de vídeos</h4>
+                            </div>
+                            <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:10px;">
+                                Los chunks de vídeo descargados se almacenan en IndexedDB. La caché permite reproducción offline parcial y precarga de episodios.
+                            </div>
+                            <div style="margin-bottom:8px;">
+                                <label style="font-size:0.85rem;font-weight:500;display:block;margin-bottom:3px;">Tamaño máximo de caché (GB)</label>
+                                <input type="number" id="cache-max-size" min="1" max="100" value="5" style="width:100px;padding:6px 8px;border-radius:4px;background:var(--bg-card,rgba(255,255,255,0.08));color:var(--text-primary,#fff);border:1px solid rgba(255,255,255,0.15);font-size:0.85rem;" />
+                                <div style="font-size:0.75rem;color:var(--text-secondary,#999);margin-top:3px;">Límite compartido entre todos los plugins que usen caché local.</div>
+                            </div>
+                            <div id="cache-stats" style="font-size:0.8rem;color:var(--text-secondary,#999);margin-bottom:8px;">Calculando espacio usado...</div>
+                            <div style="display:flex;gap:8px;">
+                                <button class="btn-primary" onclick="saveCacheConfig()" style="padding:6px 14px;font-size:0.85rem;">Guardar</button>
+                                <button class="btn" onclick="clearVideoCache()" style="padding:6px 14px;font-size:0.85rem;">Vaciar caché</button>
+                            </div>
+                            <span id="cache-status" style="margin-left:8px;font-size:0.8rem;"></span>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-pane hidden" id="pane-plugins">
+                    <h3 style="margin-bottom:8px;">Plugins instalados</h3>
+                    <div id="plugins-list-container"></div>
+                </div>
+                <div class="tab-pane hidden" id="pane-admin">
+                    <h3 style="margin-bottom:8px;">Gestión de usuarios</h3>
+                    <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px;">Solo visible para administradores.</p>
+                    <div id="admin-users-container"></div>
+                </div>
+                <div class="tab-pane hidden" id="pane-userbot">
+                    <h4 style="margin-bottom:8px;">🔑 Credenciales por defecto</h4>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+                        <div style="flex:1;min-width:100px;">
+                            <label style="font-size:0.7rem;color:var(--text-secondary);display:block;margin-bottom:2px;">API ID</label>
+                            <input type="text" id="userbot-api-id" class="settings-input" placeholder="123456" style="padding:6px 8px;font-size:0.8rem;">
+                        </div>
+                        <div style="flex:2;min-width:150px;">
+                            <label style="font-size:0.7rem;color:var(--text-secondary);display:block;margin-bottom:2px;">API Hash</label>
+                            <input type="text" id="userbot-api-hash" class="settings-input" placeholder="abcdef..." style="padding:6px 8px;font-size:0.8rem;">
+                        </div>
+                        <div style="flex:1;min-width:120px;">
+                            <label style="font-size:0.7rem;color:var(--text-secondary);display:block;margin-bottom:2px;">Teléfono</label>
+                            <input type="text" id="userbot-phone" class="settings-input" placeholder="+34600000000" style="padding:6px 8px;font-size:0.8rem;">
+                        </div>
+                        <div style="display:flex;align-items:flex-end;gap:4px;">
+                            <button class="btn-secondary" onclick="toggleUserbotVisibility()" id="userbot-eye-btn" style="padding:6px 10px;font-size:0.75rem;">👁</button>
+                            <button class="btn-secondary" onclick="saveUserbotDefaults()" style="padding:6px 12px;font-size:0.75rem;">Guardar</button>
+                        </div>
+                    </div>
+                    <h4 style="margin-bottom:8px;">⚙️ Configuración Telegram</h4>
+                    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px;padding:8px;background:var(--bg-card);border-radius:6px;">
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Intervalo carátulas (s):</label>
+                            <select id="setting-jit-cover-interval" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                                <option value="0.2" style="background:var(--bg);color:var(--text);">0.2</option>
+                                <option value="0.5" style="background:var(--bg);color:var(--text);">0.5</option>
+                                <option value="1.0" selected style="background:var(--bg);color:var(--text);">1.0</option>
+                                <option value="1.5" style="background:var(--bg);color:var(--text);">1.5</option>
+                                <option value="2.0" style="background:var(--bg);color:var(--text);">2.0</option>
+                                <option value="2.5" style="background:var(--bg);color:var(--text);">2.5</option>
+                                <option value="3.0" style="background:var(--bg);color:var(--text);">3.0</option>
+                            </select>
+                            <button class="btn-secondary" onclick="saveTelegramSettings()" style="padding:4px 10px;font-size:0.7rem;">Guardar</button>
+                        </div>
+                    </div>
+                    <h4 style="margin-bottom:8px;">🔐 Login con Google (opcional)</h4>
+                    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px;padding:8px;background:var(--bg-card);border-radius:6px;">
+                        <p style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 4px;">
+                            Si dejas estos campos <b>vac&iacute;os</b>, el login con Google est&aacute; <b>deshabilitado</b> (no aparecer&aacute; en la pantalla de login ni en los perfiles).
+                            Para habilitarlo: crea un proyecto en
+                            <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" style="color:var(--accent);">Google Cloud Console</a>,
+                            crea unas credenciales <b>OAuth 2.0 Client ID</b> de tipo <b>"Aplicaci&oacute;n web"</b>, a&ntilde;ade en <b>"URIs de redirecci&oacute;n autorizados"</b> esta URL:
+                            <code id="google-redirect-uri" style="display:block;margin:6px 0;padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.7rem;word-break:break-all;">(calculando...)</code>
+                            y pega aqu&iacute; el Client ID y Client Secret.
+                        </p>
+                            <div style="display:flex;flex-direction:column;gap:6px;">
+                                <div style="display:flex;align-items:center;gap:8px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Client ID</label>
+                                    <input type="text" id="google-client-id" class="settings-input" placeholder="xxxxxxxx.apps.googleusercontent.com" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                </div>
+                                <div style="display:flex;align-items:center;gap:8px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Client Secret</label>
+                                    <input type="text" id="google-client-secret" class="settings-input" placeholder="GOCSPX-..." style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                </div>
+                                <div style="display:flex;align-items:center;gap:8px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">URI de redirecci&oacute;n</label>
+                                    <input type="text" id="google-redirect-uri-input" class="settings-input" placeholder="http://ip:puerto/api/auth/google/callback" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                </div>
+                                <div>
+                                    <button class="btn-secondary" onclick="saveGoogleConfig()" style="padding:6px 12px;font-size:0.75rem;">Guardar configuraci&oacute;n Google</button>
+                                    <span id="google-config-status" style="font-size:0.75rem;color:var(--text-secondary);margin-left:8px;"></span>
+                                </div>
+                            </div>
+                    </div>
+                    <h4 style="margin-bottom:8px;">🔍 Enriquecedor de contenidos</h4>
+                    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px;padding:8px;background:var(--bg-card);border-radius:6px;">
+                        <p style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 4px;">
+                            Servicio que enriquece títulos (sinopsis, carátula, géneros) desde servicios online. Se usa, por ejemplo, para generar el cover al copiar títulos. Deja los campos vacíos para deshabilitar un proveedor.
+                        </p>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">TMDB API Key</label>
+                            <input type="text" id="enrich-tmdb-key" class="settings-input" placeholder="api key de themoviedb.org" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">IGDB Client ID</label>
+                            <input type="text" id="enrich-igdb-id" class="settings-input" placeholder="Twitch client id" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">IGDB Secret</label>
+                            <input type="text" id="enrich-igdb-secret" class="settings-input" placeholder="Twitch client secret" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Comic Vine Key</label>
+                            <input type="text" id="enrich-comicvine-key" class="settings-input" placeholder="api key de comicvine" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Umbral match</label>
+                            <input type="number" id="enrich-threshold" min="0" max="1" step="0.05" value="0.95" style="width:90px;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+                            <span style="font-size:0.7rem;color:var(--text-secondary);">0.95 = 95% similitud · 1.0 = match exacto</span>
+                        </div>
+                        <div style="border-top:1px solid var(--border-color);margin-top:4px;padding-top:8px;">
+                            <label style="font-size:0.8rem;font-weight:600;display:block;margin-bottom:2px;">Plantillas de cover</label>
+                            <div class="muted" style="font-size:0.7rem;color:var(--text-secondary);margin-bottom:6px;">
+                                Texto generado para el cover. Tags: {title} {release_year} {rating} {genres} {themes} {author} {description} {rating_count} {release_date} {category} {id} {cover}. Resoluci&oacute;n: categor&iacute;a+subcategor&iacute;a &rarr; categor&iacute;a &rarr; fallback.
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Fallback</label>
+                                <textarea id="enrich-tpl-fallback" rows="4" placeholder="Plantilla por defecto" style="flex:1;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:0.8rem;box-sizing:border-box;resize:vertical;"></textarea>
+                            </div>
+                            <div style="font-size:0.7rem;color:var(--text-secondary);margin-bottom:4px;">Espec&iacute;ficas (categor&iacute;a o categor&iacute;a|subcategor&iacute;a):</div>
+                            <div id="enrich-tpl-list"></div>
+                            <div style="display:flex;gap:6px;margin-top:6px;">
+                                <input type="text" id="enrich-tpl-key" placeholder="media|anime" style="flex:1;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:0.8rem;">
+                                <button class="btn-secondary" onclick="addEnrichTemplate()" style="padding:6px 12px;font-size:0.8rem;">+ A&ntilde;adir</button>
+                            </div>
+                        </div>
+                        <div>
+                            <button class="btn-secondary" onclick="saveEnrichConfig()" style="padding:6px 12px;font-size:0.75rem;">Guardar enriquecedor</button>
+                            <span id="enrich-config-status" style="font-size:0.75rem;color:var(--text-secondary);margin-left:8px;"></span>
+                        </div>
+                    </div>
+                    <h4 style="margin-bottom:8px;">🔑 Sesiones</h4>
+                    <div id="userbot-sessions-list" style="margin-bottom:8px;"></div>
+                </div>
+<div class="tab-pane hidden" id="pane-mobile">
+                    <h3 style="margin-bottom:4px;">Conexi&#xf3;n m&#xf3;vil</h3>
+                    <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:12px;">Selecciona la IP preferida para QR y enlaces autom&#xe1;ticos.</p>
+                    <div id="mobile-iface-list" style="margin-bottom:12px;"></div>
+                    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+                        <input type="number" id="mobile-scan-port" value="8098" min="1" max="65535" style="width:90px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:0.85rem;">
+                        <button class="btn-secondary" onclick="scanNetworkServers()" style="padding:8px 14px;font-size:0.8rem;">Net Scanner</button>
+                        <span id="mobile-scan-status" style="font-size:0.75rem;color:var(--text-secondary);margin-left:8px;"></span>
+                        <div id="mobile-scan-results" style="margin-top:6px;"></div>
+                    </div>
+                    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+                        <input type="text" id="mobile-dns-custom" placeholder="http://mytvcat.mydns.org:8093" style="flex:1;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:0.85rem;">
+                        <button class="btn-secondary" onclick="testMobileDns()" style="padding:8px 14px;font-size:0.8rem;">Test</button>
+                        <span id="mobile-dns-status" style="font-size:0.75rem;color:var(--text-secondary);"></span>
+                    </div>
+                    <div style="margin-bottom:10px;">
+                        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;">
+                            <input type="checkbox" id="mobile-qr-auth" style="accent-color:var(--accent);">
+                            Incluir credenciales en el QR (auto-login)
+                        </label>
+                    </div>
+                    <div id="mobile-qr-container" style="margin-top:12px;text-align:center;"></div>
+                </div>
+                <div class="tab-pane hidden" id="pane-contents">
+                    <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+                        <label style="font-size:0.85rem;font-weight:600;">Perfil:</label>
+                        <select id="contents-profile-select" class="contents-select" onchange="loadContentAccessTree()" style="flex:1;max-width:260px;"></select>
+                    </div>
+                    <div style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:8px;">Acceso permitido para este perfil:</div>
+                    <div id="contents-access-tree" style="border:1px solid var(--border-color);border-radius:6px;padding:8px;background:var(--bg-card);max-height:320px;overflow-y:auto;"></div>
+                    <div id="contents-status" style="font-size:0.8rem;color:var(--text-secondary);margin-top:8px;"></div>
+                </div>
+                <div class="tab-pane hidden" id="pane-administration">
+                    <div style="margin-bottom:12px;">
+                        <div style="font-weight:600;margin-bottom:8px;">Mantenimiento</div>
+                        <div style="font-size:0.8rem;color:#aaa;margin-bottom:6px;">Últimas 1000 líneas de logs/gateway.log</div>
+                        <textarea id="admin-log-textarea" readonly style="width:100%;height:220px;background:#111;color:#0f0;font-family:monospace;font-size:11px;padding:8px;border:1px solid #333;border-radius:6px;resize:vertical;"></textarea>
+                        <div style="margin-top:12px;display:flex;justify-content:flex-end;">
+                            <button onclick="adminLoadLog()" style="width:140px;padding:8px 12px;border:none;border-radius:6px;background:#334155;color:#fff;cursor:pointer;font-size:13px;">Refrescar log</button>
+                        </div>
+                        <div style="margin-top:16px;display:flex;align-items:center;gap:12px;justify-content:space-between;">
+                            <div style="font-size:0.82rem;color:#a1a1aa;flex:1;">Reinicia el proceso Python del servidor (útil tras cuelgues con Telegram).</div>
+                            <button onclick="adminRestart(false)" style="width:140px;padding:8px 12px;border:none;border-radius:6px;background:#dc2626;color:#fff;cursor:pointer;font-size:13px;flex-shrink:0;">Reiniciar</button>
+                        </div>
+                        <div style="margin-top:12px;display:flex;align-items:center;gap:12px;justify-content:space-between;">
+                            <div style="font-size:0.82rem;color:#a1a1aa;flex:1;">Ejecuta un comando personalizado (por defecto reinicia el contenedor Docker).</div>
+                            <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
+                                <input id="admin-custom-cmd" value="docker restart tvcat2" style="width:180px;padding:8px 8px;border-radius:6px;border:1px solid #444;background:#222;color:#fff;font-size:12px;">
+                                <button onclick="adminRestart(true)" style="width:140px;padding:8px 12px;border:none;border-radius:6px;background:#ea580c;color:#fff;cursor:pointer;font-size:13px;">Reiniciar Custom</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-pane hidden" id="pane-remote">
+                    <div class="settings-input-group" style="margin-bottom: 0;">
+                        <div style="margin-bottom: 12px;">
+                            <label>Mapeo de Mando / Teclado</label>
+                            <p class="setting-desc" style="font-size: 0.8rem; color: #aaa; margin-bottom: 0; line-height: 1.4;">
+                                Calibra las teclas de tu mando. El tester detecta cualquier tecla en tiempo real.
+                            </p>
+                        </div>
+                        <div style="display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap;">
+                            <div style="flex: 1.5; min-width: 320px; display: flex; flex-direction: column; gap: 12px;">
+                                <div id="key-tester-zone" style="background: rgba(255,255,255,0.04); border: 1px solid #333; border-radius: 8px; padding: 12px; text-align: center;">
+                                    <div style="font-size: 0.75rem; color: #888; margin-bottom: 12px;">🎮 Zona de Test — Pulsa teclas en tiempo real</div>
+                                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                                        <div style="flex: 1; min-width: 75px; display: flex; flex-direction: column; gap: 8px; align-items: center; text-align: center; border-right: 1px solid #27272a; padding-right: 8px;">
+                                            <div>
+                                                <div style="font-size:0.62rem; color:#666; margin-bottom:1px;">KeyCode</div>
+                                                <div id="tester-keycode" style="font-size: 1.3rem; font-weight: bold; color: #e11d48; font-family: monospace;">—</div>
+                                            </div>
+                                            <div>
+                                                <div style="font-size:0.62rem; color:#666; margin-bottom:1px;">Dígito</div>
+                                                <div id="tester-digit" style="font-size: 1.3rem; font-weight: bold; color: #10b981; font-family: monospace;">—</div>
+                                            </div>
+                                            <div>
+                                                <div style="font-size:0.62rem; color:#666; margin-bottom:1px;">Tecla</div>
+                                                <div id="tester-keyname" style="font-size: 0.8rem; color: #a1a1aa; font-family: monospace; white-space: nowrap; max-width: 75px; overflow: hidden; text-overflow: ellipsis;">—</div>
+                    </div>
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <label style="font-weight: 700; margin-bottom: 12px; display: block;">Umbrales de Visualización</label>
+                        <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                            <div style="flex: 1; min-width: 120px;">
+                                <label for="watch-threshold-min" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Mínimo (%)</label>
+                                <input type="number" id="watch-threshold-min" class="settings-input" style="max-width: 100%;" min="1" max="50" value="5" onchange="window.changeWatchThresholdMin(this.value)">
+                            </div>
+                            <div style="flex: 1; min-width: 120px;">
+                                <label for="watch-threshold-max" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Máximo (%)</label>
+                                <input type="number" id="watch-threshold-max" class="settings-input" style="max-width: 100%;" min="50" max="99" value="85" onchange="window.changeWatchThresholdMax(this.value)">
+                            </div>
+                        </div>
+                        <p class="setting-desc" style="margin-top: 6px;">Define los umbrales para considerar un episodio como "en visualización" (mínimo) o "visto" (máximo).</p>
+                    </div>
+                </div>
+                                        <div style="flex: 1.2; display: flex; justify-content: center; align-items: center;">
+                                            <table style="margin: 0 auto; border-collapse: separate; border-spacing: 4px; text-align: center;">
+                                                <tr>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-1" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">1</div></td>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-2" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">2</div></td>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-3" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">3</div></td>
+                                                </tr>
+                                                <tr>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-4" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">4</div></td>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-5" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">5</div></td>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-6" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">6</div></td>
+                                                </tr>
+                                                <tr>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-7" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">7</div></td>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-8" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">8</div></td>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-9" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">9</div></td>
+                                                </tr>
+                                                <tr>
+                                                    <td></td>
+                                                    <td><div class="cal-btn-vis" id="cal-btn-0" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">0</div></td>
+                                                    <td></td>
+                                                </tr>
+                                            </table>
+                                        </div>
+                                        <div style="flex: 1.4; min-width: 110px; display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; border-left: 1px solid #27272a; padding-left: 8px;">
+                                            <button class="btn-primary" onclick="window.startRemoteCalibration()" id="btn-calibrate-remote" style="background: #e11d48; border-color: #e11d48; color: white; padding: 8px 10px; font-weight: 500; font-size: 0.78rem; border-radius: 6px; cursor: pointer; width: 100%; white-space: nowrap;">Calibrar mando</button>
+                                            <button class="btn-dark" onclick="window.clearRemoteCalibration()" id="btn-clear-calibration" style="padding: 8px 10px; font-size: 0.78rem; border-radius: 6px; cursor: pointer; width: 100%; white-space: nowrap;">Resetear</button>
+                        </div>
+                    </div>
+                                </div>
+                                <div style="display:flex; align-items:center; justify-content:space-between; margin-top:12px; padding:12px; background:rgba(255,255,255,0.04); border:1px solid #333; border-radius:8px;">
+                                    <div>
+                                        <label style="margin-bottom:4px; display:block; font-size:0.85rem;">Forzar modo mando TV</label>
+                                        <p style="font-size:0.72rem; color:#888; margin:0;">Interpreta las teclas como mando físico (1-2-3 arriba). Auto detecta por defecto.</p>
+                                    </div>
+                                    <label class="switch"><input type="checkbox" id="force-remote-toggle" onchange="toggleForceRemote(this.checked)"><span class="slider round"></span></label>
+                                </div>
+                                <div style="margin-top:12px; padding:12px; background:rgba(0,0,0,0.2); border-radius:8px; border:1px solid #333;">
+                                    <div style="font-size:0.75rem; color:#888; margin-bottom:8px; font-weight:500;">Mapeo físico (posición → función):</div>
+                                    <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; text-align:center; font-size:0.7rem;">
+                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">1<br><span style="color:#888; font-size:0.65rem;">L2</span></div>
+                                        <div style="padding:8px; background:rgba(225,29,72,0.15); border:1px solid #e11d48; border-radius:6px; font-weight:600;">2<br><span style="color:#e11d48; font-size:0.65rem;">Max ↑</span></div>
+                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">3<br><span style="color:#888; font-size:0.65rem;">R2</span></div>
+                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">4<br><span>◀</span></div>
+                                        <div style="padding:8px; background:rgba(255,255,255,0.08); border-radius:6px;">5<br><span>▶/❚❚</span></div>
+                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">6<br><span>▶</span></div>
+                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">7<br><span>L1</span></div>
+                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">8<br><span>▼</span></div>
+                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">9<br><span>R1</span></div>
+                                        <div></div><div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">0<br><span>×</span></div><div></div>
+                                    </div>
+                                    <p style="font-size:0.65rem; color:#666; margin:6px 0 0;">Gamepad: DPAD=8246, A=5 B=0 X=2 Y=8 L1=7 R1=9 L2=1 R2=3</p>
+                                </div>
+                                <div id="calibration-zone" class="calibration-zone hidden" style="background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px; border: 1px dashed rgba(255,255,255,0.1); text-align: center;">
+                                    <h4 id="calibration-prompt" style="margin-bottom: 0; color: #fff; font-size: 0.85rem; font-weight: normal;">
+                                        Presiona el botón <span style="color: #e11d48; font-weight: bold; font-size: 1.1rem;" id="calibration-target-name">1</span>...
+                                    </h4>
+                                </div>
+                            </div>
+                            <div style="flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 12px;">
+                                <div>
+                                    <div style="font-size: 0.75rem; color: #888; margin-bottom: 4px; font-weight: 500;">Mapa actual:</div>
+                                    <div id="keymap-table-container" style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 8px; font-family: monospace; font-size: 0.72rem; color: #a1a1aa; max-height: 200px; overflow-y: auto;">
+                                        Cargando...
+                    </div>
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <label style="font-weight: 700; margin-bottom: 12px; display: block;">Umbrales de Visualización</label>
+                        <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                            <div style="flex: 1; min-width: 120px;">
+                                <label for="watch-threshold-min" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Mínimo (%)</label>
+                                <input type="number" id="watch-threshold-min" class="settings-input" style="max-width: 100%;" min="1" max="50" value="5" onchange="window.changeWatchThresholdMin(this.value)">
+                            </div>
+                            <div style="flex: 1; min-width: 120px;">
+                                <label for="watch-threshold-max" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Máximo (%)</label>
+                                <input type="number" id="watch-threshold-max" class="settings-input" style="max-width: 100%;" min="50" max="99" value="85" onchange="window.changeWatchThresholdMax(this.value)">
+                            </div>
+                        </div>
+                        <p class="setting-desc" style="margin-top: 6px;">Define los umbrales para considerar un episodio como "en visualización" (mínimo) o "visto" (máximo).</p>
+                    </div>
+                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-footer" style="display:flex;justify-content:space-between;gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid var(--border-color);align-items:center;">
+                <div id="userbot-footer-actions" style="display:none;flex-direction:column;gap:6px;flex:1;">
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button class="btn-secondary" onclick="openSessionGenerator()" style="padding:6px 14px;font-size:0.75rem;border-color:#a855f7;color:#a855f7;">+ Sesión Dual (Telethon+Pyrogram)</button>
+                    </div>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn-primary" onclick="saveGlobalSettings()" style="padding:10px 20px;">Guardar Cambios</button>
+                    <button class="btn-secondary" onclick="toggleSettingsModal()" style="padding:10px 20px;">Cerrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filter Modal -->
+    <div id="filter-modal" class="modal hidden">
+        <div class="modal-content filter-modal-content">
+            <span class="close-btn" onclick="toggleFilterModal()">&times;</span>
+            <h2 style="margin-bottom:16px; font-size:1.2rem;">Filtros de búsqueda</h2>
+
+            <div class="filter-section">
+                <h3 class="filter-section-title">Campos de búsqueda</h3>
+                <label class="filter-checkbox">
+                    <input type="checkbox" id="filter-title" checked> Título principal
+                </label>
+                <label class="filter-checkbox">
+                    <input type="checkbox" id="filter-alt-titles"> Títulos alternativos (Alt Titles)
+                </label>
+                <label class="filter-checkbox">
+                    <input type="checkbox" id="filter-description"> Descripción
+                </label>
+            </div>
+
+            <div class="filter-section">
+                <div class="collapsible-header filter-genres-header" onclick="toggleFilterGenres(event)" style="padding:4px 0;border:none;">
+                    <h3 class="filter-section-title" style="margin-bottom:0;">Géneros (etiquetas de contenido)</h3>
+                    <span class="filter-genres-tools">
+                        <button class="filter-clear-btn" onclick="event.stopPropagation();selectAllGenres()" style="padding:4px 10px;font-size:0.75rem;">Seleccionar todos</button>
+                        <button class="filter-clear-btn" onclick="event.stopPropagation();deselectAllGenres()" style="padding:4px 10px;font-size:0.75rem;">Quitar todos</button>
+                        <span class="collapsible-indicator" id="filter-genres-indicator">&#9660;</span>
+                    </span>
+                </div>
+                <div id="filter-genres-body" class="filter-genres-body">
+                    <div id="filter-categories-container">
+                        <p style="color:var(--text-secondary); font-size:0.85rem;">Sin géneros disponibles</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="filter-section">
+                <h3 class="filter-section-title">Año</h3>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <input type="number" id="filter-year-from" class="filter-year-input" placeholder="Desde" min="1900" max="2100">
+                    <span style="color:var(--text-secondary);">—</span>
+                    <input type="number" id="filter-year-to" class="filter-year-input" placeholder="Hasta" min="1900" max="2100">
+                    <button class="filter-clear-btn" onclick="clearYearFilter()">Limpiar</button>
+                </div>
+            </div>
+
+            <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:20px; padding-top:16px; border-top:1px solid var(--border-color);">
+                <button class="filter-action-btn filter-action-cancel" onclick="toggleFilterModal()">Cancelar</button>
+                <button class="filter-action-btn filter-action-apply" onclick="applyFilters()">Aplicar filtros</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Player Modal -->
+    <div id="player-modal" class="modal hidden">
+        <div class="player-content">
+            <div id="player-container" class="player-container">
+                <video id="tvcat-video-player" class="tvcat-video-player" playsinline controls></video>
+            </div>
+            <div id="player-info" class="player-info"></div>
+        </div>
+    </div>
+
+    <!-- Detail Modal (estilo Netflix premium) -->
+    <div id="detail-modal" class="modal hidden">
+        <div class="modal-content detail-content">
+            <span class="close-btn" onclick="closeDetails()">&times;</span>
+
+            <div class="hero-container">
+                <div class="hero-backdrop" id="detail-backdrop"></div>
+                <div class="hero-backdrop" id="detail-backdrop-next" style="opacity:0;"></div>
+                <div class="hero-overlay"></div>
+                <div class="hero-info">
+                    <div id="detail-logo-container" class="hero-logo-container"></div>
+                    <h1 id="detail-title" class="hero-title">Cargando...</h1>
+                    <div class="detail-meta" id="detail-meta">
+                        <span id="meta-year" class="meta-badge"></span>
+                        <span id="meta-rating" class="meta-badge highlight"></span>
+                        <span id="meta-category" class="meta-badge"></span>
+                    </div>
+                    <div id="detail-features" class="features-badge-container"></div>
+                    <div class="hero-actions" id="detail-actions"></div>
+                </div>
+            </div>
+
+            <div class="details-body-pane">
+                <div class="description-section">
+                    <div id="detail-original-title" class="detail-original-title"></div>
+                    <div id="detail-variants-container" style="margin-bottom: 20px;"></div>
+                    <h3>Sinopsis / Descripción</h3>
+                    <p id="detail-desc" class="body-description">Cargando metadatos...</p>
+                </div>
+                <div id="detail-extra-specs" class="extra-specs-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- EPISODES MODAL -->
+    <div id="episodes-modal" class="modal hidden">
+        <div class="floating-episodes-content">
+            <div class="floating-header">
+                <h2>📋 Lista de Episodios</h2>
+                <div class="floating-controls">
+                    <div style="text-align: right; display: flex; align-items: center; gap: 10px;">
+                        <label for="season-selector" style="font-size: 0.85rem; color: var(--text-secondary);">Temporada:</label>
+                        <select id="season-selector" class="season-combo" onchange="Catalog.onSeasonChange()"></select>
+                    </div>
+                    <span class="close-btn-mini" onclick="Catalog.closeEpisodesModal()">&times;</span>
+                </div>
+            </div>
+            <div id="episodes-list" class="episodes-grid-floating"></div>
+        </div>
+    </div>
+
+    <!-- Core JS -->
+    <script src="js/translate.js?v=20260801"></script>
+    <script src="js/api.js?v=20260801"></script>
+    <script src="js/plugin_system.js?v=20260935"></script>
+    <script src="js/navEngine.js?v=20260801"></script>
+    <script src="js/keyMapper.js?v=20260801"></script>
+    <script src="js/catalog.js?v=20260935"></script>
+    <script src="js/player.js?v=20260801"></script>
+    <script src="js/ui.js?v=20260801"></script>
+    <script src="js/app.js?v=20260801"></script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+{
+  "name": "tvcat_player_pro",
+  "version": "1.0.0",
+  "type": "player",
+  "displayName": "Player Pro (Caché Local)",
+  "description": "Reproductor con caché local vía IndexedDB. Streaming directo + switch a Blob local al perder conexión (automático). Soporta reproducción offline sin Service Worker.",
+  "icon": "⚡",
+  "defaultEnabled": false,
+  "action_category": "playback",
+  "single_button": true,
+  "priority": 5,
+  "js": ["player_pro.js"],
+  "css": [],
+  "applies_to": ["media", "series", "video"],
+  "settings_schema": [
+    {
+      "id": "ui_mode",
+      "label": "Modo de UI",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        {"value": "auto", "label": "Auto (detección automática)"},
+        {"value": "plyr", "label": "Plyr (controles modernos)"},
+        {"value": "native", "label": "Nativo (HTML5 estándar)"},
+        {"value": "basic", "label": "Básico (mínimo, TVs antiguas)"}
+      ],
+      "description": "Modo visual del reproductor."
+    },
+    {
+      "id": "cache_size_gb",
+      "label": "Tamaño máximo de caché (GB)",
+      "type": "number",
+      "default": 5,
+      "min": 1,
+      "max": 100,
+      "description": "Límite de espacio en disco para los vídeos cacheados localmente."
+    },
+    {
+      "id": "prefetch_episodes",
+      "label": "Episodios a precargar",
+      "type": "number",
+      "default": 2,
+      "min": -1,
+      "max": 50,
+      "description": "-1 = precargar todos los episodios, 0 = no precargar, N = precargar los próximos N episodios."
+    },
+    {
+      "id": "clean_previous",
+      "label": "Limpiar episodio anterior al avanzar",
+      "type": "checkbox",
+      "default": true,
+      "description": "Al superar el 30% de reproducción del episodio actual, elimina el episodio anterior del caché para liberar espacio."
+    }
+  ],
+  "has_interface": false,
+  "access": { "admin": true, "user": true, "child": true }
+}
