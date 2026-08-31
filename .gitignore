@@ -10,7 +10,9 @@
 
 # Backups locales — nunca versionar
 *.backup
+*.backup*
 **/*.backup
+**/*.backup*
 *.bak
 **/*.bak
 
@@ -43,3 +45,21 @@ tools/ffmpeg/
 .vs/
 .vscode/
 .idea/
+
+# Archivos y carpetas a ignorar (solicitud usuario)
+_cmp_3ds_err.txt
+_cmp_3ds_out.txt
+**/_cmp_3ds_err.txt
+**/_cmp_3ds_out.txt
+backup/
+**/backup/
+tools/companion_pc.js
+**/tools/companion_pc.js
+tools/companion_3ds/
+**/tools/companion_3ds/
+tvcat/plugins/tvcat_installer_3ds/
+**/tvcat_installer_3ds/
+tvcat/plugins/tvcat_peers/
+**/tvcat_peers/
+tvcat_installer_3ds/
+tvcat_peers/
