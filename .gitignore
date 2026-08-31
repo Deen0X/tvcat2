@@ -63,3 +63,5 @@ tvcat/plugins/tvcat_peers/
 **/tvcat_peers/
 tvcat_installer_3ds/
 tvcat_peers/
+tvcat/plugins/tvcat_TGHirayi/data/TGHirayi.json
+**/TGHirayi.json
