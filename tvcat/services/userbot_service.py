@@ -394,6 +394,19 @@ async def disconnect_all():
             pass
         del _client_pool[key]
 
+async def force_reconnect_all():
+    """Fuerza reconexión global: cierra todos los clientes del pool y los elimina.
+    El próximo get_active_client creará uno fresco. Usado tras detectar estado zombie."""
+    for key in list(_client_pool.keys()):
+        try:
+            c = _client_pool.get(key)
+            if c:
+                await c.disconnect()
+        except Exception:
+            pass
+        _client_pool.pop(key, None)
+    print(f" [USERBOT] force_reconnect_all ejecutado (pool limpiado)")
+
 class UserbotClient:
     """Wrapper que abstrae Telethon y Pyrogram."""
 

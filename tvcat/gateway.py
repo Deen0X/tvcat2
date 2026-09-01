@@ -59,6 +59,10 @@ class _Tee:
         self._init = False
         self._file = None
         self._path = path
+        self._line_buf = ""      # línea en construcción (hasta \n)
+        self._last = ""          # última línea original (para escribir al fichero)
+        self._last_norm = None   # su mensaje puro normalizado
+        self._count = 0          # nº de veces repetida
     def _ensure(self):
         if not self._init:
             try:
@@ -76,18 +80,82 @@ class _Tee:
                 _hls_log_finalize()
         except Exception:
             pass
+        # consola: salida íntegra (sin colapso, para no perder información en pantalla)
         try:
             self._stream.write(data)
             self._stream.flush()
         except Exception:
             pass
+        # fichero: colapso por mensaje puro normalizado (ignora ip:puerto variable)
         if self._file is not None:
             try:
-                self._file.write(data)
-                self._file.flush()
+                self._file_write_buffered(data)
             except Exception:
                 pass
         return len(data) if isinstance(data, str) else len(str(data))
+
+    @staticmethod
+    def _normalize(line):
+        """Normaliza el mensaje puro ignorando la ip:puerto del cliente (ej. '79.116.3.120:55135')."""
+        import re
+        # Registrar el prefijo INFO: <ip>:<port> -  y reemplazar la ip:puerto para que
+        # líneas con distinto cliente se colapsen juntas (mismo mensaje, distinto origen).
+        return re.sub(r'\b(?:\d{1,3}\.){3}\d{1,3}:\d+\b', 'IP:PORT', line)
+
+    def _file_write_buffered(self, data):
+        """Acumula caracteres hasta completar una línea (\n), aplica el colapso y escribe al fichero."""
+        self._line_buf += data
+        while True:
+            nl = self._line_buf.find("\n")
+            if nl < 0:
+                break
+            line = self._line_buf[:nl]          # sin el '\n'
+            self._line_buf = self._line_buf[nl + 1:]
+            self._emit_line(line)
+
+    def _emit_line(self, line):
+        """Escribe una línea terminada al fichero, colapsando si es idéntica a la anterior."""
+        line = line.rstrip("\r\n")
+        if not line:
+            self._flush_collapsed()
+            self._file.write("\n")
+            return
+        norm = self._normalize(line)
+        if norm == self._last_norm:
+            self._count += 1
+            return
+        # mensaje distinto: cerrar el bloque anterior (con contador) y empezar uno nuevo
+        self._flush_collapsed()
+        self._last = line
+        self._last_norm = norm
+        self._count = 1
+
+    def _flush_collapsed(self):
+        """Escribe la última línea al fichero, con contador (x N mensajes) si se repitió."""
+        if self._last_norm is None:
+            return
+        if self._count > 1:
+            self._file.write(f"{self._last} (x {self._count} mensajes)\n")
+        else:
+            self._file.write(f"{self._last}\n")
+        self._last = ""
+        self._last_norm = None
+        self._count = 0
+
+    def _flush_buffer(self):
+        """Vuelca la línea en construcción + el bloque colapsado pendiente al fichero."""
+        if self._line_buf:
+            self._flush_collapsed()
+            self._file.write(self._line_buf.rstrip("\n") + "\n")
+            self._line_buf = ""
+        else:
+            self._flush_collapsed()
+        if self._file is not None:
+            try:
+                self._file.flush()
+            except Exception:
+                pass
+
     def flush(self):
         try:
             if globals().get("_HLS_LOG_OPEN"):
@@ -95,6 +163,8 @@ class _Tee:
         except Exception:
             pass
         try:
+            if self._line_buf:
+                self._flush_buffer()
             self._stream.flush()
         except Exception:
             pass
@@ -148,6 +218,8 @@ def _hls_log_finalize():
     # volcar al fichero solo lo definitivo
     try:
         tee = sys.stdout if isinstance(sys.stdout, _Tee) else None
+        if tee is not None:
+            tee._flush_buffer()   # vaciar buffer de _Tee antes de escribir directamente
         fh = getattr(tee, '_file', None) if tee else None
         if fh is not None:
             if _HLS_LOG_COUNT > 1:
@@ -173,6 +245,8 @@ def printLog(msg):
             pass
         try:
             tee = sys.stdout if isinstance(sys.stdout, _Tee) else None
+            if tee is not None:
+                tee._flush_buffer()
             fh = getattr(tee, '_file', None) if tee else None
             if fh is not None:
                 fh.write("\n")
@@ -1459,8 +1533,24 @@ os.makedirs(_HLS_SEG_DIR, exist_ok=True)
 _HLS_SEG_DURATION = 6
 # Prefetch secuencial: 1 sola descarga Telegram a la vez (Telethon no tolera iter_download concurrente)
 _HLS_DOWNLOAD_LOCK = asyncio.Lock()          # LOCK GLOBAL: serializa TODAS las descargas Telegram (HLS + thumbs + covers)
+_HLS_CONN_FAILURES = []                  # timestamps de ConnectionError para detectar zombie (5 en 60s → reset)
 _HLS_PREFETCH_AHEAD_DEFAULT = 2          # nº de segmentos a precargar por delante
 _HLS_PREFETCH_QUEUE = {}                 # episode_key -> set de segmentos en cola/siendo precargados
+
+def _hls_track_conn_failure():
+    """Registra un ConnectionError con timestamp. Retorna True si hay 5+ en 60s (zombie)."""
+    import time as _t
+    now = _t.time()
+    _HLS_CONN_FAILURES.append(now)
+    # podar fuera de ventana 60s
+    cutoff = now - 60
+    while _HLS_CONN_FAILURES and _HLS_CONN_FAILURES[0] < cutoff:
+        _HLS_CONN_FAILURES.pop(0)
+    if len(_HLS_CONN_FAILURES) >= 5:
+        print(f" [HLS-ZOMBIE] 5 fallos ConnectionError en 60s → reset global requerido")
+        _HLS_CONN_FAILURES.clear()
+        return True
+    return False
 
 # ═════════════════════════════════════════════════════════════════════════════
 # HLS CACHE SPARSE (arquitectura §20.7) — fichero local por episodio + bitmap
@@ -2985,7 +3075,9 @@ async def _hls_download_priority_range(ubot, msg, state, start_off, end_off, thr
         if s < total_chunks:
             ranges.append((s, e))
 
-    workers = (secondary or []) + [client]
+    # Filtrar conexiones muertas (flood 429 las mata)
+    alive_secondary = [c for c in (secondary or []) if hasattr(c, 'is_connected') and c.is_connected()]
+    workers = alive_secondary + [client]
     writers = workers[:len(ranges)]
     done = [0]
     lock = asyncio.Lock()
@@ -2998,6 +3090,11 @@ async def _hls_download_priority_range(ubot, msg, state, start_off, end_off, thr
         last_err = None
         for attempt in range(1, retries + 1):
             try:
+                # Verificar que la conexión está viva antes de usarla
+                if hasattr(c, 'is_connected') and not c.is_connected():
+                    print(f" [HLS-CONN] {__import__('time').strftime('%H:%M:%S')} conexión muerta, saltando rango {rs}-{re}")
+                    _hls_track_conn_failure()
+                    return False
                 with open(state["path"], 'r+b') as f:
                     for i in range(rs, re):
                         abs_off = start_off + i * CHUNK
@@ -3033,11 +3130,29 @@ async def _hls_download_priority_range(ubot, msg, state, start_off, end_off, thr
                 last_err = "timeout"
             except FloodWaitError as fw:
                 last_err = f"floodwait {getattr(fw, 'seconds', '?')}s"
+            except ConnectionError as ce:
+                import time as _t2
+                ts = _t2.strftime("%H:%M:%S")
+                print(f" [HLS-CONN] {ts} ConnectionError en rango {rs}-{re}: {ce} (intento {attempt}/{retries})")
+                if _hls_track_conn_failure():
+                    # 5 fallos en 60s → reset global
+                    try:
+                        from services.userbot_service import force_reconnect_all
+                        import asyncio as _aio2
+                        _aio2.create_task(force_reconnect_all())
+                        print(f" [HLS-ZOMBIE] Reset global disparado tras 5 fallos")
+                    except Exception:
+                        pass
+                last_err = f"disconnect ({ce})"
+                break  # no reintentar con conexión muerta
             except Exception as e:
                 last_err = repr(e)
         print(f" [HLS-PRI] rango {rs}-{re} falló tras {retries} intentos ({last_err})")
         return False
 
+    # Limitar ranges al nº de writers disponibles
+    if len(ranges) > len(writers):
+        ranges = ranges[:len(writers)]
     results = await asyncio.gather(*[
         _dl_range(writers[i], ranges[i][0], ranges[i][1])
         for i in range(len(ranges))
@@ -3369,6 +3484,23 @@ async def _hls_worker_loop():
                     await asyncio.sleep(1.0)
             except Exception as e:
                 print(f" [HLS-WORKER] error descargando {episode_key}: {e}")
+                # Detección zombie: 5 fallos en 60s → reset global
+                if 'disconnect' in str(e).lower() or 'ConnectionError' in type(e).__name__ or 'Cannot send requests' in str(e):
+                    import time as _t2
+                    print(f" [HLS-CONN] {_t2.strftime('%H:%M:%S')} Worker ConnectionError: {e}")
+                    if _hls_track_conn_failure():
+                        try:
+                            from services.userbot_service import force_reconnect_all
+                            await force_reconnect_all()
+                            print(f" [HLS-ZOMBIE] Worker reset global ejecutado")
+                        except Exception:
+                            pass
+                        try:
+                            await _hls_close_secondary(secondary)
+                        except Exception:
+                            pass
+                        secondary = []
+                        current_ep = None
                 await asyncio.sleep(1.0)
     except asyncio.CancelledError:
         pass
@@ -3969,7 +4101,10 @@ async def hls_subs_embed_segment(episode_key: str, idx: int, n: int):
     if subs and idx < len(subs):
         stream_idx = subs[idx].get("stream_index", idx)
     vtt_full = _vtt_cache.get(idx)
-    if vtt_full is None:
+    _sparse_size = os.path.getsize(sparse_path) if os.path.isfile(sparse_path) else 0
+    _prev_sparse_size = _vtt_cache.get(f"_sparse_size_{idx}", 0)
+    # Re-extraer si: no hay cache, o estaba vacío y el sparse ha crecido (datos nuevos)
+    if vtt_full is None or (vtt_full == "" and _sparse_size > _prev_sparse_size + 1024*1024):
         import tempfile
         fd, tmp_vtt = tempfile.mkstemp(suffix=".vtt")
         os.close(fd)
@@ -3987,7 +4122,13 @@ async def hls_subs_embed_segment(episode_key: str, idx: int, n: int):
         finally:
             try: os.remove(tmp_vtt)
             except: pass
-        _vtt_cache[idx] = vtt_full
+        # Solo cachear si tiene contenido (evitar cache permanente de vacío)
+        if vtt_full:
+            _vtt_cache[idx] = vtt_full
+        else:
+            # No cachear vacío: reintentar en la próxima petición si el sparse creció
+            _vtt_cache.pop(idx, None)
+        _vtt_cache[f"_sparse_size_{idx}"] = _sparse_size
 
     cues = _parse_vtt_cues(vtt_full)
     # Recortar al intervalo y re-anclar a 0 con X-TIMESTAMP-MAP para sincronía correcta

@@ -401,8 +401,10 @@
         if(!customLayer){
             customLayer=document.createElement("div"); customLayer.id="hls-custom-layer";
             customLayer.style.cssText="position:absolute;left:0;top:0;width:100%;height:100%;z-index:100003;opacity:0;visibility:hidden;pointer-events:none;transition:opacity 0.2s;";
-            var btnClose=document.createElement("div"); btnClose.textContent="Ã—"; btnClose.setAttribute("data-cc-interactive","1");
-            btnClose.style.cssText="position:absolute;top:1%;right:2%;width:36px;height:36px;text-align:center;line-height:30px;font-size:22px;color:#fff;background:rgba(0,0,0,0.6);border:1px solid #888;border-radius:50%;cursor:pointer;z-index:11;pointer-events:none;";
+            var btnClose=document.createElement("div"); btnClose.textContent="×"; btnClose.setAttribute("data-cc-interactive","1");
+            btnClose.className="close-btn"; btnClose.style.cssText="position:absolute;top:12px;right:16px;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-size:1.5rem;color:#fff;background:rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.1);border-radius:50%;cursor:pointer;z-index:11;pointer-events:none;opacity:0.6;transition:all 0.2s;";
+            btnClose.onmouseenter=function(){ this.style.opacity="1"; this.style.color="var(--accent)"; this.style.background="rgba(225,29,72,0.2)"; };
+            btnClose.onmouseleave=function(){ this.style.opacity="0.6"; this.style.color="#fff"; this.style.background="rgba(0,0,0,0.4)"; };
             btnClose.addEventListener("click", function(e){
                 e.stopPropagation(); e.preventDefault();
                 log("close X clicked");
@@ -415,6 +417,18 @@
                 }, 80);
             });
             customLayer.appendChild(btnClose);
+            var btnRestart=document.createElement("div"); btnRestart.id="cc-restart"; btnRestart.textContent="↻"; btnRestart.title="Reiniciar servidor"; btnRestart.setAttribute("data-cc-interactive","1");
+            btnRestart.style.cssText="position:absolute;top:1%;right:8%;width:36px;height:36px;text-align:center;line-height:30px;font-size:18px;color:#fff;background:rgba(180,0,0,0.7);border:1px solid #f88;border-radius:50%;cursor:pointer;z-index:11;pointer-events:none;";
+            btnRestart.addEventListener("click", function(e){
+                e.stopPropagation(); e.preventDefault();
+                if(!confirm("¿Reiniciar el servidor?\nSe reiniciará para todos los usuarios.")) return;
+                log("Restart solicitado desde HLS player");
+                fetch("/api/admin/restart", {method:"POST", credentials:"include"}).then(function(r){
+                    if(r.ok) alert("Reiniciando... reconecta en 10s");
+                    else alert("Error al reiniciar: "+r.status);
+                }).catch(function(err){ alert("Error reiniciar: "+err); });
+            });
+            customLayer.appendChild(btnRestart);
             // Icono + nombre del plugin arriba a la izquierda
             var titleWrap=document.createElement("div"); titleWrap.setAttribute("data-cc-interactive","1");
             titleWrap.style.cssText="position:absolute;top:1%;left:2%;display:flex;align-items:center;gap:8px;z-index:11;pointer-events:none;";

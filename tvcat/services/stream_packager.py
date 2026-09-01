@@ -30,12 +30,19 @@ def _find_ffmpeg():
     p = shutil.which("ffmpeg")
     if p:
         return p
+    # Ruta del plugin (relativa a este fichero: services/ -> raiz tvcat/)
     plugin_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "plugins", "tvcat_TGHirayi", "ffmpeg", "ffmpeg.exe"
     )
     if os.path.isfile(plugin_dir):
         return plugin_dir
+    # Fallback: buscar ffmpeg.exe en cualquier plugins/tvcat_TGHirayi/ffmpeg/ alcanzable
+    _here = os.path.dirname(os.path.abspath(__file__))
+    for _root in [os.path.dirname(_here), _here, os.path.dirname(os.path.dirname(_here))]:
+        _try = os.path.join(_root, "plugins", "tvcat_TGHirayi", "ffmpeg", "ffmpeg.exe")
+        if os.path.isfile(_try):
+            return _try
     return None
 
 
@@ -50,6 +57,11 @@ def _find_ffprobe():
     )
     if os.path.isfile(plugin_dir):
         return plugin_dir
+    _here = os.path.dirname(os.path.abspath(__file__))
+    for _root in [os.path.dirname(_here), _here, os.path.dirname(os.path.dirname(_here))]:
+        _try = os.path.join(_root, "plugins", "tvcat_TGHirayi", "ffmpeg", "ffprobe.exe")
+        if os.path.isfile(_try):
+            return _try
     return None
 
 
