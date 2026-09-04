@@ -152,7 +152,7 @@
             + '#tgcopy-queue-panel .tgcopy-presskey:active{border-color:#facc15;color:#facc15;}';
         panel.appendChild(pressCss);
         panel.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-right:40px;"><span style="font-weight:600;font-size:15px;flex:1;">Cola de copia (TGHirayi)</span></div>' +
-            '<span class="close-btn-mini" style="position:absolute;top:12px;right:12px;" title="Cerrar" onclick="var o=this.parentNode.parentNode; o.parentNode.removeChild(o)">&times;</span>';
+            '<span class="close-btn" style="top:12px;right:12px;" title="Cerrar" onclick="var o=this.parentNode.parentNode; o.parentNode.removeChild(o)">&times;</span>';
         var content = document.createElement('div');
         panel.appendChild(content);
         overlay.appendChild(panel);
@@ -1001,8 +1001,9 @@ html += '</div>';
         getHeroButtons: function(itemData) {
             return [{
                 id: 'btn-tghirayi',
-                icon: '<img src="/plugin-static/tvcat_TGHirayi/plugin_icon.png" style="width:20px;height:20px;object-fit:cover;">',
-                label: 'Enviar a<br>Canal',
+                icon: '<img src="/plugin-static/tvcat_TGHirayi/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.onerror=null;this.src=\'/plugin-static/tvcat_TGHirayi/plugin_icon.png\';">',
+                tooltip: 'Enviar a Canal Telegram',
+            label: '',
                 action: function() { showDestinationPicker(itemData); }
             }];
         }

@@ -267,6 +267,42 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
 
 
 
+def _msg_has_image(m):
+    """2026-09-04: el mensaje aporta IMAGEN (foto, preview con foto, o documento
+    con mime image/*). El nombre de una imagen nunca es nombre de fichero."""
+    try:
+        if getattr(m, 'photo', None) is not None:
+            return True
+        _raw = getattr(m, '_raw_media', None)
+        if _raw is None:
+            _raw = getattr(m, 'document', None)
+        if not isinstance(_raw, dict):
+            return False
+        _mt = _raw.get("_", "")
+        if _mt == "MessageMediaWebPage":
+            _wp = _raw.get("webpage") or {}
+            return bool(_wp.get("photo")) and not bool(_wp.get("document"))
+        _doc = _raw.get("document") or {}
+        if isinstance(_doc, dict) and str(_doc.get("mime_type") or "").lower().startswith("image/"):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _msg_has_file(m):
+    """2026-09-04: solo vídeo/audio/fichero NO imagen. Las imágenes (aunque vengan
+    como documento) nunca cuentan como fichero para formar títulos."""
+    try:
+        if _msg_has_image(m):
+            return False
+        return (getattr(m, 'document', None) is not None
+                or getattr(m, 'video', None) is not None
+                or getattr(m, 'audio', None) is not None)
+    except Exception:
+        return False
+
+
 def _segment_blocks(msgs):
     """Heurística file->image: segmenta mensajes en bloques {images, texts, files}.
     Frontera entre títulos = imagen (foto o documento-imagen) tras ficheros, o texto
@@ -423,12 +459,34 @@ def _parse_block_title_desc(b, fallback_title=None, _extra_files=None):
         match = re.search(r"(?i)(?:title|t\u00edtulo|titulo)[ \t]*[:= \t-][ \t]*([^\n]+)", first_text)
         if match:
             title = match.group(1).strip()
+            # Si el valor está vacío (ej. "Título :\n#Kamen..."), tomar siguiente línea con "#"
+            if not title or title in (":", "-", ""):
+                lines = [l.strip() for l in first_text.split("\n") if l.strip()]
+                for idx, line in enumerate(lines):
+                    if re.search(r"(?i)(?:title|t\u00edtulo|titulo)\s*[:=]", line):
+                        if idx+1 < len(lines) and lines[idx+1].startswith("#"):
+                            title = lines[idx+1].lstrip("#").strip().replace("_", " ")
+                        break
+                if not title or title in (":", "-", ""):
+                    title = None
 
     if not title:
-        # Fallback 1: primera línea del texto del cover si no es URL
+        # Fallback 1: primera línea del texto del cover si no es URL y no es solo "Título :"
         first_line = (first_text or "").strip().split("\n")[0].strip()
-        if first_line and not re.search(r"https?://|t\.me/", first_line):
+        if first_line and not re.search(r"https?://|t\.me/", first_line) and not re.match(r"(?i)^(?:title|t\u00edtulo|titulo)\s*[:=]\s*$", first_line):
             title = first_line[:120]
+        elif first_text:
+            # Buscar primera línea con contenido real que no sea label
+            for line in (first_text or "").strip().split("\n"):
+                line=line.strip()
+                if not line or re.match(r"(?i)^(?:title|t\u00edtulo|titulo|serial|idioma|tama\u00f1o|formato|link|serial)\s*[:=]", line):
+                    continue
+                if line.startswith("#"):
+                    title = line.lstrip("#").strip().replace("_", " ")[:120]
+                    break
+                if len(line) > 3:
+                    title = line[:120]
+                    break
 
     if not title:
         # Fallback 2: nombre del primer fichero del bloque (o _extra_files) sanitizado
@@ -802,13 +860,20 @@ async def parse_topology(scan_id, stop_event=None):
                 m = _Msg()
                 m.id = d.get("id", 0)
                 m.text = d.get("message") or ""
-                # Detectar imagen: MessageMediaPhoto directo, o MessageMediaWebPage con
-                # foto de preview (texto + imagen en el mismo mensaje = cover típico).
-                # Si el webpage trae document (link a un fichero), NO es cover → se trata como contenido.
+                # Detectar imagen (2026-09-04): vale foto directa, preview de enlace
+                # con foto, o documento-imagen (foto enviada como fichero). El orden
+                # texto/imagen dentro del mensaje es irrelevante: Telegram lo manda
+                # como una unidad (media + caption). Si el webpage trae document
+                # (link a un fichero), NO es cover → se trata como contenido.
                 _is_photo = media_type == "MessageMediaPhoto"
                 if not _is_photo and media_type == "MessageMediaWebPage":
                     _wp = media_d.get("webpage") or {}
                     if _wp.get("photo") and not _wp.get("document"):
+                        _is_photo = True
+                if not _is_photo and media_type == "MessageMediaDocument":
+                    _doc = media_d.get("document") or {}
+                    _mime = str(_doc.get("mime_type") or "").lower()
+                    if _mime.startswith("image/"):
                         _is_photo = True
                 m.photo = media_d if _is_photo else None
                 m.document = media_d if media_type == "MessageMediaDocument" else None
@@ -903,8 +968,10 @@ async def parse_topology(scan_id, stop_event=None):
                     current_group = None
                     title_groups = []
                     for m in tmsgs_sorted:
-                        is_image = m.photo is not None
-                        is_file = m.document is not None or getattr(m, "video", None) is not None or getattr(m, "audio", None) is not None
+                        # 2026-09-04: imágenes (foto/preview/documento-imagen) solo
+                        # pueden ser cover, nunca fichero de título.
+                        is_image = _msg_has_image(m)
+                        is_file = _msg_has_file(m)
                         if is_image:
                             if current_group and current_group["files"]:
                                 title_groups.append(current_group)
@@ -1037,7 +1104,31 @@ async def parse_topology(scan_id, stop_event=None):
                             cat_id = insert_scanned_item(title, current_subcat, category, desc, cover_id, link, b["files"], source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
                             new_count += 1
             
-            # 3. Guardar el progreso en el canal del sistema
+            # 3. Purgar duplicados viejos con cover genérico absorbidos por otro
+            # título con cover real (restos de scans con topics rotos). Acotado a
+            # este scan (source_tag): episodios del genérico TODOS en otro item.
+            try:
+                _stale = conn_central.execute("SELECT item_id FROM unified_catalog WHERE source=? AND telegram_msg_id IN (-999,-1000)", (source_tag,)).fetchall()
+                for _sr in _stale:
+                    _sid = _sr[0]
+                    _eps = [e[0] for e in conn_central.execute("SELECT telegram_msg_id FROM item_episodes WHERE item_id=?", (_sid,)).fetchall() if e[0]]
+                    if not _eps:
+                        continue
+                    _ph = ",".join("?" for _ in _eps)
+                    _others = conn_central.execute("SELECT DISTINCT item_id FROM item_episodes WHERE item_id!=? AND telegram_msg_id IN (%s)" % _ph, tuple([_sid] + _eps)).fetchall()
+                    for _or in _others:
+                        _oid = _or[0]
+                        _cnt = conn_central.execute("SELECT COUNT(*) FROM item_episodes WHERE item_id=? AND telegram_msg_id IN (%s)" % _ph, tuple([_oid] + _eps)).fetchone()[0]
+                        _oc = conn_central.execute("SELECT telegram_msg_id FROM unified_catalog WHERE item_id=?", (_oid,)).fetchone()
+                        if _cnt == len(_eps) and _oc and int(_oc[0]) not in (-999, -1000):
+                            conn_central.execute("DELETE FROM item_episodes WHERE item_id=?", (_sid,))
+                            conn_central.execute("DELETE FROM unified_catalog WHERE item_id=?", (_sid,))
+                            add_log(f"  🧹 Duplicado genérico purgado: {_sid} (absorbido por {_oid})")
+                            break
+            except Exception as _e:
+                add_log(f"  (purga duplicados omitida: {_e})")
+
+            # 4. Guardar el progreso en el canal del sistema
             if max_scan_msg_id > 0:
                 conn_sys = get_db_connection(system=True)
                 conn_sys.execute("UPDATE tvcat_scanned_channels SET last_scanned_msg_id = ? WHERE id = ?", (max_scan_msg_id, scan_id))
@@ -1077,6 +1168,21 @@ async def _scan_channel(account_id, ch, idx, total):
 
     # Último msg_id escaneado desde el caché central (fuente de verdad)
     start_msg_id = ch.get("start_msg_id") or 1
+    # 2026-09-04: sanear filas con topic NULL en el rango (wipe histórico por
+    # guardados sin topic: covers/thumbs/refresh). Se refetchean con topic
+    # correcto en este scan; UPSERT ya impide nuevos wipes.
+    try:
+        from services.cache_keys import canon_channel as _cc
+        _canon = _cc(raw_ch_id)
+        _c0 = get_db_connection()
+        _end0 = end_id if end_id and end_id > 0 else 999999999
+        _del = _c0.execute("DELETE FROM telegram_message_cache WHERE channel_id=? AND topic_id IS NULL AND msg_id>=? AND msg_id<=?", (_canon, start_msg_id, _end0))
+        _c0.commit()
+        if _del.rowcount:
+            add_log(f"  🧹 Saneo topics: {_del.rowcount} filas NULL re-fetch en rango.")
+        _c0.close()
+    except Exception as _e:
+        add_log(f"  (saneo topics omitido: {_e})")
     last_id = _get_last_cached_id(raw_ch_id)
     # En escaneo limpio el caché se vacía (last_id=0): respetar el mensaje de inicio configurado.
     if last_id < start_msg_id - 1:
@@ -1270,7 +1376,10 @@ def _delete_all_channel_data(scan_config_id: int):
         plugin_cursor.execute(f"DELETE FROM item_episodes WHERE item_id IN ({ph})", item_ids)
 
     for mid in msg_ids:
-        plugin_cursor.execute("DELETE FROM catalog_assets WHERE telegram_msg_id = ?", (mid,))
+        try:
+            plugin_cursor.execute("DELETE FROM catalog_assets WHERE channel_id = ? AND telegram_msg_id = ?", (bare, mid))
+        except Exception:
+            plugin_cursor.execute("DELETE FROM catalog_assets WHERE telegram_msg_id = ?", (mid,))
 
     if user_item_ids:
         ph = ",".join("?" for _ in user_item_ids)
@@ -1312,6 +1421,12 @@ def _clean_scan_items(scan_config_id: int):
         item_ids = []
         user_item_ids = []
         msg_ids = set()
+        chan_mids = set()
+        try:
+            from services.cache_keys import key_from_link, split_key
+        except Exception:
+            key_from_link = None
+            split_key = None
         for item in items:
             item_ids.append(item[0])
             if item[1]:
@@ -1322,12 +1437,27 @@ def _clean_scan_items(scan_config_id: int):
                     msg_ids.add(int(parts[-1]))
                 except ValueError:
                     pass
+            if key_from_link and split_key and item[2]:
+                try:
+                    _ch, _mid = split_key(key_from_link(item[2]))
+                    if _ch and _mid:
+                        chan_mids.add((_ch, int(_mid)))
+                except Exception:
+                    pass
         if item_ids:
             ph = ",".join("?" for _ in item_ids)
             cur.execute(f"DELETE FROM item_episodes WHERE item_id IN ({ph})", item_ids)
             cur.execute(f"DELETE FROM unified_catalog WHERE id IN ({ph})", item_ids)
-        for mid in msg_ids:
-            cur.execute("DELETE FROM catalog_assets WHERE telegram_msg_id = ?", (mid,))
+        if chan_mids:
+            for (_ch, _mid) in chan_mids:
+                try:
+                    cur.execute("DELETE FROM catalog_assets WHERE channel_id = ? AND telegram_msg_id = ?", (_ch, _mid))
+                except Exception:
+                    cur.execute("DELETE FROM catalog_assets WHERE telegram_msg_id = ?", (_mid,))
+        else:
+            # Sin links parseables: comportamiento anterior (solo si la tabla no tiene canal)
+            for mid in msg_ids:
+                cur.execute("DELETE FROM catalog_assets WHERE telegram_msg_id = ?", (mid,))
         if user_item_ids:
             ph = ",".join("?" for _ in user_item_ids)
             cur.execute(f"DELETE FROM tvcat_cache WHERE item_id IN ({ph})", user_item_ids)
@@ -1470,20 +1600,47 @@ async def disconnect_client(account_id: int):
 
 
 def _migrate_telegram_scan_to_cache():
-    """Una sola vez (idempotente por INSERT OR REPLACE): vuelca telegram_scan (plugin y sistema)
-    a telegram_message_cache (DB central). Es la tabla única de mensajes raw del sistema."""
+    """Una sola vez (flag migrate_tgscan_done_v1): vuelca telegram_scan (plugin y
+    sistema) a telegram_message_cache (DB central). 2026-09-04: antes corría en CADA
+    arranque con INSERT OR REPLACE y pisaba filas buenas con copias viejas
+    (topics a NULL, raws antiguos) -> se hace una vez y con UPSERT seguro."""
     import json as _json
     try:
         from tvcat.gateway import get_db_connection
+
+        try:
+            _chk = get_db_connection()
+            _done = _chk.execute("SELECT value FROM tvcat_settings WHERE key='migrate_tgscan_done_v1'").fetchone()
+            _chk.close()
+            if _done:
+                return
+        except Exception:
+            pass
+
+        try:
+            from services.cache_keys import canon_channel as _canon
+        except Exception:
+            def _canon(x):
+                return str(x or "")
 
         def _dump(conn, rows):
             n = 0
             for ch, tp, mid, msg in rows:
                 try:
-                    _json.loads(msg)
+                    _d = _json.loads(msg)
+                    _inner = _d.get("raw") if isinstance(_d.get("raw"), dict) else _d
+                    _rid = (_inner or {}).get("id", None)
+                    if _rid is not None and int(_rid) != int(mid):
+                        continue
                     conn.execute(
-                        "INSERT OR REPLACE INTO telegram_message_cache (channel_id, topic_id, msg_id, message, fetched_at) VALUES (?,?,?,?,unixepoch())",
-                        (ch, tp, mid, msg))
+                        """INSERT INTO telegram_message_cache
+                        (channel_id, topic_id, msg_id, message, fetched_at)
+                        VALUES (?,?,?,?,unixepoch())
+                        ON CONFLICT(channel_id, msg_id) DO UPDATE SET
+                            message=excluded.message,
+                            fetched_at=excluded.fetched_at,
+                            topic_id=COALESCE(excluded.topic_id, topic_id)""",
+                        (_canon(ch), tp, mid, msg))
                     n += 1
                 except Exception:
                     pass
@@ -1538,6 +1695,14 @@ def _migrate_telegram_scan_to_cache():
             sconn.close()
         except Exception as e:
             print(f" [TGINDEX MIGRATE] error sistema: {e}")
+        # Marcar como hecha (una sola vez)
+        try:
+            _fc = get_db_connection()
+            _fc.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES ('migrate_tgscan_done_v1','1')")
+            _fc.commit()
+            _fc.close()
+        except Exception:
+            pass
     except Exception as e:
         print(f" [TGINDEX MIGRATE] error: {e}")
 

@@ -5,15 +5,21 @@ Wrapper unificado para Telethon y Pyrogram.
 import os
 import sqlite3
 import platform
+import logging
 from datetime import datetime
 from typing import Optional
+
+# 2026-09-04: silenciar la race conocida de Telethon 1.43 (recv_loop/reconnect
+# con _connection=None en red inestable). Ruido que no afecta al gateway;
+# los errores reales siguen en nuestros logs [USERBOT]/[JIT COVER].
+logging.getLogger("telethon.network.mtprotosender").setLevel(logging.CRITICAL)
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DB_PATH = os.path.join(BASE_DIR, "data", "tvcat.db")
 
 
 def _get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA busy_timeout=30000")
@@ -154,6 +160,7 @@ def save_telegram_user(tg_user_id: int, name: str, phone: str = None, api_id: in
 def delete_telegram_user(tg_user_id: int) -> bool:
     conn = _get_conn()
     conn.execute("DELETE FROM telegram_users WHERE tg_user_id=?", (tg_user_id,))
+    conn.execute("DELETE FROM userbot_sessions WHERE tg_user_id=?", (tg_user_id,))
     conn.commit()
     conn.close()
     return True
@@ -177,8 +184,20 @@ def set_default_telegram_user(tg_user_id: int) -> bool:
     return True
 
 
+def _get_global_client_type() -> Optional[str]:
+    try:
+        conn = _get_conn()
+        row = conn.execute("SELECT value FROM tvcat_settings WHERE key='telegram_client_type'").fetchone()
+        conn.close()
+        if row and row["value"] in ("telethon", "pyrogram"):
+            return row["value"]
+    except Exception:
+        pass
+    return None
+
 def get_active_session(tg_user_id: int = None) -> Optional[dict]:
-    """Devuelve la sesión activa para un usuario (o default)."""
+    """Devuelve la sesión activa para un usuario (o default).
+    Si hay cliente global configurado (telegram_client_type), se usa ese."""
     conn = _get_conn()
     if tg_user_id is None:
         user = get_default_telegram_user()
@@ -186,6 +205,26 @@ def get_active_session(tg_user_id: int = None) -> Optional[dict]:
             conn.close()
             return None
         tg_user_id = user["tg_user_id"]
+    gct = _get_global_client_type()
+    if gct:
+        row = conn.execute(
+            "SELECT s.*, u.active_client FROM userbot_sessions s "
+            "JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
+            "WHERE s.tg_user_id=? AND s.is_active=1 "
+            "AND s.client_type=? LIMIT 1",
+            (tg_user_id, gct)
+        ).fetchone()
+        # fallback si no hay sesión del tipo global para este usuario
+        if not row:
+            row = conn.execute(
+                "SELECT s.*, u.active_client FROM userbot_sessions s "
+                "JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
+                "WHERE s.tg_user_id=? AND s.is_active=1 "
+                "AND s.client_type=u.active_client LIMIT 1",
+                (tg_user_id,)
+            ).fetchone()
+        conn.close()
+        return dict(row) if row else None
     row = conn.execute(
         "SELECT s.*, u.active_client FROM userbot_sessions s "
         "JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
@@ -327,25 +366,40 @@ def get_primary_session() -> Optional[dict]:
 
 _client_pool = {}
 
+# 2026-09-04: locks single-flight por clave. Sin esto, N corutinas concurrentes
+# veían el cliente caído y lanzaban N connect() en paralelo -> N-1 senders
+# abandonados cuyo recv_loop/reconnect crashea en Telethon (_connection=None)
+# y fuga de sockets que Telegram corta en bucle.
+import asyncio as _asyncio
+_client_locks = {}
+
+def _pool_lock(key: str):
+    lk = _client_locks.get(key)
+    if lk is None:
+        lk = _asyncio.Lock()
+        _client_locks[key] = lk
+    return lk
+
 async def get_active_client(client_type: str = None) -> 'UserbotClient':
     """Devuelve el cliente activo para el tipo dado (o el del usuario default)."""
     if client_type:
         key = f"active_{client_type}"
-        if key in _client_pool:
-            c = _client_pool[key]
-            # Si el cliente cacheado quedó desconectado (disconnect manual, caída de red),
-            # reconectar antes de devolverlo.
-            try:
-                raw = getattr(c, '_client', None)
-                connected = await raw.is_connected() if raw else False
-            except Exception:
-                connected = False
-            if not connected:
+        async with _pool_lock(key):
+            if key in _client_pool:
+                c = _client_pool[key]
+                # Si el cliente cacheado quedó desconectado (disconnect manual, caída de red),
+                # reconectar antes de devolverlo (una sola vez, bajo lock).
                 try:
-                    await c.connect()
-                except Exception as e:
-                    print(f" [USERBOT] Reconnect fallido {client_type}: {e}")
-            return c
+                    raw = getattr(c, '_client', None)
+                    connected = await raw.is_connected() if raw else False
+                except Exception:
+                    connected = False
+                if not connected:
+                    try:
+                        await c.connect()
+                    except Exception as e:
+                        print(f" [USERBOT] Reconnect fallido {client_type}: {e}")
+                return c
         sess = get_active_session()
         if sess and sess.get("client_type") == client_type:
             client = UserbotClient(sess)
@@ -423,6 +477,16 @@ class UserbotClient:
     async def _connect_telethon(self):
         from telethon import TelegramClient
         from telethon.sessions import StringSession
+        # 2026-09-04: desconectar el anterior ANTES de crear uno nuevo. Si no,
+        # cada reconnect (red inestable) fugaba un socket zombi que Telegram
+        # corta ("Server closed the connection") y Telethon reintenta en bucle.
+        old = self._client
+        self._client = None
+        if old is not None:
+            try:
+                await old.disconnect()
+            except Exception:
+                pass
         ss = StringSession(self.session_data.get("session_string", ""))
         self._client = TelegramClient(
             ss,
@@ -435,6 +499,14 @@ class UserbotClient:
     async def _connect_pyrogram(self):
         from pyrogram import Client
         import os, tempfile
+        # 2026-09-04: igual que telethon, cerrar el anterior para no fugarlo.
+        old = self._client
+        self._client = None
+        if old is not None:
+            try:
+                await old.disconnect()
+            except Exception:
+                pass
         name = f"tvcat_pyro_{abs(hash(str(self.session_data.get('session_string',''))))}"
         # Workers de red configurables (por defecto 16). Afecta a subida/descarga del cliente.
         workers = int(self.session_data.get("workers", 16) or 16)

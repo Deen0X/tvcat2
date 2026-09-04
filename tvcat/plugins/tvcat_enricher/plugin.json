@@ -1,0 +1,14 @@
+{
+  "name": "tvcat_enricher",
+  "displayName": "Enriquecedor",
+  "description": "Sustituye el cover ancla (foto+caption) por uno enriquecido. Si el mensaje es tuyo lo edita en Telegram; si no, queda local y lo usa TGHirayi al copiar.",
+  "type": "heropage-action",
+  "version": "1.0.0",
+  "defaultEnabled": true,
+    "icon": "static/plugin_icon.png",
+    "iconEmoji": "✨",
+    "js": [
+        "enricher.js"
+    ],
+    "settings_ui": "/plugin-static/tvcat_enricher/config.html"
+}

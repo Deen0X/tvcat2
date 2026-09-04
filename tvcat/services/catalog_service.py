@@ -213,20 +213,7 @@ def init_db():
         )
     """)
 
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS catalog_assets (
-            telegram_msg_id INTEGER,
-            asset_type TEXT,
-            asset_index INTEGER DEFAULT 0,
-            image_blob BLOB,
-            mime_type TEXT,
-            file_size INTEGER,
-            width INTEGER,
-            height INTEGER,
-            source TEXT,
-            PRIMARY KEY (telegram_msg_id, asset_type, asset_index)
-        )
-    """)
+    c.execute(CATALOG_ASSETS_DDL)
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS telegram_message_cache (
@@ -364,6 +351,11 @@ def init_db():
     conn.commit()
     conn.close()
     print(" [CATALOG] Base de datos inicializada")
+    # Migración de claves canónicas channelid_msgid (una vez; ver CatalogAssets_ChannelKey_Fix_Plan.md)
+    try:
+        migrate_cache_keys()
+    except Exception as e:
+        print(f" [CATALOG] migrate_cache_keys omitida: {e}", flush=True)
 
 
 def _seed_tag_dictionary(conn):
@@ -437,9 +429,10 @@ def rebuild_cache(plugin_loader):
         try:
             c.execute("""
                 INSERT OR IGNORE INTO catalog_assets
-                (telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
+                ad.get("channel_id", ""),
                 ad.get("telegram_msg_id"),
                 ad.get("asset_type", "cover"),
                 ad.get("asset_index", 0),
@@ -469,14 +462,151 @@ def _derive_episode_key(telegram_link):
       https://t.me/c/{channel}/{msgid}          -> '{channel}_{msgid}'
       https://t.me/c/{channel}/{topic}/{msgid}  -> '{channel}_{msgid}' (se ignora el topic)
     Devuelve '' si no se puede derivar.
+    Delega en services.cache_keys (único criterio, Project_Architecture §21.9 / plan channel-key).
     """
-    if not telegram_link:
-        return ""
-    m = re.search(r"/c/(\d+)/(?:(\d+)/)?(\d+)", telegram_link)
-    if not m:
-        return ""
-    channel, topic, msgid = m.group(1), m.group(2), m.group(3)
-    return f"{channel}_{msgid}"
+    try:
+        from services.cache_keys import key_from_link
+        return key_from_link(telegram_link)
+    except Exception:
+        if not telegram_link:
+            return ""
+        m = re.search(r"/c/(\d+)/(?:(\d+)/)?(\d+)", telegram_link)
+        if not m:
+            return ""
+        return f"{m.group(1)}_{m.group(3)}"
+
+
+CATALOG_ASSETS_DDL = """
+    CREATE TABLE IF NOT EXISTS catalog_assets (
+        channel_id TEXT NOT NULL DEFAULT '',
+        telegram_msg_id INTEGER,
+        asset_type TEXT,
+        asset_index INTEGER DEFAULT 0,
+        image_blob BLOB,
+        mime_type TEXT,
+        file_size INTEGER,
+        width INTEGER,
+        height INTEGER,
+        source TEXT,
+        PRIMARY KEY (channel_id, telegram_msg_id, asset_type, asset_index)
+    )
+"""
+
+
+def migrate_cache_keys():
+    """Migración 2026-09-03 — unifica claves channelid_msgid (canon_channel).
+    - telegram_message_cache: normaliza channel_id a canónico + dedupe (conserva fetched_at mayor).
+    - catalog_assets (central + plugins con la tabla): rebuild con channel_id en PK;
+      conserva filas sintéticas (telegram_msg_id < 0, channel_id=''), purga el resto (caché regenerable vía JIT).
+    Idempotente (flag tvcat_settings schema_cache_keys_v1). Ver CatalogAssets_ChannelKey_Fix_Plan.md.
+    """
+    from services.cache_keys import canon_channel
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT value FROM tvcat_settings WHERE key='schema_cache_keys_v1'").fetchone()
+    except Exception:
+        row = None
+    if row and (row[0] == "1"):
+        conn.close()
+        return {"migrated": False, "reason": "already applied"}
+
+    stats = {"raw_normalized": 0, "raw_deduped": 0, "assets_purged": 0, "assets_kept": 0}
+
+    # 1) telegram_message_cache: normalizar + dedupe
+    try:
+        rows = conn.execute(
+            "SELECT channel_id, topic_id, msg_id, message, fetched_at FROM telegram_message_cache"
+        ).fetchall()
+        winners = {}
+        for r in rows:
+            key = (canon_channel(r["channel_id"]), int(r["msg_id"]))
+            prev = winners.get(key)
+            if prev is None or int(r["fetched_at"] or 0) >= int(prev["fetched_at"] or 0):
+                winners[key] = r
+        stats["raw_deduped"] = len(rows) - len(winners)
+        conn.execute("DELETE FROM telegram_message_cache")
+        for (ch, mid), r in winners.items():
+            if ch != str(r["channel_id"]):
+                stats["raw_normalized"] += 1
+            conn.execute(
+                "INSERT OR REPLACE INTO telegram_message_cache (channel_id, topic_id, msg_id, message, fetched_at) VALUES (?, ?, ?, ?, ?)",
+                (ch, r["topic_id"], int(r["msg_id"]), r["message"], int(r["fetched_at"] or 0)),
+            )
+        conn.commit()
+    except Exception as e:
+        print(f" [MIGRATE keys] raw normalize error: {e}", flush=True)
+
+    # 2) catalog_assets central: rebuild con channel_id (conserva sintéticos < 0)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(catalog_assets)").fetchall()]
+        if cols and "channel_id" not in cols:
+            gen = conn.execute(
+                "SELECT telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source FROM catalog_assets WHERE telegram_msg_id < 0"
+            ).fetchall()
+            stats["assets_kept"] = len(gen)
+            purged = conn.execute("SELECT COUNT(*) FROM catalog_assets WHERE telegram_msg_id >= 0").fetchone()[0]
+            stats["assets_purged"] = purged or 0
+            conn.execute("DROP TABLE IF EXISTS catalog_assets")
+            conn.execute(CATALOG_ASSETS_DDL)
+            for g in gen:
+                conn.execute(
+                    "INSERT OR REPLACE INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source) VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (g["telegram_msg_id"], g["asset_type"], g["asset_index"], g["image_blob"], g["mime_type"], g["file_size"], g["width"], g["height"], g["source"]),
+                )
+            conn.commit()
+    except Exception as e:
+        print(f" [MIGRATE keys] assets rebuild error: {e}", flush=True)
+
+    # 3) catalog_assets en DBs de plugins (si existe la tabla): mismo rebuild
+    try:
+        import glob as _glob
+        for db_path in _glob.glob(os.path.join(BASE_DIR, "plugins", "*", "data", "tvcat.db")):
+            try:
+                pc = sqlite3.connect(db_path, timeout=30)
+                pc.execute("PRAGMA busy_timeout=30000")
+                pcols = [r[1] for r in pc.execute("PRAGMA table_info(catalog_assets)").fetchall()]
+                if not pcols:
+                    pc.close()
+                    continue
+                if "channel_id" not in pcols:
+                    gen = pc.execute(
+                        "SELECT telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height FROM catalog_assets WHERE telegram_msg_id < 0"
+                    ).fetchall()
+                    pc.execute("DROP TABLE IF EXISTS catalog_assets")
+                    pc.execute("""
+                        CREATE TABLE IF NOT EXISTS catalog_assets (
+                            channel_id TEXT NOT NULL DEFAULT '',
+                            telegram_msg_id INTEGER,
+                            asset_type TEXT,
+                            asset_index INTEGER DEFAULT 0,
+                            image_blob BLOB,
+                            mime_type TEXT,
+                            file_size INTEGER,
+                            width INTEGER,
+                            height INTEGER,
+                            PRIMARY KEY (channel_id, telegram_msg_id, asset_type, asset_index)
+                        )
+                    """)
+                    for g in gen:
+                        pc.execute(
+                            "INSERT OR REPLACE INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height) VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]),
+                        )
+                    pc.commit()
+                pc.close()
+            except Exception as e:
+                print(f" [MIGRATE keys] plugin {db_path}: {e}", flush=True)
+    except Exception as e:
+        print(f" [MIGRATE keys] plugins error: {e}", flush=True)
+
+    try:
+        conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES ('schema_cache_keys_v1', '1')")
+        conn.commit()
+    except Exception:
+        pass
+    conn.close()
+    print(f" [MIGRATE keys] done: {stats}", flush=True)
+    return {"migrated": True, **stats}
 
 
 def sync_plugin_cache(plugin_loader, plugin_name: str):
@@ -625,15 +755,16 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 )
             """, list(active_item_ids))
 
-        # Copiar catalog_assets del plugin
+        # Copiar catalog_assets del plugin (channel_id con fallback '' para esquemas viejos)
         try:
             for arow in pc.execute("SELECT * FROM catalog_assets").fetchall():
                 ad = dict(arow)
                 c.execute("""
                     INSERT OR IGNORE INTO catalog_assets
-                    (telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
+                    ad.get("channel_id", ""),
                     ad.get("telegram_msg_id"),
                     ad.get("asset_type", "cover"),
                     ad.get("asset_index", 0),

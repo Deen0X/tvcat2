@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title data-i18n="TVCat 2">TVCat 2</title>
     <link rel="icon" type="image/png" href="static/TVCat.png">
-    <link rel="stylesheet" href="style.css?v=20260901">
+    <link rel="stylesheet" href="style.css?v=20260903q">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css">
     <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
@@ -132,7 +132,7 @@
                 </button>
                 <button class="tab-btn" id="tab-btn-screen" onclick="switchSettingsTab('screen')">
                     <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7l-2 3v1h8v-1l-2-3h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 12H3V4h18v10z"/></svg>
-                    <span class="tab-btn-text">Pantalla</span>
+                    <span class="tab-btn-text">Interfaz</span>
                 </button>
                 <button class="tab-btn" id="tab-btn-cache" onclick="switchSettingsTab('cache')">
                     <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M21 18c0 1.1-.9 2-2 2H5c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2h14c1.1 0 2 .9 2 2v12zM5 6v1h14V6H5zm0 3v1h14V9H5zm0 3v1h14v-1H5z"/></svg>
@@ -167,24 +167,43 @@
                     <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94L14.4 2.81c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.55 2.54c-.6.24-1.13.57-1.62.94L5.05 5.33c-.22-.08-.47 0-.59.22L2.54 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.55 2.54c.04.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.55-2.54c.6-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c-.12-.22-.17-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
                     <span class="tab-btn-text">Mantenimiento</span>
                 </button>
+                <button class="tab-btn tab-admin" id="tab-btn-enricher" onclick="switchSettingsTab('enricher')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+                    <span class="tab-btn-text">Enriquecedor</span>
+                </button>
+                <button class="tab-btn tab-admin" id="tab-btn-covers" onclick="switchSettingsTab('covers')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+                    <span class="tab-btn-text">Customización</span>
+                </button>
             </div>
             <div class="settings-tab-container">
                 <div class="tab-pane" id="pane-profile">
                     <div class="settings-input-group">
                         <label for="profile-display-name">Nombre de pantalla</label>
-                        <input type="text" id="profile-display-name" class="settings-input" placeholder="Tu nombre...">
+                        <div style="display:flex;gap:12px;align-items:center;">
+                            <div id="profile-avatar-preview" title="Click para seleccionar imagen local" onclick="document.getElementById('profile-avatar-file').click()" style="width:56px;height:56px;border-radius:50%;background:var(--accent,#e11d48);display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;flex-shrink:0;border:2px solid var(--border-color);font-size:1.6rem;color:#fff;">👤</div>
+                            <input type="text" id="profile-display-name" class="settings-input" placeholder="Tu nombre..." style="flex:1;margin-top:0;">
+                            <input type="file" id="profile-avatar-file" accept="image/*" style="display:none;" onchange="handleLocalAvatarFile(this)">
+                        </div>
                     </div>
                     <div class="settings-input-group">
                         <label>Personaliza tu Avatar</label>
                         <div class="avatar-tabs">
-                            <button type="button" class="avatar-tab-btn active" onclick="switchAvatarTab('presets')">Emojis</button>
-                            <button type="button" class="avatar-tab-btn" onclick="switchAvatarTab('url')">URL</button>
+                            <button type="button" class="avatar-tab-btn active" onclick="switchAvatarTab('presets')">😊 Emojis</button>
+                            <button type="button" class="avatar-tab-btn" onclick="switchAvatarTab('url')">🔗 URL</button>
+                            <button type="button" class="avatar-tab-btn" onclick="switchAvatarTab('local')">📁 Local</button>
                         </div>
                         <div id="avatar-pane-presets" class="avatar-tab-pane">
                             <div class="avatar-presets-grid" id="avatar-presets"></div>
                         </div>
                         <div id="avatar-pane-url" class="avatar-tab-pane hidden">
                             <input type="text" id="profile-avatar-url" class="settings-input" placeholder="https://ejemplo.com/foto.jpg" oninput="selectAvatarUrl(this.value)">
+                        </div>
+                        <div id="avatar-pane-local" class="avatar-tab-pane hidden">
+                            <div style="display:flex;gap:8px;">
+                                <input type="text" id="profile-avatar-local" class="settings-input" placeholder="Selecciona una imagen local..." readonly style="flex:1;background:var(--bg-surface);">
+                                <button type="button" class="btn-secondary" onclick="document.getElementById('profile-avatar-file').click()" style="padding:8px 14px;white-space:nowrap;border-radius:8px;">📁 Seleccionar</button>
+                            </div>
                         </div>
                     </div>
                     <div class="settings-input-group">
@@ -229,19 +248,6 @@
                             <option value="8">8 Columnas</option>
                             <option value="9">9 Columnas</option>
                             <option value="10">10 Columnas</option>
-                        </select>
-                    </div>
-
-                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
-                        <label for="player-chunk-size-select">Tamaño de Búfer (Chunk Size)</label>
-                        <p class="setting-desc" style="margin-bottom: 12px;">Configura el tamaño del bloque de descarga. Los bloques pequeños evitan cortes en conexiones lentas o Smart TVs.</p>
-                        <select id="player-chunk-size-select" class="variant-select" style="max-width: 100%;" onchange="window.changeDownloadChunkSize(this.value)">
-                            <option value="32">32 KB (Conexiones muy lentas)</option>
-                            <option value="64">64 KB (Estable y rápido)</option>
-                            <option value="128">128 KB (Recomendado/Por defecto)</option>
-                            <option value="256">256 KB (Conexiones rápidas)</option>
-                            <option value="512">512 KB (Máximo rendimiento local)</option>
-                            <option value="1024">1024 KB (Streaming eficiente)</option>
                         </select>
                     </div>
 
@@ -318,6 +324,32 @@
                             </div>
                         </div>
                     </div>
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <label style="font-weight: 700; margin-bottom: 12px; display: block;">Umbrales de Visualización</label>
+                        <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                            <div style="flex: 1; min-width: 120px;">
+                                <label for="watch-threshold-min" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Mínimo (%)</label>
+                                <input type="number" id="watch-threshold-min" class="settings-input" style="max-width: 100%;" min="1" max="50" value="5" onchange="window.changeWatchThresholdMin(this.value)">
+                            </div>
+                            <div style="flex: 1; min-width: 120px;">
+                                <label for="watch-threshold-max" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Máximo (%)</label>
+                                <input type="number" id="watch-threshold-max" class="settings-input" style="max-width: 100%;" min="50" max="99" value="85" onchange="window.changeWatchThresholdMax(this.value)">
+                            </div>
+                        </div>
+                        <p class="setting-desc" style="margin-top: 6px;">Define los umbrales para considerar un episodio como "en visualización" (mínimo) o "visto" (máximo).</p>
+                    </div>
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <label for="player-chunk-size-select">Tamaño de Búfer (Chunk Size)</label>
+                        <p class="setting-desc" style="margin-bottom: 12px;">Configura el tamaño del bloque de descarga. Los bloques pequeños evitan cortes en conexiones lentas o Smart TVs.</p>
+                        <select id="player-chunk-size-select" class="variant-select" style="max-width: 100%;" onchange="window.changeDownloadChunkSize(this.value)">
+                            <option value="32">32 KB (Conexiones muy lentas)</option>
+                            <option value="64">64 KB (Estable y rápido)</option>
+                            <option value="128">128 KB (Recomendado/Por defecto)</option>
+                            <option value="256">256 KB (Conexiones rápidas)</option>
+                            <option value="512">512 KB (Máximo rendimiento local)</option>
+                            <option value="1024">1024 KB (Streaming eficiente)</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="tab-pane hidden" id="pane-cache">
                     <div class="settings-input-group">
@@ -336,8 +368,8 @@
                             </div>
                             <div id="cache-stats" style="font-size:0.8rem;color:var(--text-secondary,#999);margin-bottom:8px;">Calculando espacio usado...</div>
                             <div style="display:flex;gap:8px;">
-                                <button class="btn-primary" onclick="saveCacheConfig()" style="padding:6px 14px;font-size:0.85rem;">Guardar</button>
-                                <button class="btn" onclick="clearVideoCache()" style="padding:6px 14px;font-size:0.85rem;">Vaciar caché</button>
+                                <button class="btn-primary" onclick="saveCacheConfig()" style="padding:6px 14px;font-size:0.85rem;border-radius:8px;">Establecer</button>
+                                <button class="btn-secondary" onclick="clearVideoCache()" style="padding:6px 14px;font-size:0.85rem;border-radius:8px;background:#27272a;border:1px solid #3f3f46;">Vaciar caché</button>
                             </div>
                             <span id="cache-status" style="margin-left:8px;font-size:0.8rem;"></span>
                         </div>
@@ -346,6 +378,7 @@
                 <div class="tab-pane hidden" id="pane-plugins">
                     <h3 style="margin-bottom:8px;">Plugins instalados</h3>
                     <div id="plugins-list-container"></div>
+
                 </div>
                 <div class="tab-pane hidden" id="pane-admin">
                     <h3 style="margin-bottom:8px;">Gestión de usuarios</h3>
@@ -353,51 +386,104 @@
                     <div id="admin-users-container"></div>
                 </div>
                 <div class="tab-pane hidden" id="pane-userbot">
-                    <h4 style="margin-bottom:8px;">🔑 Credenciales por defecto</h4>
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
-                        <div style="flex:1;min-width:100px;">
-                            <label style="font-size:0.7rem;color:var(--text-secondary);display:block;margin-bottom:2px;">API ID</label>
-                            <input type="text" id="userbot-api-id" class="settings-input" placeholder="123456" style="padding:6px 8px;font-size:0.8rem;">
+                    <!-- 1. Credenciales por defecto (colapsable) -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden;">
+                        <div onclick="toggleUserbotCollap('creds')" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;background:var(--bg-card);user-select:none;">
+                            <h4 style="margin:0;font-size:0.85rem;">🔑 Credenciales por defecto</h4>
+                            <span id="collap-creds-ind" style="font-size:0.7rem;transition:transform 0.2s;display:inline-block;">▼</span>
                         </div>
-                        <div style="flex:2;min-width:150px;">
-                            <label style="font-size:0.7rem;color:var(--text-secondary);display:block;margin-bottom:2px;">API Hash</label>
-                            <input type="text" id="userbot-api-hash" class="settings-input" placeholder="abcdef..." style="padding:6px 8px;font-size:0.8rem;">
-                        </div>
-                        <div style="flex:1;min-width:120px;">
-                            <label style="font-size:0.7rem;color:var(--text-secondary);display:block;margin-bottom:2px;">Teléfono</label>
-                            <input type="text" id="userbot-phone" class="settings-input" placeholder="+34600000000" style="padding:6px 8px;font-size:0.8rem;">
-                        </div>
-                        <div style="display:flex;align-items:flex-end;gap:4px;">
-                            <button class="btn-secondary" onclick="toggleUserbotVisibility()" id="userbot-eye-btn" style="padding:6px 10px;font-size:0.75rem;">👁</button>
-                            <button class="btn-secondary" onclick="saveUserbotDefaults()" style="padding:6px 12px;font-size:0.75rem;">Guardar</button>
-                        </div>
-                    </div>
-                    <h4 style="margin-bottom:8px;">⚙️ Configuración Telegram</h4>
-                    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px;padding:8px;background:var(--bg-card);border-radius:6px;">
-                        <div style="display:flex;align-items:center;gap:8px;">
-                            <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Intervalo carátulas (s):</label>
-                            <select id="setting-jit-cover-interval" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
-                                <option value="0.2" style="background:var(--bg);color:var(--text);">0.2</option>
-                                <option value="0.5" style="background:var(--bg);color:var(--text);">0.5</option>
-                                <option value="1.0" selected style="background:var(--bg);color:var(--text);">1.0</option>
-                                <option value="1.5" style="background:var(--bg);color:var(--text);">1.5</option>
-                                <option value="2.0" style="background:var(--bg);color:var(--text);">2.0</option>
-                                <option value="2.5" style="background:var(--bg);color:var(--text);">2.5</option>
-                                <option value="3.0" style="background:var(--bg);color:var(--text);">3.0</option>
-                            </select>
-                            <button class="btn-secondary" onclick="saveTelegramSettings()" style="padding:4px 10px;font-size:0.7rem;">Guardar</button>
+                        <div id="collap-creds-body" style="padding:10px 12px;">
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <div style="flex:1;min-width:100px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);display:block;margin-bottom:2px;">API ID</label>
+                                    <input type="text" id="userbot-api-id" class="settings-input" placeholder="123456" style="padding:6px 8px;font-size:0.8rem;">
+                                </div>
+                                <div style="flex:2;min-width:150px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);display:block;margin-bottom:2px;">API Hash</label>
+                                    <input type="text" id="userbot-api-hash" class="settings-input" placeholder="abcdef..." style="padding:6px 8px;font-size:0.8rem;">
+                                </div>
+                                <div style="flex:1;min-width:120px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);display:block;margin-bottom:2px;">Teléfono</label>
+                                    <input type="text" id="userbot-phone" class="settings-input" placeholder="+34600000000" style="padding:6px 8px;font-size:0.8rem;">
+                                </div>
+                                <div style="display:flex;align-items:flex-end;gap:4px;">
+                                    <button class="btn-secondary" onclick="toggleUserbotVisibility()" id="userbot-eye-btn" style="padding:6px 10px;font-size:0.75rem;">👁</button>
+                                    <button class="btn-secondary" onclick="saveUserbotDefaults()" style="padding:6px 12px;font-size:0.75rem;">Guardar</button>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <h4 style="margin-bottom:8px;">🔐 Login con Google (opcional)</h4>
-                    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px;padding:8px;background:var(--bg-card);border-radius:6px;">
-                        <p style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 4px;">
-                            Si dejas estos campos <b>vac&iacute;os</b>, el login con Google est&aacute; <b>deshabilitado</b> (no aparecer&aacute; en la pantalla de login ni en los perfiles).
-                            Para habilitarlo: crea un proyecto en
-                            <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" style="color:var(--accent);">Google Cloud Console</a>,
-                            crea unas credenciales <b>OAuth 2.0 Client ID</b> de tipo <b>"Aplicaci&oacute;n web"</b>, a&ntilde;ade en <b>"URIs de redirecci&oacute;n autorizados"</b> esta URL:
-                            <code id="google-redirect-uri" style="display:block;margin:6px 0;padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.7rem;word-break:break-all;">(calculando...)</code>
-                            y pega aqu&iacute; el Client ID y Client Secret.
-                        </p>
+
+                    <!-- 2. Sesiones (colapsable) -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden;">
+                        <div onclick="toggleUserbotCollap('sessions')" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;background:var(--bg-card);user-select:none;">
+                            <h4 style="margin:0;font-size:0.85rem;">🔑 Sesiones</h4>
+                            <span id="collap-sessions-ind" style="font-size:0.7rem;transition:transform 0.2s;display:inline-block;">▼</span>
+                        </div>
+                        <div id="collap-sessions-body" style="padding:10px 12px;">
+                            <div id="userbot-sessions-list" style="margin-bottom:10px;"></div>
+                            <button class="btn-secondary" onclick="openSessionGenerator()" style="padding:6px 12px;font-size:0.8rem;width:100%;">+ Sesión Dual (Telethon + Pyrogram)</button>
+                        </div>
+                    </div>
+
+                    <!-- 3. Comportamiento Telegram (colapsable) -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden;">
+                        <div onclick="toggleUserbotCollap('behavior')" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;background:var(--bg-card);user-select:none;">
+                            <h4 style="margin:0;font-size:0.85rem;">⚙️ Comportamiento Telegram</h4>
+                            <span id="collap-behavior-ind" style="font-size:0.7rem;transition:transform 0.2s;display:inline-block;">▼</span>
+                        </div>
+                        <div id="collap-behavior-body" style="padding:10px 12px;display:flex;flex-direction:column;gap:10px;">
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Intervalo carátulas (s):</label>
+                                <select id="setting-jit-cover-interval" class="variant-select" style="flex:1;max-width:280px;">
+                                    <option value="0.2">0.2</option>
+                                    <option value="0.5">0.5</option>
+                                    <option value="1.0" selected>1.0</option>
+                                    <option value="1.5">1.5</option>
+                                    <option value="2.0">2.0</option>
+                                    <option value="2.5">2.5</option>
+                                    <option value="3.0">3.0</option>
+                                </select>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Cliente Telegram:</label>
+                                <select id="setting-telegram-client" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                                    <option value="telethon" style="background:var(--bg);color:var(--text);">Telethon (recomendado)</option>
+                                    <option value="pyrogram" style="background:var(--bg);color:var(--text);">Pyrogram (Pyrofork)</option>
+                                </select>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Throttle msgs/min:</label>
+                                <input type="number" id="setting-tg-throttle-per-minute" min="5" max="120" step="1" value="20" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Throttle ráfaga:</label>
+                                <input type="number" id="setting-tg-throttle-burst" min="1" max="30" step="1" value="5" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div>
+                                <button class="btn-secondary" onclick="saveTelegramSettings()" style="padding:4px 10px;font-size:0.7rem;">Guardar</button>
+                                <span id="telegram-behavior-status" style="font-size:0.7rem;color:var(--text-secondary);margin-left:8px;"></span>
+                            </div>
+                        </div>
+                    </div>
+
+
+
+                    <!-- 5. Login con Google (colapsable, oculto por defecto) -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden;">
+                        <div onclick="toggleUserbotCollap('google')" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;background:var(--bg-card);user-select:none;">
+                            <h4 style="margin:0;font-size:0.85rem;">🔐 Login con Google (opcional)</h4>
+                            <span id="collap-google-ind" style="font-size:0.7rem;transition:transform 0.2s;display:inline-block;">▼</span>
+                        </div>
+                        <div id="collap-google-body" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+                            <p style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 4px;">
+                                Si dejas estos campos <b>vac&iacute;os</b>, el login con Google est&aacute; <b>deshabilitado</b> (no aparecer&aacute; en la pantalla de login ni en los perfiles).
+                                Para habilitarlo: crea un proyecto en
+                                <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" style="color:var(--accent);">Google Cloud Console</a>,
+                                crea unas credenciales <b>OAuth 2.0 Client ID</b> de tipo <b>"Aplicaci&oacute;n web"</b>, a&ntilde;ade en <b>"URIs de redirecci&oacute;n autorizados"</b> esta URL:
+                                <code id="google-redirect-uri" style="display:block;margin:6px 0;padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.7rem;word-break:break-all;">(calculando...)</code>
+                                y pega aqu&iacute; el Client ID y Client Secret.
+                            </p>
                             <div style="display:flex;flex-direction:column;gap:6px;">
                                 <div style="display:flex;align-items:center;gap:8px;">
                                     <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Client ID</label>
@@ -416,79 +502,137 @@
                                     <span id="google-config-status" style="font-size:0.75rem;color:var(--text-secondary);margin-left:8px;"></span>
                                 </div>
                             </div>
-                    </div>
-                    <h4 style="margin-bottom:8px;">🔍 Enriquecedor de contenidos</h4>
-                    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px;padding:8px;background:var(--bg-card);border-radius:6px;">
-                        <p style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 4px;">
-                            Servicio que enriquece títulos (sinopsis, carátula, géneros) desde servicios online. Se usa, por ejemplo, para generar el cover al copiar títulos. Deja los campos vacíos para deshabilitar un proveedor.
-                        </p>
-                        <div style="display:flex;align-items:center;gap:8px;">
-                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">TMDB API Key</label>
-                            <input type="text" id="enrich-tmdb-key" class="settings-input" placeholder="api key de themoviedb.org" style="flex:1;padding:6px 8px;font-size:0.8rem;">
-                        </div>
-                        <div style="display:flex;align-items:center;gap:8px;">
-                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">IGDB Client ID</label>
-                            <input type="text" id="enrich-igdb-id" class="settings-input" placeholder="Twitch client id" style="flex:1;padding:6px 8px;font-size:0.8rem;">
-                        </div>
-                        <div style="display:flex;align-items:center;gap:8px;">
-                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">IGDB Secret</label>
-                            <input type="text" id="enrich-igdb-secret" class="settings-input" placeholder="Twitch client secret" style="flex:1;padding:6px 8px;font-size:0.8rem;">
-                        </div>
-                        <div style="display:flex;align-items:center;gap:8px;">
-                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Comic Vine Key</label>
-                            <input type="text" id="enrich-comicvine-key" class="settings-input" placeholder="api key de comicvine" style="flex:1;padding:6px 8px;font-size:0.8rem;">
-                        </div>
-                        <div style="display:flex;align-items:center;gap:8px;">
-                            <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Umbral match</label>
-                            <input type="number" id="enrich-threshold" min="0" max="1" step="0.05" value="0.95" style="width:90px;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">
-                            <span style="font-size:0.7rem;color:var(--text-secondary);">0.95 = 95% similitud · 1.0 = match exacto</span>
-                        </div>
-                        <div style="border-top:1px solid var(--border-color);margin-top:4px;padding-top:8px;">
-                            <label style="font-size:0.8rem;font-weight:600;display:block;margin-bottom:2px;">Plantillas de cover</label>
-                            <div class="muted" style="font-size:0.7rem;color:var(--text-secondary);margin-bottom:6px;">
-                                Texto generado para el cover. Tags: {title} {release_year} {rating} {genres} {themes} {author} {description} {rating_count} {release_date} {category} {id} {cover}. Resoluci&oacute;n: categor&iacute;a+subcategor&iacute;a &rarr; categor&iacute;a &rarr; fallback.
-                            </div>
-                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Fallback</label>
-                                <textarea id="enrich-tpl-fallback" rows="4" placeholder="Plantilla por defecto" style="flex:1;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:0.8rem;box-sizing:border-box;resize:vertical;"></textarea>
-                            </div>
-                            <div style="font-size:0.7rem;color:var(--text-secondary);margin-bottom:4px;">Espec&iacute;ficas (categor&iacute;a o categor&iacute;a|subcategor&iacute;a):</div>
-                            <div id="enrich-tpl-list"></div>
-                            <div style="display:flex;gap:6px;margin-top:6px;">
-                                <input type="text" id="enrich-tpl-key" placeholder="media|anime" style="flex:1;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:0.8rem;">
-                                <button class="btn-secondary" onclick="addEnrichTemplate()" style="padding:6px 12px;font-size:0.8rem;">+ A&ntilde;adir</button>
-                            </div>
-                        </div>
-                        <div>
-                            <button class="btn-secondary" onclick="saveEnrichConfig()" style="padding:6px 12px;font-size:0.75rem;">Guardar enriquecedor</button>
-                            <span id="enrich-config-status" style="font-size:0.75rem;color:var(--text-secondary);margin-left:8px;"></span>
                         </div>
                     </div>
-                    <h4 style="margin-bottom:8px;">🔑 Sesiones</h4>
-                    <div id="userbot-sessions-list" style="margin-bottom:8px;"></div>
+                </div>
+                <div class="tab-pane hidden" id="pane-enricher">
+                    <h3 style="margin-bottom:12px;">Enriquecedor</h3>
+                    <p style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:12px;">Servicio que enriquece títulos (sinopsis, carátula, géneros) desde servicios online. Se usa para generar el cover al copiar y en el editor enriquecido. Deja los campos vacíos para deshabilitar un proveedor.</p>
+                    <!-- Proveedores -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;">
+                        <div style="padding:10px 12px;background:var(--bg-card);display:flex;align-items:center;justify-content:space-between;">
+                            <h4 style="margin:0;font-size:0.85rem;">Proveedores</h4>
+                        </div>
+                        <div style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">TMDB API Key</label>
+                                <input type="text" id="enrich-tmdb-key" class="settings-input" placeholder="api key de themoviedb.org" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">IGDB Client ID</label>
+                                <input type="text" id="enrich-igdb-id" class="settings-input" placeholder="Twitch client id" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">IGDB Secret</label>
+                                <input type="text" id="enrich-igdb-secret" class="settings-input" placeholder="Twitch client secret" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Comic Vine Key</label>
+                                <input type="text" id="enrich-comicvine-key" class="settings-input" placeholder="api key de comicvine" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Umbral match</label>
+                                <input type="number" id="enrich-threshold" min="0" max="1" step="0.05" value="0.95" style="width:90px;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+                                <span style="font-size:0.7rem;color:var(--text-secondary);">0.95 = 95% similitud · 1.0 = match exacto</span>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Plantillas -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;">
+                        <div style="padding:10px 12px;background:var(--bg-card);">
+                            <h4 style="margin:0;font-size:0.85rem;">Plantillas de cover</h4>
+                            <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:4px;">Texto generado para el cover. Tags: {title} {release_year} {rating} {genres} {themes} {author} {description} {originalmsg} {rating_count} {release_date} {category} {id} {cover}. Resolución: categoría+subcategoría → categoría → fallback.</div>
+                        </div>
+                        <div style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+                            <div style="font-size:0.7rem;color:var(--text-secondary);margin-bottom:6px;">Selecciona una plantilla para editar (la primera opción es el Fallback, no se puede eliminar):</div>
+                            <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;">
+                                <select id="enrich-tpl-select" class="variant-select" style="flex:1;padding:6px 8px;font-size:0.8rem;" onchange="onEnricherTplSelect()"></select>
+                                <button class="btn-secondary" onclick="deleteEnricherTemplate()" style="padding:6px 12px;font-size:0.8rem;">Eliminar</button>
+                            </div>
+                            <div id="enricher-tpl-edit" style="border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-card);display:flex;flex-direction:column;gap:6px;">
+                                <div style="display:flex;align-items:center;gap:8px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Nombre:</label>
+                                    <input type="text" id="enrich-tpl-name" placeholder="Nombre (ej: Anime HD)" class="settings-input" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                </div>
+                                <div style="display:flex;align-items:center;gap:8px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Categoría:</label>
+                                    <input type="text" id="enrich-tpl-cats" placeholder="Categorías (; separadas) ej: media; video" class="settings-input" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                </div>
+                                <div style="display:flex;align-items:center;gap:8px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Subcategoría:</label>
+                                    <input type="text" id="enrich-tpl-subs" placeholder="Subcategorías (; separadas) ej: movies; pelis" class="settings-input" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                </div>
+                                <div style="display:flex;align-items:flex-start;gap:8px;">
+                                    <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;padding-top:6px;">Plantilla:</label>
+                                    <textarea id="enrich-tpl-content" rows="4" placeholder="Plantilla (ej: {title} {year} ... {originalmsg})" style="flex:1;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:0.8rem;box-sizing:border-box;resize:vertical;"></textarea>
+                                </div>
+                                <div style="display:flex;gap:6px;">
+                                    <button class="btn-secondary" onclick="saveEnricherTemplate()" style="padding:6px 12px;font-size:0.8rem;flex:1;">Guardar plantilla</button>
+                                    <button class="btn-secondary" onclick="addEnricherTemplateNew()" style="padding:6px 12px;font-size:0.8rem;">+ Nueva</button>
+                                </div>
+                            </div>
+                            <div id="enrich-tpl-list" style="display:none;"></div>
+                            <div style="margin-top:8px;">
+                                <button class="btn-secondary" onclick="saveEnrichConfig()" style="padding:6px 12px;font-size:0.75rem;">Guardar enriquecedor</button>
+                                <span id="enrich-config-status" style="font-size:0.75rem;color:var(--text-secondary);margin-left:8px;"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Comportamiento -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;">
+                        <div style="padding:10px 12px;background:var(--bg-card);">
+                            <h4 style="margin:0;font-size:0.85rem;">Comportamiento</h4>
+                        </div>
+                        <div style="padding:10px 12px;display:flex;flex-direction:column;gap:10px;">
+                            <div style="display:flex;align-items:center;justify-content:space-between;">
+                                <div>
+                                    <label style="font-size:0.8rem;font-weight:600;">Auto-enriquecer al escanear</label>
+                                    <p style="font-size:0.7rem;color:var(--text-secondary);margin:0;">Enriquece títulos automáticamente tras el escaneo si no tienen cover.</p>
+                                </div>
+                                <label class="switch"><input type="checkbox" id="enrich-auto-scan" onchange="saveEnrichBehavior()"><span class="slider round"></span></label>
+                            </div>
+                            <div style="display:flex;align-items:center;justify-content:space-between;">
+                                <div>
+                                    <label style="font-size:0.8rem;font-weight:600;">Sobrescribir si ya existe</label>
+                                    <p style="font-size:0.7rem;color:var(--text-secondary);margin:0;">Si ya hay un cover enriquecido, lo reemplaza al re-enriquecer.</p>
+                                </div>
+                                <label class="switch"><input type="checkbox" id="enrich-overwrite" onchange="saveEnrichBehavior()"><span class="slider round"></span></label>
+                            </div>
+                            <span id="enrich-behavior-status" style="font-size:0.7rem;color:var(--text-secondary);"></span>
+                        </div>
+                    </div>
+                    <!-- Editor de f-tags -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;">
+                        <div style="padding:10px 12px;background:var(--bg-card);display:flex;align-items:center;justify-content:space-between;">
+                            <h4 style="margin:0;font-size:0.85rem;">Formato de f-tags</h4>
+                            <span style="font-size:0.7rem;color:var(--text-secondary);">{value} es el dato crudo</span>
+                        </div>
+                        <div style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+                            <div style="font-size:0.7rem;color:var(--text-secondary);">Tag crudo <code>{title}</code> → ftag formateado <code>{ftitle}</code> (ej: <code>Title: {value}</code>). Vacío no genera línea.</div>
+                            <div style="display:flex;gap:6px;align-items:center;">
+                                <select id="ftag-tag-select" class="variant-select" style="flex:0 0 160px;padding:6px 8px;font-size:0.8rem;" onchange="onFtagSelect()"></select>
+                                <input type="text" id="ftag-template" placeholder="Ej: Title: {value}" class="settings-input" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                <button class="btn-secondary" onclick="saveFtag()" style="padding:6px 12px;font-size:0.8rem;">Guardar</button>
+                            </div>
+                            <span id="ftag-status" style="font-size:0.7rem;color:var(--text-secondary);"></span>
+                        </div>
+                    </div>
                 </div>
 <div class="tab-pane hidden" id="pane-mobile">
                     <h3 style="margin-bottom:4px;">Conexi&#xf3;n m&#xf3;vil</h3>
-                    <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:12px;">Selecciona la IP preferida para QR y enlaces autom&#xe1;ticos.</p>
-                    <div id="mobile-iface-list" style="margin-bottom:12px;"></div>
-                    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
-                        <input type="number" id="mobile-scan-port" value="8098" min="1" max="65535" style="width:90px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:0.85rem;">
-                        <button class="btn-secondary" onclick="scanNetworkServers()" style="padding:8px 14px;font-size:0.8rem;">Net Scanner</button>
-                        <span id="mobile-scan-status" style="font-size:0.75rem;color:var(--text-secondary);margin-left:8px;"></span>
-                        <div id="mobile-scan-results" style="margin-top:6px;"></div>
-                    </div>
-                    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
-                        <input type="text" id="mobile-dns-custom" placeholder="http://mytvcat.mydns.org:8093" style="flex:1;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:0.85rem;">
+                    <div id="mobile-qr-container" style="margin:12px 0;text-align:center;min-height:60px;"></div>
+                    <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:6px;">Selecciona la IP preferida para QR y enlaces autom&#xe1;ticos.</p>
+                    <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                        <span style="font-size:0.85rem;">🌐 DDNS:</span>
+                        <input type="text" id="mobile-dns-custom" placeholder="deen0x.ddns.net" style="flex:1;min-width:160px;max-width:220px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:0.85rem;">
+                        <span style="font-size:0.8rem;">Puerto:</span>
+                        <input type="number" id="mobile-scan-port" value="8098" min="1" max="65535" style="width:90px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:0.85rem;" onchange="saveMobilePort(this.value)">
                         <button class="btn-secondary" onclick="testMobileDns()" style="padding:8px 14px;font-size:0.8rem;">Test</button>
                         <span id="mobile-dns-status" style="font-size:0.75rem;color:var(--text-secondary);"></span>
+                        <span id="mobile-scan-status" style="font-size:0.75rem;color:var(--text-secondary);"></span>
                     </div>
-                    <div style="margin-bottom:10px;">
-                        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;">
-                            <input type="checkbox" id="mobile-qr-auth" style="accent-color:var(--accent);">
-                            Incluir credenciales en el QR (auto-login)
-                        </label>
-                    </div>
-                    <div id="mobile-qr-container" style="margin-top:12px;text-align:center;"></div>
+                    <div id="mobile-iface-list" style="margin-bottom:12px;margin-left:16px;"></div>
+
                 </div>
                 <div class="tab-pane hidden" id="pane-contents">
                     <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px;">
@@ -520,142 +664,80 @@
                         </div>
                     </div>
                 </div>
-                <div class="tab-pane hidden" id="pane-remote">
+                                <div class="tab-pane hidden" id="pane-remote">
                     <div class="settings-input-group" style="margin-bottom: 0;">
                         <div style="margin-bottom: 12px;">
                             <label>Mapeo de Mando / Teclado</label>
                             <p class="setting-desc" style="font-size: 0.8rem; color: #aaa; margin-bottom: 0; line-height: 1.4;">
-                                Calibra las teclas de tu mando. El tester detecta cualquier tecla en tiempo real.
+                                Configura el comportamiento del mando. El tester muestra la posici\u00f3n f\u00edsica A-J.
                             </p>
                         </div>
-                        <div style="display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap;">
-                            <div style="flex: 1.5; min-width: 320px; display: flex; flex-direction: column; gap: 12px;">
-                                <div id="key-tester-zone" style="background: rgba(255,255,255,0.04); border: 1px solid #333; border-radius: 8px; padding: 12px; text-align: center;">
-                                    <div style="font-size: 0.75rem; color: #888; margin-bottom: 12px;">🎮 Zona de Test — Pulsa teclas en tiempo real</div>
-                                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
-                                        <div style="flex: 1; min-width: 75px; display: flex; flex-direction: column; gap: 8px; align-items: center; text-align: center; border-right: 1px solid #27272a; padding-right: 8px;">
-                                            <div>
-                                                <div style="font-size:0.62rem; color:#666; margin-bottom:1px;">KeyCode</div>
-                                                <div id="tester-keycode" style="font-size: 1.3rem; font-weight: bold; color: #e11d48; font-family: monospace;">—</div>
-                                            </div>
-                                            <div>
-                                                <div style="font-size:0.62rem; color:#666; margin-bottom:1px;">Dígito</div>
-                                                <div id="tester-digit" style="font-size: 1.3rem; font-weight: bold; color: #10b981; font-family: monospace;">—</div>
-                                            </div>
-                                            <div>
-                                                <div style="font-size:0.62rem; color:#666; margin-bottom:1px;">Tecla</div>
-                                                <div id="tester-keyname" style="font-size: 0.8rem; color: #a1a1aa; font-family: monospace; white-space: nowrap; max-width: 75px; overflow: hidden; text-overflow: ellipsis;">—</div>
-                    </div>
-                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
-                        <label style="font-weight: 700; margin-bottom: 12px; display: block;">Umbrales de Visualización</label>
-                        <div style="display: flex; gap: 15px; flex-wrap: wrap;">
-                            <div style="flex: 1; min-width: 120px;">
-                                <label for="watch-threshold-min" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Mínimo (%)</label>
-                                <input type="number" id="watch-threshold-min" class="settings-input" style="max-width: 100%;" min="1" max="50" value="5" onchange="window.changeWatchThresholdMin(this.value)">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding:8px;background:rgba(255,255,255,0.04);border:1px solid #333;border-radius:8px;">
+                            <div>
+                                <label style="font-size:0.8rem;font-weight:600;">Invertir teclado (123\u2194789)</label>
+                                <p style="font-size:0.7rem;color:#888;margin:0;">Para mandos BT que se comportan como teclado</p>
                             </div>
-                            <div style="flex: 1; min-width: 120px;">
-                                <label for="watch-threshold-max" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Máximo (%)</label>
-                                <input type="number" id="watch-threshold-max" class="settings-input" style="max-width: 100%;" min="50" max="99" value="85" onchange="window.changeWatchThresholdMax(this.value)">
+                            <label class="switch"><input type="checkbox" id="invert-keyboard-toggle" onchange="inputHelper.setInverted(this.checked); if(window.updateMandoTester) updateMandoTester();"><span class="slider round"></span></label>
+                        </div>
+                        <div id="aj-tester" style="background:rgba(255,255,255,0.04);border:1px solid #333;border-radius:8px;padding:12px;margin-top:12px;">
+                            <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+                                <span style="font-size:0.75rem;color:#888;">Tester A-J — posiciones físicas</span>
+                                <button id="aj-test-btn" onclick="toggleMandoTest()" style="padding:4px 14px;border-radius:6px;background:#27272a;border:1px solid #52525b;color:#fff;font-size:0.75rem;font-weight:600;cursor:pointer;">▶ Test</button>
+                                <span id="aj-test-status" style="font-size:0.7rem;color:#71717a;">Pulsa Test y toca el mando/teclado</span>
+                            </div>
+                            <div style="display:flex;gap:16px;align-items:flex-start;justify-content:center;flex-wrap:wrap;">
+                                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;min-width:200px;flex:1;max-width:280px;">
+                                    <div id="aj-A" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>⏮️</span><span style="font-size:0.65rem;">Prev</span></div>
+                                    <div id="aj-B" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>⬆️</span><span style="font-size:0.65rem;">Max</span></div>
+                                    <div id="aj-C" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>⏭️</span><span style="font-size:0.65rem;">Next</span></div>
+                                    <div id="aj-D" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>⬅️</span><span style="font-size:0.65rem;">Short</span></div>
+                                    <div id="aj-E" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>⏯️</span><span style="font-size:0.65rem;">Enter</span></div>
+                                    <div id="aj-F" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>➡️</span><span style="font-size:0.65rem;">Short</span></div>
+                                    <div id="aj-G" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>⏪</span><span style="font-size:0.65rem;">Large B</span></div>
+                                    <div id="aj-H" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>⬇️</span><span style="font-size:0.65rem;">Intro</span></div>
+                                    <div id="aj-I" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>⏩</span><span style="font-size:0.65rem;">Large F</span></div>
+                                    <div style="grid-column:2;"><div id="aj-J" class="aj-btn" style="padding:10px;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#222;border-radius:6px;font-size:0.75rem;line-height:1.1;transition:all 0.2s;"><span>❌</span><span style="font-size:0.65rem;">Back</span></div></div>
+                                </div>
+                                <div id="aj-legend" style="flex:1;min-width:160px;font-size:0.75rem;color:#888;display:flex;flex-direction:column;gap:4px;">
+                                    <span data-pos="A">Episodio anterior</span>
+                                    <span data-pos="B">Maximizar/Restaurar</span>
+                                    <span data-pos="C">Episodio siguiente</span>
+                                    <span data-pos="D">Salto corto atrás</span>
+                                    <span data-pos="E">Reproducir/Pausa</span>
+                                    <span data-pos="F">Salto corto adelante</span>
+                                    <span data-pos="G">Salto largo atrás</span>
+                                    <span data-pos="H">Saltar intro</span>
+                                    <span data-pos="I">Salto largo adelante</span>
+                                    <span data-pos="J">Volver</span>
+                                </div>
                             </div>
                         </div>
-                        <p class="setting-desc" style="margin-top: 6px;">Define los umbrales para considerar un episodio como "en visualización" (mínimo) o "visto" (máximo).</p>
                     </div>
                 </div>
-                                        <div style="flex: 1.2; display: flex; justify-content: center; align-items: center;">
-                                            <table style="margin: 0 auto; border-collapse: separate; border-spacing: 4px; text-align: center;">
-                                                <tr>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-1" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">1</div></td>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-2" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">2</div></td>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-3" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">3</div></td>
-                                                </tr>
-                                                <tr>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-4" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">4</div></td>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-5" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">5</div></td>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-6" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">6</div></td>
-                                                </tr>
-                                                <tr>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-7" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">7</div></td>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-8" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">8</div></td>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-9" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">9</div></td>
-                                                </tr>
-                                                <tr>
-                                                    <td></td>
-                                                    <td><div class="cal-btn-vis" id="cal-btn-0" style="width: 32px; height: 32px; line-height: 32px; font-size: 0.8rem;">0</div></td>
-                                                    <td></td>
-                                                </tr>
-                                            </table>
-                                        </div>
-                                        <div style="flex: 1.4; min-width: 110px; display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; border-left: 1px solid #27272a; padding-left: 8px;">
-                                            <button class="btn-primary" onclick="window.startRemoteCalibration()" id="btn-calibrate-remote" style="background: #e11d48; border-color: #e11d48; color: white; padding: 8px 10px; font-weight: 500; font-size: 0.78rem; border-radius: 6px; cursor: pointer; width: 100%; white-space: nowrap;">Calibrar mando</button>
-                                            <button class="btn-dark" onclick="window.clearRemoteCalibration()" id="btn-clear-calibration" style="padding: 8px 10px; font-size: 0.78rem; border-radius: 6px; cursor: pointer; width: 100%; white-space: nowrap;">Resetear</button>
-                        </div>
+                <div class="tab-pane hidden" id="pane-covers">
+                    <div style="margin-bottom:12px;">
+                        <label>Customización de covers</label>
+                        <p class="setting-desc" style="font-size:0.8rem;color:#aaa;margin-bottom:0;line-height:1.4;">
+                            Imagen a la izquierda, a la derecha las categorías/subcategorías relacionadas (separadas por ;). Igual que los botones de la hero.
+                        </p>
                     </div>
-                                </div>
-                                <div style="display:flex; align-items:center; justify-content:space-between; margin-top:12px; padding:12px; background:rgba(255,255,255,0.04); border:1px solid #333; border-radius:8px;">
-                                    <div>
-                                        <label style="margin-bottom:4px; display:block; font-size:0.85rem;">Forzar modo mando TV</label>
-                                        <p style="font-size:0.72rem; color:#888; margin:0;">Interpreta las teclas como mando físico (1-2-3 arriba). Auto detecta por defecto.</p>
-                                    </div>
-                                    <label class="switch"><input type="checkbox" id="force-remote-toggle" onchange="toggleForceRemote(this.checked)"><span class="slider round"></span></label>
-                                </div>
-                                <div style="margin-top:12px; padding:12px; background:rgba(0,0,0,0.2); border-radius:8px; border:1px solid #333;">
-                                    <div style="font-size:0.75rem; color:#888; margin-bottom:8px; font-weight:500;">Mapeo físico (posición → función):</div>
-                                    <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; text-align:center; font-size:0.7rem;">
-                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">1<br><span style="color:#888; font-size:0.65rem;">L2</span></div>
-                                        <div style="padding:8px; background:rgba(225,29,72,0.15); border:1px solid #e11d48; border-radius:6px; font-weight:600;">2<br><span style="color:#e11d48; font-size:0.65rem;">Max ↑</span></div>
-                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">3<br><span style="color:#888; font-size:0.65rem;">R2</span></div>
-                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">4<br><span>◀</span></div>
-                                        <div style="padding:8px; background:rgba(255,255,255,0.08); border-radius:6px;">5<br><span>▶/❚❚</span></div>
-                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">6<br><span>▶</span></div>
-                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">7<br><span>L1</span></div>
-                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">8<br><span>▼</span></div>
-                                        <div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">9<br><span>R1</span></div>
-                                        <div></div><div style="padding:8px; background:rgba(255,255,255,0.06); border-radius:6px;">0<br><span>×</span></div><div></div>
-                                    </div>
-                                    <p style="font-size:0.65rem; color:#666; margin:6px 0 0;">Gamepad: DPAD=8246, A=5 B=0 X=2 Y=8 L1=7 R1=9 L2=1 R2=3</p>
-                                </div>
-                                <div id="calibration-zone" class="calibration-zone hidden" style="background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px; border: 1px dashed rgba(255,255,255,0.1); text-align: center;">
-                                    <h4 id="calibration-prompt" style="margin-bottom: 0; color: #fff; font-size: 0.85rem; font-weight: normal;">
-                                        Presiona el botón <span style="color: #e11d48; font-weight: bold; font-size: 1.1rem;" id="calibration-target-name">1</span>...
-                                    </h4>
-                                </div>
-                            </div>
-                            <div style="flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 12px;">
-                                <div>
-                                    <div style="font-size: 0.75rem; color: #888; margin-bottom: 4px; font-weight: 500;">Mapa actual:</div>
-                                    <div id="keymap-table-container" style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 8px; font-family: monospace; font-size: 0.72rem; color: #a1a1aa; max-height: 200px; overflow-y: auto;">
-                                        Cargando...
+                    <div id="covers-list" style="display:flex;flex-direction:column;gap:8px;"></div>
+                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;align-items:center;">
+                        <span id="covers-status" style="font-size:0.75rem;color:#71717a;flex:1;"></span>
+                        <button onclick="resetCoverDefaults()" style="padding:8px 14px;border-radius:6px;background:transparent;border:1px solid #52525b;color:#fff;font-size:0.8rem;cursor:pointer;">Restablecer</button>
+                        <button onclick="saveCoverDefaults()" style="padding:8px 14px;border-radius:6px;background:#e11d48;border:1px solid #e11d48;color:#fff;font-size:0.8rem;font-weight:600;cursor:pointer;">Guardar</button>
                     </div>
-                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
-                        <label style="font-weight: 700; margin-bottom: 12px; display: block;">Umbrales de Visualización</label>
-                        <div style="display: flex; gap: 15px; flex-wrap: wrap;">
-                            <div style="flex: 1; min-width: 120px;">
-                                <label for="watch-threshold-min" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Mínimo (%)</label>
-                                <input type="number" id="watch-threshold-min" class="settings-input" style="max-width: 100%;" min="1" max="50" value="5" onchange="window.changeWatchThresholdMin(this.value)">
-                            </div>
-                            <div style="flex: 1; min-width: 120px;">
-                                <label for="watch-threshold-max" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px; display: block;">Máximo (%)</label>
-                                <input type="number" id="watch-threshold-max" class="settings-input" style="max-width: 100%;" min="50" max="99" value="85" onchange="window.changeWatchThresholdMax(this.value)">
-                            </div>
-                        </div>
-                        <p class="setting-desc" style="margin-top: 6px;">Define los umbrales para considerar un episodio como "en visualización" (mínimo) o "visto" (máximo).</p>
-                    </div>
-                </div>
-                            </div>
-                        </div>
+                    <div style="margin-top:12px;padding:8px;background:rgba(255,255,255,0.04);border:1px solid #333;border-radius:8px;display:flex;gap:12px;align-items:center;">
+                        <img src="/static/TVCat.png" style="width:48px;height:70px;object-fit:contain;background:#18181b;border-radius:6px;" onerror="this.style.display='none'">
+                        <div style="font-size:0.75rem;color:#888;">Genérico final: si nada matchea se usa el fallback de media. Logo TVCat para el skeleton y carga inicial.</div>
                     </div>
                 </div>
             </div>
-            <div class="settings-footer" style="display:flex;justify-content:space-between;gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid var(--border-color);align-items:center;">
-                <div id="userbot-footer-actions" style="display:none;flex-direction:column;gap:6px;flex:1;">
-                    <div style="display:flex;gap:8px;align-items:center;">
-                        <button class="btn-secondary" onclick="openSessionGenerator()" style="padding:6px 14px;font-size:0.75rem;border-color:#a855f7;color:#a855f7;">+ Sesión Dual (Telethon+Pyrogram)</button>
-                    </div>
-                </div>
-                <div style="display:flex;gap:8px;">
-                    <button class="btn-primary" onclick="saveGlobalSettings()" style="padding:10px 20px;">Guardar Cambios</button>
-                    <button class="btn-secondary" onclick="toggleSettingsModal()" style="padding:10px 20px;">Cerrar</button>
-                </div>
+            <div class="settings-footer"
+            <div class="settings-footer"<div class="settings-footer" style="display:flex;justify-content:flex-end;gap:8px;margin-top:0;padding:12px 20px;border-top:1px solid var(--border-color);align-items:center;flex-shrink:0;">
+                <button class="btn-primary" onclick="saveGlobalSettings()" style="padding:10px 20px;">Guardar Cambios</button>
+                <button class="btn-secondary" onclick="applyGlobalSettings()" style="padding:10px 20px;">Aplicar</button>
+                <button class="btn-secondary" onclick="toggleSettingsModal()" style="padding:10px 20px;">Cerrar</button>
             </div>
         </div>
     </div>
@@ -779,9 +861,10 @@
     <script src="js/plugin_system.js?v=20260935"></script>
     <script src="js/navEngine.js?v=20260801"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
-    <script src="js/catalog.js?v=20260935"></script>
+    <script src="js/inputHelper.js?v=20260903q"></script>
+    <script src="js/catalog.js?v=20260935m"></script>
     <script src="js/player.js?v=20260801"></script>
-    <script src="js/ui.js?v=20260801"></script>
-    <script src="js/app.js?v=20260801"></script>
+    <script src="js/ui.js?v=20260903s"></script>
+    <script src="js/app.js?v=20260903z"></script>
 </body>
 </html>

@@ -752,6 +752,11 @@ async def add_to_queue(body: QueueAdd, request: Request):
         "user_id": session["user_id"],
         "created": time.time(),
     }
+    # 2026-09-04: sembrar cover editado en local (enricher) al encolar.
+    try:
+        _seed_job_cover_from_local(job)
+    except Exception:
+        pass
     db.setdefault("queue", []).append(job)
     # Detección temprana de tipo ARCHIVE: así la UI muestra el tag nada más añadir el job,
     # sin esperar a que el worker procese. Usa el mismo criterio del procesado.
@@ -947,6 +952,14 @@ async def get_job_cover(job_id: str, request: Request):
     if not job:
         raise HTTPException(404, "Job no encontrado")
 
+    # 2026-09-04: sembrar edición local para que el modal muestre el cover
+    # editado (texto + imagen) en vez del original.
+    try:
+        if _seed_job_cover_from_local(job):
+            _save_db(db)
+    except Exception:
+        pass
+
     # Origen del cover: del item del catálogo si existe; si no (item aún no escaneado),
     # del link guardado en el job para poder cargar la imagen original igualmente.
     channel_id = None
@@ -1014,6 +1027,16 @@ async def get_job_cover(job_id: str, request: Request):
                         break
     except Exception as e:
         print(f"[TGHirayi] Error obteniendo cover: {e}", flush=True)
+
+    # 2026-09-04: si hay póster editado en local, mostrarlo (manda sobre el origen).
+    try:
+        _bt, _bp = _bridge_enricher_cover(job)
+        if _bp and isinstance(_bp, (bytes, bytearray, memoryview)):
+            import base64 as _b64b
+            image_b64 = _b64b.b64encode(bytes(_bp)).decode('ascii')
+            file_found = True
+    except Exception:
+        pass
 
     return {"text": preview, "template": template, "image": image_b64, "file_found": file_found,
             "category": job.get("category", ""), "subcategory": job.get("subcategory", ""),
@@ -1109,6 +1132,9 @@ async def update_job_cover(job_id: str, body: dict, request: Request):
     for j in db.get("queue", []):
         if j["id"] == job_id:
             j["cover_text"] = (body.get("cover_text") or "")
+            # 2026-09-04: edición manual en cola manda sobre el seed local.
+            j["cover_manual"] = True
+            j["cover_from_local"] = False
             if "use_enricher_cover" in body:
                 j["use_enricher_cover"] = bool(body.get("use_enricher_cover"))
             if "title" in body:
@@ -2444,9 +2470,73 @@ def _resolve_cover_override(job) -> Optional[str]:
     return _resolve_cover_tags(dtpl, job.get("title", ""), cover_episodes, job.get("enrich_details") or {})
 
 
+def _bridge_enricher_cover(job) -> tuple:
+    """2026-09-04: puente al cover editado en local (tvcat_enricher) vía registry.
+    Devuelve (cover_text|None, poster_blob|None). Se usa en AMBAS ramas de copia
+    (con y sin cover_messages) y en el modal de la cola."""
+    try:
+        from services.cover_override_registry import get_enriched_by_item_id as _gebi
+        _enr = _gebi(str(job.get("item_id") or ""))
+        if _enr and _enr.get("cover_text"):
+            return _enr["cover_text"], _enr.get("poster_blob")
+    except Exception:
+        pass
+    try:
+        from services.cover_override_registry import get_enriched_cover as _get_enr_h
+        from services.catalog_service import _derive_episode_key as _dk
+        _k = ""
+        _lnk = job.get("telegram_link")
+        if _lnk:
+            _k = _dk(_lnk)
+        if _k:
+            _enr2 = _get_enr_h(_k)
+            if _enr2 and _enr2.get("cover_text"):
+                return _enr2["cover_text"], _enr2.get("poster_blob")
+    except Exception:
+        pass
+    return None, None
+
+
+def _seed_job_cover_from_local(job) -> bool:
+    """2026-09-04: si el job no tiene cover manual y el item tiene edición local,
+    la siembra (cover_text + enrich_details). Idempotente. Devuelve True si sembró."""
+    try:
+        if not isinstance(job, dict):
+            return False
+        if job.get("cover_manual"):
+            return False
+        if (job.get("cover_text") or "").strip() and not job.get("cover_from_local"):
+            return False
+        from services.cover_override_registry import get_enriched_by_item_id as _gebi2
+        _enr = _gebi2(str(job.get("item_id") or ""))
+        if _enr and (_enr.get("cover_text") or "").strip():
+            job["cover_text"] = _enr["cover_text"]
+            _det = _enr.get("enrich_details") or {}
+            if _det:
+                job["enrich_details"] = _det
+                # 2026-09-04b: el título enriquecido manda también en el job
+                # (cola + topic destino); los ficheros no se renombran.
+                _at = (_det.get("api_title") or "").strip()
+                if _at and _at != (job.get("title") or "").strip():
+                    print(f"[TGHirayi] Job {job.get('id')}: título '{job.get('title')}' -> '{_at}' (enriquecido)", flush=True)
+                    job["title"] = _at
+            job["cover_from_local"] = True
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _job_poster_bytes_sync(job) -> Optional[bytes]:
     """Descarga (SÍNCRONO, ejecutar con asyncio.to_thread) el primer póster del
     enriquecedor del job. Devuelve bytes o None si no hay cover o falla la descarga."""
+    # 2026-09-04: primero el póster LOCAL editado (registry, sin red).
+    try:
+        _bt, _bp = _bridge_enricher_cover(job if isinstance(job, dict) else {})
+        if _bp and isinstance(_bp, (bytes, bytearray, memoryview)):
+            return bytes(_bp)
+    except Exception:
+        pass
     try:
         details = (job or {}).get("enrich_details") or {}
         covers = details.get("api_cover") or ""
@@ -2483,6 +2573,13 @@ async def _copy_cover_to_destinations(job, client, cover_messages, destinations,
         # a) NO EDITADO -> imagen genérica + Title sanitizado del primer fichero + Ext + Episodes
         # b) EDITADO   -> cover generado con editor/enriquecedor (plantilla + poster)
         _refresh_job_cover_fields(job)
+        # 2026-09-04: sembrar edición local antes de decidir (esta rama nunca
+        # consultaba el registry y copiaba el original aunque hubiera edit).
+        # El worker persiste el db al avanzar el job; aquí solo se muta en memoria.
+        try:
+            _seed_job_cover_from_local(job)
+        except Exception:
+            pass
         stored = (job.get("cover_text") or "").strip()
         is_edited = bool(stored)
         if not is_edited and job.get("enrich_details"):
@@ -2536,7 +2633,10 @@ async def _copy_cover_to_destinations(job, client, cover_messages, destinations,
             fb_id = -1 if cat in ("juegos", "games", "game") else (-2 if cat in ("comic", "kiosko", "book", "manga") else -3)
             from tvcat.gateway import get_db_connection
             conn = get_db_connection()
-            row = conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='cover' LIMIT 1", (fb_id,)).fetchone()
+            try:
+                row = conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id='' AND telegram_msg_id=? AND asset_type='cover' LIMIT 1", (fb_id,)).fetchone()
+            except Exception:
+                row = conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='cover' LIMIT 1", (fb_id,)).fetchone()
             conn.close()
             if row and row["image_blob"]:
                 generic_blob = row["image_blob"]
@@ -2568,10 +2668,20 @@ async def _copy_cover_to_destinations(job, client, cover_messages, destinations,
         return
     # Caso normal (cover_messages no vacío): también refrescar por si se editó durante la descarga
     _refresh_job_cover_fields(job)
+    try:
+        _seed_job_cover_from_local(job)
+    except Exception:
+        pass
     cover_override = _resolve_cover_override(job)
     poster_bytes = None
     if cover_override is not None and job.get("use_enricher_cover", True):
         poster_bytes = await asyncio.to_thread(_job_poster_bytes_sync, job)
+    # Puente del Enriquecedor hero (tvcat_enricher, §21.6): si el job no trae cover enriquecido, probar el del plugin
+    if cover_override is None:
+        _bt, _bp = _bridge_enricher_cover(job)
+        if _bt is not None:
+            cover_override = _bt
+            poster_bytes = _bp
     for dest in destinations:
         topic_id = await _resolve_topic_id_async(client, dest, job["title"], job)
         await _copy_messages_to_destination(client, cover_messages, dest, topic_id, delay,
@@ -4221,20 +4331,30 @@ def _resolve_cover_tags(text: str, title: str, total_episodes: int, details: dic
     ftags = _load_cover_tags()
     out = text
 
-    # Resolver todos los tags usando el formato de cover_tags.json
+    # Resolver todos los tags: {k} -> valor crudo, {fk} -> valor formateado (cover_tags.json)
     for k, tpl in ftags.items():
         val = values.get(k, "")
+        raw_val = val
         rendered = tpl.replace("{value}", val) if val else ""
         if k == "tagtitle":
             # tagtitle solo si el título está presente en el texto
-            rendered = rendered if has_title else ""
-        # Forma simple {k} y forma con 'f' {fk}: ambas usan el formato
-        for form in ("{" + k + "}", "{f" + k + "}"):
-            if form in out:
-                if rendered:
-                    out = out.replace(form, rendered + "\n")
-                else:
-                    out = out.replace(form, "")
+            if not has_title:
+                raw_val = ""
+                rendered = ""
+        # Forma cruda {k} -> valor sin formato
+        raw_form = "{" + k + "}"
+        if raw_form in out:
+            if raw_val:
+                out = out.replace(raw_form, raw_val + "\n")
+            else:
+                out = out.replace(raw_form, "")
+        # Forma formateada {fk} -> con plantilla de cover_tags.json
+        f_form = "{f" + k + "}"
+        if f_form in out:
+            if rendered:
+                out = out.replace(f_form, rendered + "\n")
+            else:
+                out = out.replace(f_form, "")
 
     out = re.sub(r'\n{3,}', '\n\n', out)
     return out.strip()

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Enriquecedor — Configuración</title>
+<style>
+    body { background:#0d0d0f; color:#f4f4f5; font-family:'Segoe UI',system-ui,Arial,sans-serif; margin:0; padding:16px; font-size:14px; }
+    h3 { margin:0 0 12px; color:#f4f4f5; }
+    .card { background:#18181b; border:1px solid #27272a; border-radius:8px; padding:12px; margin-bottom:12px; }
+    .btn { background:#e11d48; border:none; color:#fff; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:13px; }
+    .muted { color:#a1a1aa; font-size:12px; }
+    label.f { display:block; margin-bottom:8px; }
+    label.f span { display:block; color:#a1a1aa; font-size:12px; margin-bottom:3px; }
+    textarea { width:100%; box-sizing:border-box; background:#0d0d0f; border:1px solid #3f3f46; color:#f4f4f5; border-radius:6px; padding:8px; font-size:13px; resize:vertical; }
+</style>
+</head>
+<body>
+<h3>Enriquecedor</h3>
+<p class="muted" style="margin-bottom:12px;">Configura cuándo aparece el botón <b>Actualizar Cover</b> en la hero. La configuración detallada (proveedores, plantillas) está en <b>Configuración → Userbot → Enriquecedor</b>.</p>
+
+<div class="card" id="hero-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;" onclick="toggleHero()">
+        <div><b>Condiciones de aparición en Hero</b></div>
+        <span id="hero-ind" style="font-size:10px;transition:transform 0.2s;">▼</span>
+    </div>
+    <div id="hero-body" style="margin-top:8px;">
+        <div class="muted" style="margin-bottom:8px;">El botón aparece si categoría o subcategoría coincide (saneado, minúsculas). Use <code>*</code> para cualquier. Separe con <code>;</code> o salto.</div>
+        <label class="f"><span>Categorías (ej: * )</span><textarea id="f-cats" rows="2" placeholder="*"></textarea></label>
+        <label class="f"><span>Subcategorías (ej: * )</span><textarea id="f-subs" rows="2" placeholder="*"></textarea></label>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <button class="btn" onclick="saveHero()">Guardar condiciones</button>
+            <span class="muted" id="hero-status"></span>
+        </div>
+    </div>
+</div>
+
+<script>
+var API = '/api/plugin/tvcat_enricher/cats';
+function api(url, opts, cb){
+    opts=opts||{};
+    var xhr=new XMLHttpRequest();
+    xhr.open(opts.method||'GET', url, true);
+    xhr.setRequestHeader('Content-Type','application/json');
+    xhr.onload=function(){ var b={}; try{b=JSON.parse(xhr.responseText||'{}')}catch(e){} if(cb) cb(b, xhr.status); };
+    xhr.onerror=function(){ if(cb) cb({},0); };
+    xhr.send(opts.data?JSON.stringify(opts.data):null);
+}
+function toggleHero(){
+    var body=document.getElementById('hero-body');
+    var ind=document.getElementById('hero-ind');
+    if(!body) return;
+    var hidden=body.style.display==='none';
+    body.style.display=hidden?'':'none';
+    if(ind) ind.style.transform=hidden?'':'rotate(-90deg)';
+}
+function loadHero(){
+    api(API, {}, function(res){
+        if(res){
+            if(res.raw_categories!==undefined) document.getElementById('f-cats').value=res.raw_categories;
+            if(res.raw_subcategories!==undefined) document.getElementById('f-subs').value=res.raw_subcategories;
+            var hasCats=res.raw_categories && res.raw_categories.trim().length>0;
+            var hasSubs=res.raw_subcategories && res.raw_subcategories.trim().length>0;
+            // por defecto * / * → colapsada si tiene datos
+            var body=document.getElementById('hero-body');
+            var ind=document.getElementById('hero-ind');
+            var hasData=hasCats||hasSubs;
+            if(body) body.style.display=hasData?'none':'';
+            if(ind) ind.style.transform=hasData?'rotate(-90deg)':'';
+            // si vacío, poner * por defecto
+            if(!hasCats && !hasSubs){
+                var c=document.getElementById('f-cats');
+                var s=document.getElementById('f-subs');
+                if(c && !c.value) c.value='*';
+                if(s && !s.value) s.value='*';
+            }
+        }
+    });
+}
+function saveHero(){
+    var cats=document.getElementById('f-cats').value;
+    var subs=document.getElementById('f-subs').value;
+    var st=document.getElementById('hero-status');
+    if(st) st.textContent='Guardando...';
+    api(API, {method:'POST', data:{categories:cats, subcategories:subs}}, function(res){
+        if(st) st.textContent=res&&res.ok?'Guardado ✓':'Error';
+        setTimeout(function(){ if(st) st.textContent=''; },2000);
+    });
+}
+loadHero();
+</script>
+</body>
+</html>

@@ -24,10 +24,20 @@ venv/
 *.log
 logs/
 cache/
+data/
 hls_segments/
+hls_seq_segments/
 hls_subs/
 tmp/
 temp/
+# Restos de descargas Telethon (stripped/cached) + estados runtime
+photo_*.jpg
+**/photo_*.jpg
+**/state.json
+plugins_order.json
+**/plugins_order.json
+*.backup_20*
+**/*.backup_20*
 
 # Config y sesiones locales
 config/

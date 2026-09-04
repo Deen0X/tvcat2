@@ -34,25 +34,72 @@
         return params;
     }
 
+    // Coalescencia de refrescos: CUALQUIER llamada a load()/performSearch()
+    // (navegación, arranque, guardados de config, rebuild, toggles) entra en
+    // una ventana de 120 ms; si llega otra petición se reinicia el tiempo y
+    // solo la ÚLTIMA dispara UNA petición de red + UN skeleton + UN pintado,
+    // leyendo búsqueda/filtros vivos en el momento del disparo.
+    // Además, por secuencia, si una petición anterior sigue en vuelo cuando
+    // llega la respuesta nueva, la vieja se descarta y no pinta.
+    var _loadSeq = 0;
+    var _loadTimer = null;
+    var _pendingReq = null;
+
     function load(category) {
+        _pendingReq = { type: 'load', category: category || 'home' };
+        _kickLoadTimer();
+    }
+
+    function performSearch(query) {
+        if (!query || query.trim().length < 2) {
+            load(currentCategory);
+            return;
+        }
+        _pendingReq = { type: 'search', query: query };
+        _kickLoadTimer();
+    }
+
+    function _kickLoadTimer() {
+        if (_loadTimer) clearTimeout(_loadTimer);
+        _loadTimer = setTimeout(function() {
+            _loadTimer = null;
+            var r = _pendingReq;
+            _pendingReq = null;
+            if (!r) return;
+            if (r.type === 'search') _doSearch(r.query);
+            else _doLoad(r.category);
+        }, 120);
+    }
+
+    function _doLoad(category) {
         currentCategory = category || 'home';
+        // Si hay búsqueda activa, delegar a búsqueda para respetar filtro de texto
+        var si = document.getElementById('global-search');
+        var st = si ? si.value.trim() : '';
+        if (st.length >= 2) {
+            _doSearch(st);
+            return;
+        }
         var url = '/api/catalog/' + currentCategory;
         var fp = buildFilterParams();
         if (fp.length) url += '?' + fp.join('&');
 
+        var mySeq = ++_loadSeq;
         showLoading(true);
         window.API.ajax({
             url: url,
             success: function(data) {
+                if (mySeq !== _loadSeq) return;
                 currentItems = data.items || [];
                 if (currentCategory === 'favorites') {
                     currentItems = currentItems.filter(function(it) { return it.fav === true; });
                 }
                 renderItems(currentItems);
-                updateBadge(data.count || 0);
+                updateBadge(data.count !== undefined ? data.count : currentItems.length);
                 showLoading(false);
             },
             error: function() {
+                if (mySeq !== _loadSeq) return;
                 showLoading(false);
                 var grid = document.getElementById('catalog-grid');
                 if (grid) grid.innerHTML = '<p style="color:var(--text-secondary);text-align:center;padding:40px;">Error al cargar el catálogo</p>';
@@ -60,9 +107,9 @@
         });
     }
 
-    function performSearch(query) {
+    function _doSearch(query) {
         if (!query || query.trim().length < 2) {
-            load(currentCategory);
+            _doLoad(currentCategory);
             return;
         }
 
@@ -81,10 +128,12 @@
         var exg = excludedGenres();
         if (exg.length) url += '&genres=' + encodeURIComponent(exg.join(','));
 
+        var mySeq = ++_loadSeq;
         showLoading(true);
         window.API.ajax({
             url: url,
             success: function(data) {
+                if (mySeq !== _loadSeq) return;
                 currentItems = data.items || [];
                 if (currentCategory === 'favorites') {
                     currentItems = currentItems.filter(function(it) { return it.fav === true; });
@@ -94,6 +143,7 @@
                 showLoading(false);
             },
             error: function() {
+                if (mySeq !== _loadSeq) return;
                 showLoading(false);
             }
         });
@@ -133,9 +183,21 @@
             var repId = item.representative_id || item.item_id || '';
             var favActive = item.fav ? ' active' : '';
             var favFill = item.fav ? '#e11d48' : 'rgba(255, 255, 255, 0.4)';
-            var coverImg = item.cover_url
-                ? '<img src="' + item.cover_url + '" alt="" loading="lazy" onerror="this.style.display=\'none\'">'
-                : '';
+            var _cid = item.item_id || '';
+            var _src = item.cover_url || ('/api/cover/' + _cid);
+            // 2026-09-04: genérico directo por categoría si falla (NO reintentar
+            // /api/cover: duplicaba los 404 y quemaba tokens del throttle).
+            var _cl = (cat || '').toLowerCase();
+            var _sl = ((item.subcategory || '').toLowerCase());
+            var _def = (/(juego|game|consola|ps3|3ds)/.test(_cl) || /(juego|game|consola|ps3|3ds)/.test(_sl)) ? -1
+                : (/(comic|kiosko|book|ebook|manga)/.test(_cl) || /(comic|kiosko|book|ebook|manga)/.test(_sl)) ? -2 : -3;
+            // Placeholder logo debajo (se ve mientras el cover real descarga);
+            // el real se bombea con concurrencia máx 4 para no saturar las 6
+            // conexiones del navegador (el XHR del hero necesita un slot libre).
+            // 2026-09-04c: SIN loading=lazy (la bomba es la que dosifica; con lazy
+            // las offscreen no resolvían nunca y la bomba se atascaba sin fase 2).
+            var coverImg = '<img src="/static/TVCat.png" class="grid-cover-ph" alt="" onerror="this.style.display=\'none\'">' +
+                '<img data-csrc="' + _src + '" data-cdef="' + _def + '" alt="">';
 
             html += '<div class="grid-item" tabindex="0" data-id="' + item.item_id + '" data-index="' + i + '" data-rep-id="' + repId + '">' +
                 '<div class="grid-item-cover">' +
@@ -161,6 +223,7 @@
             var itemData = items[idx] || {};
             window.pluginSystem.applyGridDecorators(el, itemData);
         }
+        _pumpCovers(grid);
 
         grid.onclick = function(e) {
             var t = e.target || e.srcElement;
@@ -170,6 +233,69 @@
                 if (id) window.openDetails(id);
             }
         };
+    }
+
+    // Bomba de covers en 2 fases (2026-09-04): el navegador solo tiene ~6
+    // conexiones; con máx 4 siempre quedan slots para interactuar. ES5.
+    // Fase 1: ?cached=1 (solo caché, ms) pinta al instante lo disponible; los
+    // 404 quedan en placeholder y pasan a fase 2 (JIT Telegram, visibles).
+    function _pumpCovers(grid) {
+        var list = grid.querySelectorAll('img[data-csrc]');
+        var queue = [];
+        for (var qi = 0; qi < list.length; qi++) queue.push(list[qi]);
+        var active = 0;
+        var MAXC = 4;
+        function cachedUrl(u) {
+            if (u.indexOf('/api/cover/') === 0) return u + (u.indexOf('?') === -1 ? '?cached=1' : '&cached=1');
+            return u;
+        }
+        function phase2() {
+            var miss = grid.querySelectorAll('img[data-cmiss="1"]');
+            var q2 = [];
+            for (var mi = 0; mi < miss.length; mi++) q2.push(miss[mi]);
+            if (!q2.length) return;
+            var a2 = 0;
+            function nx2() {
+                while (a2 < MAXC && q2.length) {
+                    var im = q2.shift();
+                    a2++;
+                    (function(el) {
+                        el.removeAttribute('data-cmiss');
+                        var fin = function() { a2--; nx2(); };
+                        el.onload = fin;
+                        el.onerror = function() {
+                            el.onerror = null;
+                            el.src = '/api/cover-default/' + el.getAttribute('data-cdef');
+                            fin();
+                        };
+                        el.src = el.getAttribute('data-csrc');
+                    })(im);
+                }
+            }
+            nx2();
+        }
+        function next() {
+            while (active < MAXC && queue.length) {
+                var im = queue.shift();
+                active++;
+                (function(el) {
+                    var src = el.getAttribute('data-csrc');
+                    var fin = function() {
+                        active--;
+                        if (!queue.length && active === 0) phase2();
+                        else next();
+                    };
+                    el.onload = fin;
+                    el.onerror = function() {
+                        el.onerror = null;
+                        el.setAttribute('data-cmiss', '1');
+                        fin();
+                    };
+                    el.src = cachedUrl(src);
+                })(im);
+            }
+        }
+        next();
     }
 
     // Compatible closest() for old WebKit Smart TVs (no Element.closest)
@@ -205,7 +331,7 @@
         if (show) {
             var items = [];
             for (var i = 0; i < 12; i++) {
-                items.push('<div class="grid-item grid-item-skeleton"><div class="grid-item-cover" style="background:var(--bg-surface);animation:pulse 1.5s infinite;"></div></div>');
+                items.push('<div class="grid-item grid-item-skeleton"><div class="grid-item-cover" style="background:#18181b;background:var(--bg-surface);animation:pulse 1.5s infinite;"><img src="/static/TVCat.png" alt="" style="object-fit:contain;padding:25%;opacity:0.5;" onerror="this.style.display=\'none\'"></div></div>');
             }
             grid.innerHTML = items.join('');
         }
@@ -259,6 +385,28 @@
         }
     };
     window.Catalog.currentEpisodes = currentEpisodes;
+    window.refreshCover = function(itemId) {
+        if (!confirm('¿Refrescar cover desde Telegram? Se re-descargará la imagen del mensaje original.')) return;
+        var btn = document.querySelector('.meta-cover-refresh');
+        if (btn) { btn.textContent = '…'; btn.disabled = true; }
+        window.API.ajax({
+            method: 'POST',
+            url: '/api/cover/' + encodeURIComponent(itemId) + '/refresh',
+            success: function(res) {
+                if (btn) { btn.textContent = '✓'; setTimeout(function(){ btn.textContent='🔄'; btn.disabled=false; }, 1500); }
+                var gridImg = document.querySelector('.grid-item[data-id="' + itemId + '"] img');
+                if (gridImg) gridImg.src = '/api/cover/' + encodeURIComponent(itemId) + '?v=' + Date.now();
+                var detailBg = document.getElementById('detail-backdrop');
+                if (detailBg) detailBg.style.backgroundImage = "url('/api/cover/" + encodeURIComponent(itemId) + "?v=" + Date.now() + "')";
+                setTimeout(function(){ window.Catalog.load(window.Catalog.currentCategory); }, 800);
+            },
+            error: function(err) {
+                if (btn) { btn.textContent = '✗'; btn.disabled=false; setTimeout(function(){ btn.textContent='🔄'; }, 1500); }
+                var msg = (err && err.detail) ? err.detail : (err && err.error ? err.error : 'desconocido');
+                alert('Error al refrescar cover: ' + msg);
+            }
+        });
+    };
 
     // ====== SLIDESHOW ENGINE ======
     var _slideshowImages = [];
@@ -290,6 +438,8 @@
         nextEl.style.backgroundRepeat = 'no-repeat';
         nextEl.style.opacity = '1';
         currentEl.style.opacity = '0';
+        // El zoom (Ken Burns) SOLO se muestra al abrir el hero; las
+        // transiciones del ciclo son fundidos sin zoom (como tvcat1)
         nextEl.classList.remove('zoom-active');
         currentEl.classList.remove('zoom-active');
         _activeBackdropEl = nextEl;
@@ -529,7 +679,16 @@
                         var plugin = activePlayers[0];
                         var pBtn = document.createElement('button');
                         pBtn.className = 'btn-stacked btn-play';
-                        pBtn.innerHTML = '<span class="btn-emoji">' + (plugin.playIcon || '\u25B6') + '</span>' + (plugin.playLabel || 'Reproducir');
+                        var heroIcon = plugin.playIcon;
+                        if (plugin.name && plugin.name.indexOf('tvcat_')===0) {
+                            var hiRes = '/plugin-static/' + plugin.name + '/plugin.png';
+                            heroIcon = '<img src="' + hiRes + '" style="width:100%;height:100%;object-fit:contain;" onerror="this.onerror=null;this.src=\'/plugin-static/' + plugin.name + '/plugin_icon.png\';">';
+                        }
+                        var label = plugin.playLabel || '';
+                        pBtn.innerHTML = '<span class="btn-emoji">' + heroIcon + '</span>' + (label ? '<span style="font-size:0.7rem;margin-top:2px;">' + label + '</span>' : '');
+                        var tip = plugin.tooltip || plugin.displayName || label || 'Reproducir';
+                        pBtn.title = tip;
+                        pBtn.setAttribute('aria-label', tip);
                         pBtn.onclick = (function(pl) {
                             return function() {
                                 localStorage.setItem('tvcat_preferred_player', pl.playerType);
@@ -541,7 +700,9 @@
                     } else {
                         var pBtn2 = document.createElement('button');
                         pBtn2.className = 'btn-stacked btn-play';
-                        pBtn2.innerHTML = '<span class="btn-emoji">\u25B6</span>Reproducir';
+                        pBtn2.innerHTML = '<span class="btn-emoji"><img src="/static/player.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'\u25B6\'"></span>';
+                        pBtn2.title = 'Reproducir';
+                        pBtn2.setAttribute('aria-label', 'Reproducir');
                         pBtn2.onclick = function() {
                             Catalog._showPlayerSelector(item, itemId, hasEpisodes, subcat, activePlayers);
                         };
@@ -566,11 +727,16 @@
                                     if (act2.length===1) {
                                         var pl=act2[0];
                                         var b=document.createElement('button'); b.className='btn-stacked btn-play';
-                                        b.innerHTML='<span class="btn-emoji">'+(pl.playIcon||'\u25B6')+'</span>'+(pl.playLabel||'Reproducir');
+                                        var lbl2 = pl.playLabel || '';
+                                        b.innerHTML='<span class="btn-emoji">'+(pl.playIcon||'\u25B6')+'</span>'+(lbl2 ? lbl2 : '');
+                                        var tip2 = pl.tooltip || pl.displayName || lbl2 || 'Reproducir';
+                                        b.title = tip2; b.setAttribute('aria-label', tip2);
                                         b.onclick=(function(p){return function(){ localStorage.setItem('tvcat_preferred_player',p.playerType); if(typeof p.play==='function') p.play(_item); else Catalog._playWithPlayer(_item,_itemId,_hasEpisodes,_subcat,p); };})(pl);
                                         sec.appendChild(b);
                                     } else {
-                                        var b2=document.createElement('button'); b2.className='btn-stacked btn-play'; b2.innerHTML='<span class="btn-emoji">\u25B6</span>Reproducir';
+                                        var b2=document.createElement('button'); b2.className='btn-stacked btn-play';
+                                        b2.innerHTML='<span class="btn-emoji"><img src="/static/player.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'\u25B6\'"></span>';
+                                        b2.title='Reproducir'; b2.setAttribute('aria-label','Reproducir');
                                         b2.onclick=function(){ Catalog._showPlayerSelector(_item,_itemId,_hasEpisodes,_subcat,act2); };
                                         sec.appendChild(b2);
                                     }
@@ -585,14 +751,16 @@
                     }, 700);
                 })(actionsEl, item, itemId, hasEpisodes, subcat);
                 
-                // 2. Episodes (hardcoded core feature)
+                // 2. Episodes (hardcoded core feature) — normalized to hero standard
                 if (hasEpisodes && subcat.match(/(anime|series|tv)/)) {
                     var epSection = document.createElement('div');
                     epSection.className = 'hero-actions-section';
                     var epBtn = document.createElement('button');
                     epBtn.id = 'btn-episodes';
                     epBtn.className = 'btn-stacked';
-                    epBtn.innerHTML = '<span class="btn-emoji">\uD83D\uDCCB</span>Lista de<br>Episodios';
+                    epBtn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'\uD83D\uDCCB\'"></span>';
+                    epBtn.title = 'Lista de Episodios';
+                    epBtn.setAttribute('aria-label', 'Lista de Episodios');
                     epBtn.onclick = function() { Catalog.openEpisodesModal(itemId); };
                     epSection.appendChild(epBtn);
                     actionsEl.appendChild(epSection);
@@ -613,7 +781,12 @@
                         var hb = heroButtons[hi];
                         var hBtn = document.createElement('button');
                         hBtn.className = 'btn-stacked';
-                        hBtn.innerHTML = '<span class="btn-emoji">' + (hb.icon || '') + '</span>' + (hb.label || '');
+                        if (hb.id) hBtn.id = hb.id;
+                        var hIcon2 = hb.icon || '';
+                        var hLabel2 = hb.label || '';
+                        hBtn.innerHTML = '<span class="btn-emoji">' + hIcon2 + '</span>' + (hLabel2 ? '<span style="font-size:0.7rem;margin-top:2px;">' + hLabel2 + '</span>' : '');
+                        var hTip2 = hb.tooltip || hb.label || '';
+                        if (hTip2) { hBtn.title = hTip2.replace(/<br>/g,' '); hBtn.setAttribute('aria-label', hTip2.replace(/<br>/g,' ')); }
                         if (hb.action) {
                             hBtn.onclick = hb.action;
                         }
@@ -640,6 +813,27 @@
                     Catalog.toggleMetadataFavorite(itemId, currentCategory);
                 };
                 categoryEl.parentNode.insertBefore(metaFavBtn, categoryEl.nextSibling);
+                // Admin badge: refrescar cover desde Telegram (visible solo admin, case-insensitive)
+                try {
+                    var cu = window.Catalog.currentUser || {};
+                    var uname = (cu.username || cu.display_name || '').toString().toLowerCase();
+                    var isAdmin = (uname === 'admin') || !!cu.is_admin || cu.role === 'admin';
+                    // fallback: si currentUser aún no cargado, intentar mostrar igual y validar en el endpoint
+                    if (!cu.username && !cu.is_admin) isAdmin = true;
+                    var oldRefresh = categoryEl.parentNode.querySelectorAll('.meta-cover-refresh');
+                    for (var ri=0; ri<oldRefresh.length; ri++) oldRefresh[ri].remove();
+                    var oldRefresh2 = document.querySelectorAll('.hero-cover-refresh');
+                    for (var rj=0; rj<oldRefresh2.length; rj++) oldRefresh2[rj].remove();
+                    if (isAdmin) {
+                        var refreshBtn = document.createElement('button');
+                        refreshBtn.className = 'meta-fav-btn meta-cover-refresh';
+                        refreshBtn.title = 'Recargar cover desde telegram';
+                        refreshBtn.setAttribute('aria-label', 'Recargar cover desde telegram');
+                        refreshBtn.innerHTML = '🔄';
+                        refreshBtn.onclick = (function(id){ return function(){ if (window.refreshCover) window.refreshCover(id); }; })(itemId);
+                        categoryEl.parentNode.insertBefore(refreshBtn, metaFavBtn.nextSibling);
+                    }
+                } catch(e) { console.log('refresh badge err', e); }
 
                 var existingMkvIcons = document.querySelectorAll('.meta-mkv-icon');
                 for (var mkvI = 0; mkvI < existingMkvIcons.length; mkvI++) existingMkvIcons[mkvI].remove();
@@ -687,6 +881,7 @@
                 }
                 _activeBackdropEl = backdrop1;
             }
+            try { startHeroThumbs(item.item_id || item.id, item.episodes && item.episodes.length > 0); } catch (e) {}
             return;
         }
 
@@ -731,8 +926,11 @@
             }, 50);
 
             _slideshowImages = slides;
-            _currentSlideIndex = -1;
+            // El slide 0 ya se muestra en estático: la primera transición debe
+            // avanzar al 1 (antes iba al 0 y fundía la misma imagen consigo misma)
+            _currentSlideIndex = 0;
             if (slides.length > 1) scheduleNextSlide(4000);
+            try { startHeroThumbs(item.item_id || item.id, item.episodes && item.episodes.length > 0); } catch (e) {}
 
             // Logo / title animation
             var logoContainer = document.getElementById('detail-logo-container');
@@ -789,25 +987,148 @@
         if (totalToPreload === 0) triggerPreloadComplete();
     }
 
-    function buildSlides(item) {
-        var slides = [];
-        var hasArt = !!item.art;
-        var hasScreenshots = (item.screenshots && item.screenshots.length > 0);
+    // Cola base del hero (fase 2): [cover-zoom, cover-full]. Los thumbs de
+    // episodios se intercalan después vía heroCycle(): CZ, T1, CF, T2, CZ, T3...
+    // (sin repetir thumb hasta agotar, máx 14). Sin fuente de art/screenshots
+    // en el backend, el cover es el único slide garantizado.
+    var _heroCoverZoom = null;
+    var _heroCoverFull = null;
+    var _heroItemId = null;
+    var _heroThumbs = [];
+    var _heroThumbTimer = null;
+    var _heroThumbPending = {};
 
-        if (hasArt) {
-            if (item.image) slides.push({ url: item.image, mode: 'contain', align: '85% center' });
-            if (hasScreenshots) item.screenshots.forEach(function(s) { slides.push({ url: s, mode: 'cover', align: 'center' }); });
-            slides.push({ url: item.art, mode: 'cover', align: 'center' });
-        } else if (hasScreenshots) {
-            if (item.image) slides.push({ url: item.image, mode: 'contain', align: '85% center' });
-            item.screenshots.forEach(function(s) { slides.push({ url: s, mode: 'cover', align: 'center' }); });
-        } else if (item.image) {
-            slides.push({ url: item.image, mode: 'contain', align: '85% center' });
-            slides.push({ url: item.image, mode: 'cover', align: 'center' });
-        } else {
-            slides.push({ url: '/api/cover/' + (item.item_id || item.id), mode: 'cover', align: 'center' });
+    function buildSlides(item) {
+        var coverUrl = item.art ||
+            ((item.screenshots && item.screenshots.length > 0) ? item.screenshots[item.screenshots.length - 1] : null) ||
+            item.image ||
+            ('/api/cover/' + (item.item_id || item.id));
+        var fullUrl = item.image || coverUrl;
+        // Dos slots aunque sea la misma URL: el modo (cover recortado vs
+        // contain encajado) los hace visualmente distintos y deben alternar
+        _heroCoverZoom = { url: coverUrl, mode: 'cover', align: 'center' };
+        // Cover encajado (contain, mismo aspect ratio): alineado a la derecha,
+        // pegado al borde del hero
+        _heroCoverFull = { url: fullUrl, mode: 'contain', align: 'right center' };
+        return [_heroCoverZoom, _heroCoverFull];
+    }
+
+    function heroCycle() {
+        var n = _heroThumbs.length;
+        var full = _heroCoverFull || _heroCoverZoom;
+        var out = [];
+        if (!n) return (full === _heroCoverZoom) ? [_heroCoverZoom] : [_heroCoverZoom, full];
+        for (var k = 0; k < n; k++) {
+            out.push((k % 2 === 0) ? _heroCoverZoom : full);
+            out.push({ url: _heroThumbs[k].url, mode: 'cover', align: 'center' });
         }
-        return slides;
+        // Con n impar el último cover usado es CZ: añadir el CF para que el
+        // cover-full encajado también aparezca en el ciclo (n=1: CZ,T1,CF)
+        if (n % 2 !== 0) out.push(full);
+        return out;
+    }
+
+    function heroRebuildCycle() {
+        if (!_heroCoverZoom) return;
+        _slideshowImages = heroCycle();
+        if (_currentSlideIndex >= _slideshowImages.length) _currentSlideIndex = 0;
+        // Si el ciclo no está en marcha (p. ej. la cola inicial era 1 slide
+        // y los thumbs llegaron después), arrancarlo para que se vean
+        if (_slideshowImages.length > 1 && !_slideshowTimeout) scheduleNextSlide(1500);
+    }
+
+    function stopHeroThumbs() {
+        if (_heroThumbTimer) { clearInterval(_heroThumbTimer); _heroThumbTimer = null; }
+        _heroItemId = null;
+        _heroThumbs = [];
+        _heroThumbPending = {};
+    }
+
+    function startHeroThumbs(itemId, hasEpisodes) {
+        if (!itemId || !hasEpisodes) { stopHeroThumbs(); return; }
+        // Si es el mismo ítem y ya hay progreso (doble showDetails por
+        // variante sugerida), continuar sin borrar la cola
+        if (_heroItemId === itemId && _heroThumbs.length > 0) {
+            if (!_heroThumbTimer) heroPollThumbs(itemId);
+            return;
+        }
+        stopHeroThumbs();
+        _heroItemId = itemId;
+        var fetchEps = currentEpisodes[itemId] && currentEpisodes[itemId].seasons
+            ? Promise.resolve(currentEpisodes[itemId].seasons)
+            : new Promise(function(resolve) {
+                window.API.ajax({
+                    url: '/api/media/' + itemId + '/episodes',
+                    success: function(seasons) {
+                        currentEpisodes[itemId] = { activeSeason: '', seasons: seasons || {} };
+                        resolve(seasons || {});
+                    },
+                    error: function() { resolve({}); }
+                });
+            });
+        fetchEps.then(function() {
+            if (_heroItemId !== itemId) return;
+            window.API.ajax({
+                method: 'POST',
+                url: '/api/hero/thumbs/warm',
+                data: { item_id: itemId },
+                success: function() { if (!_heroThumbTimer) heroPollThumbs(itemId); },
+                error: function() {}
+            });
+            heroPollThumbs(itemId);
+        });
+    }
+
+    function heroPollThumbs(itemId) {
+        if (_heroThumbTimer) clearInterval(_heroThumbTimer);
+        var poll = function() {
+            if (_heroItemId !== itemId) { clearInterval(_heroThumbTimer); _heroThumbTimer = null; return; }
+            window.API.ajax({
+                url: '/api/hero/thumbs/status?item_id=' + encodeURIComponent(itemId),
+                success: function(res) {
+                    if (_heroItemId !== itemId) return;
+                    var items = (res && res.items) || [];
+                    var added = false;
+                    var allReady = items.length > 0;
+                    for (var i = 0; i < items.length; i++) {
+                        if (!items[i].ready) { allReady = false; continue; }
+                        var seen = false;
+                        for (var j = 0; j < _heroThumbs.length; j++) {
+                            if (_heroThumbs[j].mid === items[i].telegram_msg_id) { seen = true; break; }
+                        }
+                        if (!seen && !_heroThumbPending[items[i].telegram_msg_id]) {
+                            (function(mid) {
+                                _heroThumbPending[mid] = true;
+                                var img = new Image();
+                                img.onload = function() {
+                                    delete _heroThumbPending[mid];
+                                    if (_heroItemId !== itemId) return;
+                                    var dup = false;
+                                    for (var k = 0; k < _heroThumbs.length; k++) {
+                                        if (_heroThumbs[k].mid === mid) { dup = true; break; }
+                                    }
+                                    if (!dup) {
+                                        _heroThumbs.push({ mid: mid, url: '/api/media/episode/thumbnail/' + mid });
+                                        try { console.log('[hero] thumb +' + mid + ' (' + _heroThumbs.length + ')'); } catch (e) {}
+                                        heroRebuildCycle();
+                                    }
+                                };
+                                img.onerror = function() { delete _heroThumbPending[mid]; };
+                                img.src = '/api/media/episode/thumbnail/' + mid + '?t=' + Date.now();
+                            })(items[i].telegram_msg_id);
+                            added = true;
+                        }
+                    }
+                    if (allReady && _heroThumbTimer) {
+                        clearInterval(_heroThumbTimer); _heroThumbTimer = null;
+                        try { console.log('[hero] thumbs completos (' + _heroThumbs.length + ')'); } catch (e) {}
+                    }
+                },
+                error: function() {}
+            });
+        };
+        poll();
+        _heroThumbTimer = setInterval(poll, 2000);
     }
 
     // ====== VARIANT SWITCH ======
@@ -823,6 +1144,7 @@
     // ====== CLOSE DETAILS ======
     window.closeDetails = function() {
         if (_slideshowTimeout) { clearTimeout(_slideshowTimeout); _slideshowTimeout = null; }
+        try { stopHeroThumbs(); } catch (e) {}
         var modal = document.getElementById('detail-modal');
         if (modal) modal.classList.add('hidden');
         setTimeout(function() {
@@ -835,19 +1157,71 @@
     };
 
     // ===== Filtro de plugins 'player' por contenido (categoría/subcategoría, con '*') =====
-    // Un plugin aplica a un ítem si su applies_to contiene la categoría, la subcategoría,
-    // o '*' (wildcard). applies_to vacío = aplica a todo.
+    // Un plugin aplica si su categoría/subcategoría saneada coincide con las listas editables (por plugin).
+    // Saneado: minúsculas, trim, solo [a-z0-9] (sin espacios/_/-) para que "ps 3" == "ps3" == "playstation 3" -> "playstation3" según lista.
+    function sanitizeForCompare(s){ var v=String(s||'').trim(); if(v==='*') return '*'; return v.toLowerCase().replace(/[^a-z0-9]/g,'').trim(); }
     Catalog.pluginAppliesToItem = function(plugin, item) {
+        var hasEditable = plugin && (plugin._cats || plugin._subs);
+        var cat = sanitizeForCompare(item && item.category);
+        var sub = sanitizeForCompare(item && item.subcategory);
+        if (hasEditable) {
+            var cats = plugin._cats || [];
+            var subs = plugin._subs || [];
+            var catOk = false, subOk = false;
+            if (!cats.length) catOk = true;
+            else {
+                for (var i=0;i<cats.length;i++) { var sc=sanitizeForCompare(cats[i]); if(sc==='*' || sc===cat) { catOk=true; break; } }
+            }
+            if (!subs.length) subOk = true;
+            else {
+                for (var j=0;j<subs.length;j++) { var ss=sanitizeForCompare(subs[j]); if(ss==='*' || ss===sub) { subOk=true; break; } }
+            }
+            return catOk && subOk;
+        }
         var applies = plugin.applies_to;
         if (!applies || applies.length === 0) return true;
-        var cat = ((item && item.category) || '').toLowerCase();
-        var sub = ((item && item.subcategory) || '').toLowerCase();
         for (var i = 0; i < applies.length; i++) {
-            var a = String(applies[i]).toLowerCase();
+            var a = sanitizeForCompare(applies[i]);
             if (a === '*' || a === cat || a === sub) return true;
         }
         return false;
     };
+
+    Catalog.loadPluginCats = function() {
+        window.API.ajax({
+            url: '/api/plugins/cats',
+            success: function(res) {
+                if (!res) return;
+                for (var name in res) {
+                    if (!res.hasOwnProperty(name)) continue;
+                    var data = res[name];
+                    var cats = data.categories || [];
+                    var subs = data.subcategories || [];
+                    try {
+                        var all = window.pluginSystem ? window.pluginSystem.getPluginsByType('player') : [];
+                        for (var i=0;i<all.length;i++) if (all[i].name===name) {
+                            all[i]._cats = cats.slice();
+                            all[i]._subs = subs.slice();
+                            var comb = [];
+                            for (var c=0;c<cats.length;c++) if (comb.indexOf(cats[c])===-1) comb.push(cats[c]);
+                            for (var s=0;s<subs.length;s++) if (comb.indexOf(subs[s])===-1) comb.push(subs[s]);
+                            all[i].applies_to = comb;
+                        }
+                        if (window.pluginSystem && window.pluginSystem._plugins && window.pluginSystem._plugins[name]) {
+                            var p = window.pluginSystem._plugins[name];
+                            p._cats = cats.slice();
+                            p._subs = subs.slice();
+                            var comb2 = [];
+                            for (var c2=0;c2<cats.length;c2++) if (comb2.indexOf(cats[c2])===-1) comb2.push(cats[c2]);
+                            for (var s2=0;s2<subs.length;s2++) if (comb2.indexOf(subs[s2])===-1) comb2.push(subs[s2]);
+                            p.applies_to = comb2;
+                        }
+                    } catch(e){}
+                }
+            }
+        });
+    };
+    setTimeout(function(){ try{ Catalog.loadPluginCats(); }catch(e){} }, 800);
 
     // Un plugin aplica a "episodios" (series) si su applies_to incluye categorías de vídeo
     // (o '*'). Mantiene fuera a los plugins de consola en el selector de episodios.
@@ -877,70 +1251,90 @@
 
         if (btn) {
             btn.disabled = true;
-            btn.innerHTML = '<span style="display:inline-block;animation:spin 1.2s linear infinite;">⏳</span> Solicitando...';
+            btn.innerHTML = '<span class="btn-emoji" style="width:100%;height:100%;"><span style="display:inline-block;animation:spin 1.2s linear infinite;font-size:1.8rem;line-height:1;">⏳</span></span>';
+            btn.title = 'Solicitando...';
+        }
+
+        var _gotSeasons = function(seasons) {
+            if (currentMediaId !== id) return;
+
+            var activeSeasonName = '';
+            if (currentVariantId && seasons) {
+                for (var sName in seasons) {
+                    if (seasons.hasOwnProperty(sName)) {
+                        var epsList = seasons[sName];
+                        if (epsList && epsList.length > 0) {
+                            var firstEp = epsList[0];
+                            if (String(firstEp.item_id) === String(currentVariantId) || String(firstEp.real_item_id) === String(currentVariantId)) {
+                                activeSeasonName = sName;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            currentEpisodes[id] = {
+                activeSeason: activeSeasonName,
+                seasons: seasons || {}
+            };
+
+            var mediaData = currentEpisodes[id];
+
+            seasonSelector.innerHTML = '';
+            var hasSeasons = false;
+            for (var seasonName in mediaData.seasons) {
+                if (mediaData.seasons.hasOwnProperty(seasonName)) {
+                    hasSeasons = true;
+                    var option = document.createElement('option');
+                    option.value = seasonName;
+                    option.text = seasonName;
+                    if (!mediaData.activeSeason) mediaData.activeSeason = seasonName;
+                    if (seasonName === mediaData.activeSeason) option.selected = true;
+                    seasonSelector.appendChild(option);
+                }
+            }
+
+            if (!hasSeasons) {
+                grid.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 50px 20px;">' +
+                    '<span style="font-size: 3rem;">📭</span>' +
+                    '<div style="font-size: 1.1rem; font-weight: 600; color: #fff; margin-top: 15px;">No se encontraron capítulos</div>' +
+                    '<span style="font-size: 0.85rem; opacity: 0.7; max-width: 320px; line-height: 1.4; display:block;margin:10px auto;">Este título no contiene enlaces de vídeo válidos o no ha sido indexado correctamente en Telegram.</span></div>';
+                seasonSelector.innerHTML = '<option value="">Sin episodios</option>';
+            } else {
+                renderEpisodesGrid();
+            }
+
+            modal.classList.remove('hidden');
+            setTimeout(function() {
+                var target = modal.querySelector('.episode-card.next-to-play') || modal.querySelector('.episode-card');
+                if (target && window.navEngine) window.navEngine.focus(target);
+            }, 120);
+        };
+
+        var _resetEpBtn = function() {
+            if (!btn) return;
+            btn.disabled = false;
+            btn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'📋\'"></span>';
+            btn.title = 'Lista de Episodios';
+            btn.setAttribute('aria-label', 'Lista de Episodios');
+        };
+
+        // Si el hero ya precargó los episodios, reutilizar sin nueva llamada
+        if (currentEpisodes[id] && currentEpisodes[id].seasons) {
+            _resetEpBtn();
+            _gotSeasons(currentEpisodes[id].seasons);
+            return;
         }
 
         window.API.ajax({
             url: '/api/media/' + id + '/episodes',
             success: function(seasons) {
-                if (btn) { btn.disabled = false; btn.innerHTML = '📋 Lista de Episodios'; }
-                if (currentMediaId !== id) return;
-
-                var activeSeasonName = '';
-                if (currentVariantId && seasons) {
-                    for (var sName in seasons) {
-                        if (seasons.hasOwnProperty(sName)) {
-                            var epsList = seasons[sName];
-                            if (epsList && epsList.length > 0) {
-                                var firstEp = epsList[0];
-                                if (String(firstEp.item_id) === String(currentVariantId) || String(firstEp.real_item_id) === String(currentVariantId)) {
-                                    activeSeasonName = sName;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                currentEpisodes[id] = {
-                    activeSeason: activeSeasonName,
-                    seasons: seasons || {}
-                };
-
-                var mediaData = currentEpisodes[id];
-
-                seasonSelector.innerHTML = '';
-                var hasSeasons = false;
-                for (var seasonName in mediaData.seasons) {
-                    if (mediaData.seasons.hasOwnProperty(seasonName)) {
-                        hasSeasons = true;
-                        var option = document.createElement('option');
-                        option.value = seasonName;
-                        option.text = seasonName;
-                        if (!mediaData.activeSeason) mediaData.activeSeason = seasonName;
-                        if (seasonName === mediaData.activeSeason) option.selected = true;
-                        seasonSelector.appendChild(option);
-                    }
-                }
-
-                if (!hasSeasons) {
-                    grid.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 50px 20px;">' +
-                        '<span style="font-size: 3rem;">📭</span>' +
-                        '<div style="font-size: 1.1rem; font-weight: 600; color: #fff; margin-top: 15px;">No se encontraron capítulos</div>' +
-                        '<span style="font-size: 0.85rem; opacity: 0.7; max-width: 320px; line-height: 1.4; display:block;margin:10px auto;">Este título no contiene enlaces de vídeo válidos o no ha sido indexado correctamente en Telegram.</span></div>';
-                    seasonSelector.innerHTML = '<option value="">Sin episodios</option>';
-                } else {
-                    renderEpisodesGrid();
-                }
-
-                modal.classList.remove('hidden');
-                setTimeout(function() {
-                    var target = modal.querySelector('.episode-card.next-to-play') || modal.querySelector('.episode-card');
-                    if (target && window.navEngine) window.navEngine.focus(target);
-                }, 120);
+                if (btn) { btn.disabled = false; btn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'📋\'"></span>'; btn.title='Lista de Episodios'; btn.setAttribute('aria-label','Lista de Episodios'); }
+                _gotSeasons(seasons);
             },
             error: function() {
-                if (btn) { btn.disabled = false; btn.innerHTML = '📋 Lista de Episodios'; }
+                if (btn) { btn.disabled = false; btn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'📋\'"></span>'; btn.title='Lista de Episodios'; btn.setAttribute('aria-label','Lista de Episodios'); }
                 grid.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);">Error al cargar episodios</div>';
             }
         });
@@ -949,6 +1343,16 @@
     Catalog.closeEpisodesModal = function() {
         var modal = document.getElementById('episodes-modal');
         if (modal) modal.classList.add('hidden');
+        // Restaurar el botón por si quedó en estado spinner
+        try {
+            var ebtn = document.getElementById('btn-episodes');
+            if (ebtn) {
+                ebtn.disabled = false;
+                ebtn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'📋\'"></span>';
+                ebtn.title = 'Lista de Episodios';
+                ebtn.setAttribute('aria-label', 'Lista de Episodios');
+            }
+        } catch (e) {}
         if (lastFocusedDetailsAction && document.body.contains(lastFocusedDetailsAction) && window.navEngine) {
             window.navEngine.focus(lastFocusedDetailsAction);
         } else {
@@ -1326,7 +1730,16 @@
             btn.style.cssText = 'display:flex;align-items:center;gap:10px;width:100%;padding:10px 14px;margin:4px 0;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:#fff;font-size:0.9rem;cursor:pointer;transition:0.2s;text-align:left;';
             btn.onmouseenter = function() { this.style.background = 'rgba(225,29,72,0.15)'; };
             btn.onmouseleave = function() { this.style.background = 'rgba(255,255,255,0.05)'; };
-            btn.innerHTML = '<span style="font-size:1.2rem;">' + (pl.playIcon || '\u25B6') + '</span> <span>' + (pl.playLabel || pl.displayName || pl.name) + '</span>';
+            var selIcon = pl.playIcon;
+            if (pl.name && pl.name.indexOf('tvcat_')===0) {
+                selIcon = '<img src="/plugin-static/' + pl.name + '/plugin.png" style="width:28px;height:28px;object-fit:contain;border-radius:4px;vertical-align:middle;" onerror="this.onerror=null;this.src=\'/plugin-static/' + pl.name + '/plugin_icon.png\';">';
+            }
+            var selLabel = pl.playLabel || pl.displayName || pl.name;
+            // si playLabel está vacío (como PS3 ahora), usar displayName como label en el selector
+            if (!selLabel && pl.displayName) selLabel = pl.displayName;
+            btn.innerHTML = '<span style="font-size:1.2rem;display:inline-flex;align-items:center;">' + selIcon + '</span> <span>' + selLabel + '</span>';
+            var selTip = pl.tooltip || pl.displayName || selLabel;
+            btn.title = selTip;
             btn.onclick = (function(plugin) {
                 return function() { overlay.remove(); localStorage.setItem('tvcat_preferred_player', plugin.playerType); if (typeof plugin.play === 'function') plugin.play(item); else Catalog._playWithPlayer(item, itemId, hasEpisodes, subcat, plugin); };
             })(pl);

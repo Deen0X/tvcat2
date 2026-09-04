@@ -4,14 +4,20 @@
   "type": "player",
   "displayName": "Reproductor TVCat",
   "description": "Reproductor principal con detección automática y selector de modo: Auto, Plyr, Nativo o Básico.",
-  "icon": "▶️",
+  "icon": "static/plugin_icon.png",
   "defaultEnabled": true,
   "action_category": "playback",
   "single_button": true,
   "priority": 10,
-  "js": ["player.js"],
+  "js": [
+    "player.js"
+  ],
   "css": [],
-  "applies_to": ["media", "series", "video"],
+  "applies_to": [
+    "media",
+    "series",
+    "video"
+  ],
   "settings_schema": [
     {
       "id": "mode",
@@ -19,14 +25,31 @@
       "type": "select",
       "default": "auto",
       "options": [
-        {"value": "auto", "label": "Auto (detección automática según el dispositivo)"},
-        {"value": "plyr", "label": "Plyr (controles modernos)"},
-        {"value": "native", "label": "Nativo (reproductor HTML5 del navegador)"},
-        {"value": "basic", "label": "Básico (modo mínimo para Smart TVs antiguas)"}
+        {
+          "value": "auto",
+          "label": "Auto (detección automática según el dispositivo)"
+        },
+        {
+          "value": "plyr",
+          "label": "Plyr (controles modernos)"
+        },
+        {
+          "value": "native",
+          "label": "Nativo (reproductor HTML5 del navegador)"
+        },
+        {
+          "value": "basic",
+          "label": "Básico (modo mínimo para Smart TVs antiguas)"
+        }
       ],
       "description": "Selecciona el tipo de reproductor. Auto elige Plyr si está disponible, Nativo en Smart TVs, o Básico en dispositivos muy antiguos."
     }
   ],
-  "has_interface": false,
-  "access": { "admin": true, "user": true, "child": true }
+    "has_interface": false,
+    "access": {
+        "admin": true,
+        "user": true,
+        "child": true
+    },
+    "iconEmoji": "▶️"
 }

@@ -41,15 +41,22 @@ window.pluginSystem = (function() {
     }
 
     // Ordena los plugins por el orden guardado del usuario (plugins_order.json) para consistencia.
-    // Los plugins sin entrada en pluginOrder van al final, manteniendo su orden relativo.
+    // Los plugins sin entrada en pluginOrder van al final, manteniendo su orden relativo de
+    // registro de forma ESTABLE (el sort nativo con índices iguales es inestable y reordena
+    // de forma aleatoria los plugins nuevos no listados).
     function sortByPluginOrder(result) {
         if (pluginOrder.length > 0) {
+            // Registrar orden de aparición original como tie-breaker estable
+            var regIndex = {};
+            for (var i = 0; i < result.length; i++) { regIndex[result[i].name] = i; }
             var indexMap = {};
-            for (var i = 0; i < pluginOrder.length; i++) { indexMap[pluginOrder[i]] = i; }
+            for (var i2 = 0; i2 < pluginOrder.length; i2++) { indexMap[pluginOrder[i2]] = i2; }
             result.sort(function(a, b) {
                 var ia = indexMap.hasOwnProperty(a.name) ? indexMap[a.name] : 99999;
                 var ib = indexMap.hasOwnProperty(b.name) ? indexMap[b.name] : 99999;
-                return ia - ib;
+                if (ia !== ib) return ia - ib;
+                // Mismo grupo (ambos listados o ambos no listados): mantener orden de registro
+                return (regIndex[a.name] - regIndex[b.name]);
             });
         }
         return result;

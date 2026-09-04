@@ -4,14 +4,20 @@
   "type": "player",
   "displayName": "Player Pro (Caché Local)",
   "description": "Reproductor con caché local vía IndexedDB. Streaming directo + switch a Blob local al perder conexión (automático). Soporta reproducción offline sin Service Worker.",
-  "icon": "⚡",
+  "icon": "static/plugin_icon.png",
   "defaultEnabled": false,
   "action_category": "playback",
   "single_button": true,
   "priority": 5,
-  "js": ["player_pro.js"],
+  "js": [
+    "player_pro.js"
+  ],
   "css": [],
-  "applies_to": ["media", "series", "video"],
+  "applies_to": [
+    "media",
+    "series",
+    "video"
+  ],
   "settings_schema": [
     {
       "id": "ui_mode",
@@ -19,10 +25,22 @@
       "type": "select",
       "default": "auto",
       "options": [
-        {"value": "auto", "label": "Auto (detección automática)"},
-        {"value": "plyr", "label": "Plyr (controles modernos)"},
-        {"value": "native", "label": "Nativo (HTML5 estándar)"},
-        {"value": "basic", "label": "Básico (mínimo, TVs antiguas)"}
+        {
+          "value": "auto",
+          "label": "Auto (detección automática)"
+        },
+        {
+          "value": "plyr",
+          "label": "Plyr (controles modernos)"
+        },
+        {
+          "value": "native",
+          "label": "Nativo (HTML5 estándar)"
+        },
+        {
+          "value": "basic",
+          "label": "Básico (mínimo, TVs antiguas)"
+        }
       ],
       "description": "Modo visual del reproductor."
     },
@@ -53,5 +71,10 @@
     }
   ],
   "has_interface": false,
-  "access": { "admin": true, "user": true, "child": true }
+  "access": {
+    "admin": true,
+    "user": true,
+    "child": true
+  },
+  "iconEmoji": "⚡"
 }

@@ -19,8 +19,73 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse, Response, RedirectResponse
 
 # Global rate limiter for Telegram API calls (JIT cover downloads)
-_jit_semaphore = asyncio.Semaphore(1)
 _jit_last_call = 0.0
+# Cooldown por clave fallida (channel,msg) -> loop-time hasta el que no reintentar.
+# Evita reintentar en bucle covers que fallan (FloodWait, refs expiradas, etc).
+_jit_fail_cooldown = {}
+
+
+def _mark_jit_fail(channel, msg_id, long=False):
+    try:
+        now = asyncio.get_event_loop().time()
+        wait = 3600 if long else 600
+        _jit_fail_cooldown[(str(channel), int(msg_id))] = now + wait
+        # Poda ocasional para no crecer sin límite
+        if len(_jit_fail_cooldown) > 5000:
+            for k in [kk for kk, vv in _jit_fail_cooldown.items() if vv < now]:
+                _jit_fail_cooldown.pop(k, None)
+    except Exception:
+        pass
+
+
+_bg_cover_pending = set()
+
+
+def _bg_cover_retry(channel_bare, msg_id, chat_entity_str, tid, source="jit-bg"):
+    """Reintento persistente de descarga de cover en background (dedup por clave).
+    Rellena catalog_assets para futuras peticiones. No sirve respuestas."""
+    try:
+        key = (str(channel_bare), int(msg_id))
+    except Exception:
+        return
+    if key in _bg_cover_pending:
+        return
+    _bg_cover_pending.add(key)
+
+    async def _run():
+        try:
+            from services.telegram_service import get_telegram_service
+            _svc2 = get_telegram_service()
+            _r = await _svc2.fetch_cover(chat_entity_str, int(msg_id),
+                                         tg_user_id=int(tid) if tid else None)
+            if isinstance(_r, dict) and _r.get("ok") and _r.get("data"):
+                _ph = _r["data"]
+                if isinstance(_ph, (bytes, bytearray, memoryview)):
+                    def _mk_bg(_raw):
+                        from PIL import Image as _PIL2
+                        import io as _io2
+                        _buf2 = _io2.BytesIO()
+                        with _PIL2.open(_io2.BytesIO(bytes(_raw))) as _img2:
+                            _img2.thumbnail((300, 300), _PIL2.Resampling.LANCZOS)
+                            _img2.save(_buf2, "WEBP", quality=85)
+                            return _buf2.getvalue()
+                    _wb = await asyncio.to_thread(_mk_bg, _ph)
+                    from services.catalog_service import get_conn as _gc
+                    _cc2 = _gc()
+                    _cc2.execute("INSERT OR REPLACE INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, source) VALUES (?, ?, 'cover', 0, ?, 'image/webp', ?, ?)",
+                                 (str(channel_bare), int(msg_id), _wb, len(_wb), source))
+                    _cc2.commit()
+                    _cc2.close()
+                    print(f" [JIT COVER bg] Portada descargada para {channel_bare}:{msg_id}")
+        except Exception as e:
+            print(f" [JIT COVER bg] error {channel_bare}:{msg_id}: {e}")
+        finally:
+            _bg_cover_pending.discard(key)
+
+    try:
+        asyncio.create_task(_run())
+    except Exception:
+        _bg_cover_pending.discard(key)
 
 # Thumbnail extraction (async cache)
 _thumb_pending_extractions = set()
@@ -329,6 +394,17 @@ def get_global_setting(key, default=None):
     return row[0] if row else default
 
 
+# Tareas background fire-and-forget (warm thumbs, extracciones): se registran
+# para cancelarlas en el apagado y no dejar "Task was destroyed but pending".
+_background_tasks = set()
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 @asynccontextmanager
 async def lifespan(app_instance):
     print(f" [TVCAT2] Iniciando TVCat 2 v{__version__}")
@@ -367,6 +443,15 @@ async def lifespan(app_instance):
     print(f" [TVCAT2] Listo. Plugins cargados: {len(_plugin_loader.registry)}")
     yield
     print(" [TVCAT2] Apagando...")
+    # Cancelar primero las tareas background propias (usan el cliente Telegram)
+    if _background_tasks:
+        for t in list(_background_tasks):
+            t.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(*list(_background_tasks), return_exceptions=True), timeout=5)
+        except Exception:
+            pass
+        _background_tasks.clear()
     from services.telegram_service import get_telegram_service
     await get_telegram_service().stop()
     from services.userbot_service import disconnect_all
@@ -382,7 +467,16 @@ def api_url(path):
 async def no_cache_middleware(request: Request, call_next):
     """Evita que navegadores antiguos (Smart TVs) congelen CSS/JS/HTML con caché caducado."""
     path = request.url.path
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as _e:
+        # 2026-09-04b: SOLO abortos del cliente (-> 499 silencioso). Cualquier otro
+        # error debe propagar (antes se tragaba todo y escondía 500 reales).
+        _nm = type(_e).__name__
+        if _nm in ("EndOfStream", "ClientDisconnect", "Cancelled"):
+            from starlette.responses import Response as _Resp
+            return _Resp(status_code=499)
+        raise
     # Excluir streaming, covers e installer (binarios grandes / Range requests / FBI)
     if "/api/stream" not in path and "/api/cover" not in path and "/api/installer" not in path and "/api/qr" not in path:
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -706,6 +800,7 @@ async def enrich_config_set(request: Request):
         credentials=body.get("credentials"),
         templates=body.get("templates"),
         threshold=body.get("threshold"),
+        behavior=body.get("behavior"),
     )
 
 
@@ -947,21 +1042,107 @@ async def get_catalog_tree():
         result.append({"source": src, "categories": cats})
     return {"tree": result}
 
+def _filter_items(items, search: str = "", fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = ""):
+    """Aplica filtros de catálogo (búsqueda, año, géneros) sobre una lista ya obtenida.
+    Usado para continue/completed/favorites donde el origen no es get_random_items."""
+    if not items:
+        return items
+    search = (search or "").strip()
+    search_fields = [f.strip() for f in fields.split(",") if f.strip()] if fields is not None else None
+    if search_fields is None:
+        search_fields = ["title", "description", "alt_titles"]
+    # year
+    yf = None
+    yt = None
+    try:
+        if year_from: yf = int(year_from)
+    except: yf = None
+    try:
+        if year_to: yt = int(year_to)
+    except: yt = None
+    exclude_genres = [g.strip().lower() for g in genres.split(",") if g.strip()] if genres else []
+    # Pre-parsear búsqueda con comodines
+    search_parts = []
+    if search and len(search) >= 2:
+        q = search.lower()
+        if "*" in q:
+            search_parts = [p.strip() for p in q.split("*") if p.strip()]
+            if not search_parts: search_parts = [q]
+        else:
+            search_parts = [q]
+    filtered = []
+    for it in items:
+        # género
+        if exclude_genres:
+            gval = (it.get("genres") or "").lower()
+            # genres en unified_catalog es "a,b,c"
+            gset = set([x.strip() for x in gval.split(",") if x.strip()])
+            # también considerar que el filtro puede incluir "__no_genre__"
+            skip = False
+            for eg in exclude_genres:
+                if eg == "__no_genre__":
+                    if not gset: skip = True; break
+                elif eg in gset:
+                    skip = True; break
+            if skip:
+                continue
+        # año
+        if yf is not None or yt is not None:
+            try:
+                y = int(str(it.get("year") or "").strip()[:4])
+            except:
+                y = None
+            if y is not None:
+                if yf is not None and y < yf: continue
+                if yt is not None and y > yt: continue
+            else:
+                # si item sin año y hay filtro de año, no lo descartamos? coherente con get_random_items (CAST -> NULL no matchea)
+                # get_random_items descarta si CAST no cumple; si year es vacío CAST da NULL y comparación falla -> item descartado
+                # aquí replicamos: si filtro año y item sin año, lo descartamos
+                if yf is not None or yt is not None:
+                    # sólo descartar si el filtro exige año y no hay dato -> para compatibilidad, mantenerlo si no hay año?
+                    # En SQL: CAST('' AS INTEGER) -> 0? En SQLite CAST('' AS INTEGER)=0, entonces 0 >= yf sería falso si yf>0 -> descartado.
+                    # Para simplificar, descartar si hay filtro y no hay año válido.
+                    continue
+        # búsqueda
+        if search_parts:
+            hay = False
+            for field in search_fields:
+                val = str(it.get(field) or "").lower()
+                # para alt_titles es JSON array string -> contiene títulos
+                for part in search_parts:
+                    if part in val:
+                        hay = True; break
+                if hay: break
+            if not hay:
+                continue
+        filtered.append(it)
+    return filtered
+
 @app.get(api_url("/api/catalog/continue"))
-async def catalog_continue(request: Request):
+async def catalog_continue(request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = ""):
     from services.favorites_service import get_continue_watching
     from services.auth_service import get_session
     session = get_session(request.cookies.get("tvcat_session",""))
     if not session: raise HTTPException(401)
-    return {"items": get_continue_watching(session.get("profile_id") or session["user_id"])}
+    items = get_continue_watching(session.get("profile_id") or session["user_id"], limit=min(limit,200))
+    items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
+    # limitar tras filtrar si se pidió search (mantener límite)
+    if search or year_from or year_to or genres:
+        items = items[:min(limit,200)]
+    return {"items": items, "count": len(items)}
 
 @app.get(api_url("/api/catalog/completed"))
-async def catalog_completed(request: Request):
+async def catalog_completed(request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = ""):
     from services.favorites_service import get_completed
     from services.auth_service import get_session
     session = get_session(request.cookies.get("tvcat_session",""))
     if not session: raise HTTPException(401)
-    return {"items": get_completed(session.get("profile_id") or session["user_id"])}
+    items = get_completed(session.get("profile_id") or session["user_id"], limit=min(limit,200))
+    items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
+    if search or year_from or year_to or genres:
+        items = items[:min(limit,200)]
+    return {"items": items, "count": len(items)}
 
 @app.get(api_url("/api/catalog/visibility"))
 async def get_visibility(request: Request):
@@ -999,7 +1180,7 @@ async def get_catalog(category: str, request: Request, search: str = "", limit: 
     yt = int(year_to) if year_to else None
     exclude_genres = [g.strip().lower() for g in genres.split(",") if g.strip()] if genres else []
     
-    # Para favoritos, consultar directamente la tabla de favoritos
+    # Para favoritos, consultar directamente la tabla de favoritos y aplicar filtros activos (búsqueda/año/géneros)
     if category == 'favorites' and profile_id:
         conn = get_conn()
         try:
@@ -1013,9 +1194,14 @@ async def get_catalog(category: str, request: Request, search: str = "", limit: 
             for item in items:
                 item["fav"] = True
             conn.close()
+            # aplicar filtros de catálogo (si hay búsqueda/filtros activos)
+            if search or yf is not None or yt is not None or exclude_genres:
+                items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
+                items = items[:min(limit,200)]
             return {"items": items, "count": len(items)}
         except Exception as e:
-            conn.close()
+            try: conn.close()
+            except: pass
             return {"items": [], "count": 0}
     
     result = get_random_items(category=category, search=search, limit=min(limit, 200), user_id=user_id, search_fields=search_fields, year_from=yf, year_to=yt, exclude_genres=exclude_genres)
@@ -1551,6 +1737,36 @@ def _hls_track_conn_failure():
         _HLS_CONN_FAILURES.clear()
         return True
     return False
+
+_HLS_SEQ_SEMAPHORE_SIZE = 8
+_HLS_SEQ_SEMAPHORE = None
+_HLS_SEQ_GEN_TIMES = []
+_HLS_SEQ_MAX_SEMAPHORE = 8
+_HLS_SEQ_MIN_SEMAPHORE = 2
+
+def _hls_seq_get_semaphore():
+    global _HLS_SEQ_SEMAPHORE, _HLS_SEQ_SEMAPHORE_SIZE
+    if _HLS_SEQ_SEMAPHORE is None:
+        _HLS_SEQ_SEMAPHORE = asyncio.Semaphore(_HLS_SEQ_SEMAPHORE_SIZE)
+    return _HLS_SEQ_SEMAPHORE
+
+def _hls_seq_track_generation_time(gen_time: float):
+    """Ajusta semaphore para mantener >=3s holgura (6s segmento - gen_time).
+    Rango [_HLS_SEQ_MIN_SEMAPHORE, _HLS_SEQ_MAX_SEMAPHORE]. Configurable."""
+    global _HLS_SEQ_SEMAPHORE_SIZE, _HLS_SEQ_SEMAPHORE, _HLS_SEQ_GEN_TIMES
+    _HLS_SEQ_GEN_TIMES.append(gen_time)
+    if len(_HLS_SEQ_GEN_TIMES) > 10:
+        _HLS_SEQ_GEN_TIMES.pop(0)
+    avg = sum(_HLS_SEQ_GEN_TIMES) / len(_HLS_SEQ_GEN_TIMES)
+    holgura = 6 - avg
+    if holgura < 3 and _HLS_SEQ_SEMAPHORE_SIZE < _HLS_SEQ_MAX_SEMAPHORE:
+        _HLS_SEQ_SEMAPHORE_SIZE += 1
+        _HLS_SEQ_SEMAPHORE = asyncio.Semaphore(_HLS_SEQ_SEMAPHORE_SIZE)
+        print(f" [HLS-SEQ] Holgura {holgura:.1f}s <3s, subiendo semaphore a {_HLS_SEQ_SEMAPHORE_SIZE} (avg gen {avg:.1f}s)")
+    elif holgura > 4 and _HLS_SEQ_SEMAPHORE_SIZE > _HLS_SEQ_MIN_SEMAPHORE and len(_HLS_SEQ_GEN_TIMES) >= 5 and avg < 2:
+        _HLS_SEQ_SEMAPHORE_SIZE -= 1
+        _HLS_SEQ_SEMAPHORE = asyncio.Semaphore(_HLS_SEQ_SEMAPHORE_SIZE)
+        print(f" [HLS-SEQ] Holgura {holgura:.1f}s >4s, bajando semaphore a {_HLS_SEQ_SEMAPHORE_SIZE}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # HLS CACHE SPARSE (arquitectura §20.7) — fichero local por episodio + bitmap
@@ -3941,6 +4157,25 @@ async def hls_leave(episode_key: str):
         printLog(f" [HLS-WORKER] ep={episode_key} leave solicitado, pausado")
     return {"left": True}
 
+@app.get(api_url("/api/hls/{episode_key}/leave"))
+async def hls_leave_get(episode_key: str):
+    return await hls_leave(episode_key)
+
+@app.post(api_url("/api/hls_seq/{episode_key}/leave"))
+@app.get(api_url("/api/hls_seq/{episode_key}/leave"))
+async def hls_seq_leave(episode_key: str):
+    """SEQ: pausar descarga central al salir."""
+    try:
+        from services.download_service import _jobs
+        _jobs.pop(episode_key, None)
+    except:
+        pass
+    state = _HLS_SPARSE.get(episode_key)
+    if state is not None:
+        state["last_active"] = 0
+    printLog(f" [HLS-SEQ] leave {episode_key}")
+    return {"left": True}
+
 
 @app.get(api_url("/api/hls/{episode_key}/warmup"))
 async def hls_warmup(episode_key: str):
@@ -4247,15 +4482,356 @@ async def hls_metadata(episode_key: str):
     }
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# HLS SEQ — reproductor secuencial con descarga central (Fase 3)
+# Usa download_service + FakeMKV. NO toca los endpoints HLS existentes.
+# ═════════════════════════════════════════════════════════════════════════════
+_HLS_SEQ_SEG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "hls_seq_segments")
+os.makedirs(_HLS_SEQ_SEG_DIR, exist_ok=True)
+
+
+async def _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, prefer_block=None):
+    """Asegura que el servicio central está descargando el sparse (relanza/reanuda si incompleto).
+    `prefer_block`: bloque (512KB) a descargar prioritariamente (punto de reproducción/seek)."""
+    from services.download_service import get_status, download_sparse, set_prefer
+    sparse = _hls_sparse_path(episode_key)
+    st = get_status(episode_key)
+    # Si el fichero no existe/tamaño erróneo, preasignar
+    if not os.path.isfile(sparse) or os.path.getsize(sparse) != file_size:
+        os.makedirs(os.path.dirname(sparse), exist_ok=True)
+        with open(sparse, "wb") as f:
+            f.truncate(file_size)
+    # Si ya está descargando pero el usuario busca otra zona, re-priorizar en caliente
+    if st.get("status") == "downloading" and prefer_block is not None:
+        try:
+            set_prefer(episode_key, prefer_block)
+            print(f" [HLS-SEQ] Re-priorizando bloque {prefer_block} para {episode_key}")
+        except Exception:
+            pass
+        return
+    # Relanzar si no está descargando/completo
+    incomplete = st.get("status") not in ("downloading", "completed") or (st.get("bytes_done", 0) < file_size)
+    if incomplete:
+        try:
+            asyncio.create_task(download_sparse(episode_key, file_size, msg, dc_id, prefer_block=prefer_block))
+            print(f" [HLS-SEQ] Descarga (reanudable) en background para {episode_key} (st={st.get('status')}, prefer_block={prefer_block})")
+        except Exception as e:
+            print(f" [HLS-SEQ] No se pudo iniciar descarga: {e}")
+
+
+@app.get(api_url("/api/hls_seq/{episode_key}/playlist.m3u8"))
+async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0):
+    """Playlist HLS SEQ: segmentos de 6s desde `start` segundos.
+    Usa el sparse descargado (download_service). No espera fichero completo:
+    genera segmentos de la zona ya descargada."""
+    from services import stream_packager
+    from services.download_service import get_status
+
+    # Resolver episodio
+    msg, chat_entity, file_size, dc_id = await _hls_resolve_episode(episode_key)
+    if not msg or file_size <= 0:
+        raise HTTPException(404, "Episodio no encontrado")
+
+    # Asegurar sparse existe y el servicio está descargando (relanza si incompleto)
+    sparse = _hls_sparse_path(episode_key)
+    await _hls_seq_ensure_download(episode_key, msg, file_size, dc_id)
+
+    # Para MKV: asegurar Cues disponibles (últimos 2MB) antes de servir segmentos
+    # Igual que HLS actual asegura moov para MP4, aquí aseguramos Cues para FakeMKV
+    try:
+        from services import fakemkv
+        cues = fakemkv.parse_mkv_cues_from_file(sparse)
+        if not cues:
+            print(f" [HLS-SEQ] Cues no disponibles, descargando final 2MB para {episode_key}")
+            # Descargar los últimos 2MB (donde están Cues en 2706959249)
+            from services.userbot_service import get_active_client
+            ubot2 = await get_active_client("telethon")
+            if ubot2:
+                client2 = getattr(ubot2, '_client', ubot2)
+                # Usar el mismo patrón que _hls_ensure_header_cache pero para el final
+                tmp = await _hls_download_range(ubot2, msg, dc_id, max(0, file_size - 2*1024*1024), 2*1024*1024)
+                if tmp and os.path.isfile(tmp):
+                    with open(tmp, 'rb') as tf:
+                        tail_data = tf.read()
+                    tail_start = max(0, file_size - len(tail_data))
+                    with open(sparse, 'r+b') as sf:
+                        sf.seek(tail_start)
+                        sf.write(tail_data)
+                    # Actualizar bitmap para los bloques del final
+                    try:
+                        st = _hls_sparse_load(episode_key, file_size)
+                        for off in range(tail_start, file_size, 512*1024):
+                            st["bitmap"].add(off // (512*1024))
+                        _hls_cache_save(episode_key, sparse, file_size, st["total_blocks"], _hls_bitmap_serialize(st["bitmap"]))
+                    except Exception:
+                        pass
+                    try:
+                        os.remove(tmp)
+                    except:
+                        pass
+                    print(f" [HLS-SEQ] Cues descargados ({len(tail_data)} bytes) desde offset {tail_start}")
+    except Exception as e:
+        print(f" [HLS-SEQ] No se pudo asegurar Cues: {e}")
+
+    # Duración: desde Telegram o ffprobe
+    duration = 0
+    try:
+        d = msg.video.duration if hasattr(msg, 'video') and getattr(msg.video, 'duration', 0) else 0
+        if d:
+            duration = float(d)
+    except Exception:
+        pass
+    if duration <= 0:
+        # Estimar por tamaño (2.56Mbps medio)
+        duration = file_size / (2.56 * 1024 * 1024 / 8)
+
+    # Master multi-pista (igual que HLS actual): audios/subs embebidos
+    # Asegurar header/tracks para que el master liste audios/subs
+    try:
+        if msg and file_size > 0 and not _HLS_SEG_CACHE.get(episode_key, {}).get("tracks"):
+            from services.userbot_service import get_active_client as _gac2
+            ub2 = await _gac2()
+            if ub2:
+                await _hls_ensure_header_cache(ub2, msg, dc_id, file_size, episode_key)
+    except Exception:
+        pass
+    subs_info = await hls_subs_list(episode_key)
+    subs = subs_info.get("subs", [])
+    info2 = _HLS_SEG_CACHE.get(episode_key, {})
+    tracks = info2.get("tracks", [])
+    audios = [t for t in tracks if t.get("type") == "audio"]
+    embedded_subs = [t for t in tracks if t.get("type") == "subs"]
+    import json as _jd2
+    printLog(" [HLS-SEQ-MASTER] tracks=" + _jd2.dumps(tracks) + " subs=" + str(subs))
+
+    total_segments = max(1, int(duration / _HLS_SEG_DURATION) + 1)
+    start_seg = max(0, int(start / _HLS_SEG_DURATION))
+
+    # MASTER VÍA LIGERA: UNA sola variante video+audio0 (sin EXT-X-MEDIA TYPE=AUDIO conmutable).
+    # Así hls.js NO pre-carga las 2 pistas (1 solo ffmpeg por segmento). El combo de audio
+    # lo puebla el endpoint /status y el cambio usa loadSource(media.m3u8?audio=N).
+    lines = ["#EXTM3U"]
+    for lang in subs:
+        lines.append(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="{lang}",NAME="{lang} (ext)",DEFAULT=NO,AUTOSELECT=YES,URI="/api/hls/{episode_key}/subs/{lang}.m3u8"')
+    for s in embedded_subs:
+        lang = s.get("lang", "und")
+        idx = s.get("idx", 0)
+        lines.append(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="{lang}",NAME="{lang} #{idx}",DEFAULT=NO,AUTOSELECT=YES,URI="/api/hls/{episode_key}/subs_embed/{idx}.m3u8"')
+    has_subs = bool(subs or embedded_subs)
+    extra = ""
+    if has_subs:
+        extra += ',SUBTITLES="subs"'
+    lines.append(f'#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS="avc1.64001f,mp4a.40.2"{extra}')
+    lines.append(f"/api/hls_seq/{episode_key}/media.m3u8?start={start}")
+
+    from fastapi.responses import Response
+    return Response(content="\n".join(lines), media_type="application/vnd.apple.mpegurl",
+                   headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"})
+
+
+@app.get(api_url("/api/hls_seq/{episode_key}/media.m3u8"))
+async def hls_seq_media(episode_key: str, start: float = 0, audio: int = 0):
+    """Playlist media SEQ: lista de segmentos desde el segmento `start/6`."""
+    msg, chat_entity, file_size, dc_id = await _hls_resolve_episode(episode_key)
+    if not msg or file_size <= 0:
+        raise HTTPException(404, "Episodio no encontrado")
+    # Asegurar descarga (por si el player recarga el media tras cambiar audio)
+    await _hls_seq_ensure_download(episode_key, msg, file_size, dc_id)
+    duration = _HLS_SEG_CACHE.get(episode_key, {}).get("duration", 0)
+    if duration <= 0:
+        try:
+            d = msg.video.duration if hasattr(msg, 'video') and getattr(msg.video, 'duration', 0) else 0
+            duration = float(d) if d else file_size / (2.56 * 1024 * 1024 / 8)
+        except Exception:
+            duration = file_size / (2.56 * 1024 * 1024 / 8)
+
+    total_segments = max(1, int(duration / _HLS_SEG_DURATION) + 1)
+    # IMPORTANTE: playlists SIEMPRE desde el segmento 0 (timestamps absolutos del vídeo).
+    # El `start` NO desplaza MEDIA-SEQUENCE (eso movía el "0" del progreso y desalineaba
+    # los timestamps al recargar por cambio de audio). El player hace el seek vía currentTime.
+    qseg = f"?audio={audio}" if audio else ""
+
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        "#EXT-X-TARGETDURATION:%d" % _HLS_SEG_DURATION,
+        "#EXT-X-MEDIA-SEQUENCE:0",
+    ]
+    for i in range(0, total_segments):
+        lines.append("#EXTINF:%.3f," % _HLS_SEG_DURATION)
+        lines.append(f"/api/hls_seq/{episode_key}/segment/{i}.ts{qseg}")
+    lines.append("#EXT-X-ENDLIST")
+
+    from fastapi.responses import Response
+    return Response(content="\n".join(lines), media_type="application/vnd.apple.mpegurl",
+                   headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"})
+
+
+@app.get(api_url("/api/hls_seq/{episode_key}/segment/{n}.ts"))
+async def hls_seq_segment(episode_key: str, n: int, audio: int = 0):
+    """Segmento HLS SEQ: remuxa el rango [X, X+Δ] del sparse usando FakeMKV.
+    X = n*6 segundos. Busca el cluster del keyframe de X, recorta los clusters
+    contiguos hasta X+Δ, construye mini-MKV, ffmpeg -> .ts.
+    `audio`: índice de pista de audio (misma mecánica que HLS clásico)."""
+    import time as _t
+    from services import stream_packager
+    from services import fakemkv
+
+    info = _HLS_SEG_CACHE.get(episode_key, {})
+    msg = info.get("msg_obj")
+    file_size = info.get("file_size", 0)
+    if not msg or not file_size:
+        msg, chat_entity, file_size, dc_id = await _hls_resolve_episode(episode_key)
+        info = _HLS_SEG_CACHE.get(episode_key, {})
+
+    sparse = _hls_sparse_path(episode_key)
+    if not os.path.isfile(sparse):
+        raise HTTPException(503, "Sparse no disponible")
+
+    duration = info.get("duration", 0)
+    if duration <= 0:
+        duration = file_size / (2.56 * 1024 * 1024 / 8)
+
+    target_time = n * _HLS_SEG_DURATION
+    if target_time >= duration:
+        raise HTTPException(404, "Segmento fuera de rango")
+    # Bloque prioritario = zona del segmento pedido (para que el servicio descargue esa zona primero)
+    # se calcula con estimación lineal (valida para priorizar; el cluster exacto se usa luego)
+    prefer_block = int((target_time / duration) * (file_size / (512*1024))) if duration > 0 else 0
+    # Asegurar que el servicio está descargando (relanza si incompleto) priorizando el bloque pedido
+    try:
+        await _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, prefer_block=prefer_block)
+    except Exception:
+        pass
+
+    # Intentar parsear Cues para localizar cluster, pero no es bloqueante para segmentos iniciales
+    # Si Cues no están disponibles (fichero aún descargándose, Cues al final), fallback a remux directo
+    cues = []
+    cluster_off = None
+    try:
+        cues = fakemkv.parse_mkv_cues_from_file(sparse)
+        if cues:
+            cluster_off = fakemkv.get_cluster_for_time(cues, int(target_time * 1000))
+    except Exception as e:
+        print(f" [HLS-SEQ] error parseando Cues: {e}")
+    
+    # Si tenemos Cues y cluster, verificar que zona está descargada
+    if cluster_off is not None:
+        with open(sparse, 'rb') as f:
+            f.seek(cluster_off)
+            probe = f.read(4)
+        if probe == b'\x00\x00\x00\x00' or not probe:
+            print(f" [HLS-SEQ] seg {n} cluster en {cluster_off} no descargado, 503")
+            raise HTTPException(503, "Zona no descargada aún")
+    # Sin Cues (descarga incompleta), dejamos que ffmpeg lo intente directamente
+    # Si la zona inicial no está descargada, ffmpeg fallará y se retornará 503/500 y hls.js reintentará
+
+    # Rango [target_time, target_time+Δ]: Δ = ventana generosa (60s) para que
+    # hls.js tenga margen, o hasta el próximo cue si es menor.
+    window = 60.0  # Δ en segundos (configurable más adelante)
+    end_time = min(target_time + window, duration)
+
+    # Resolver pista de audio (igual que HLS clásico: audio_idx del query param)
+    audio_idx = max(0, int(audio or 0))
+    _all_tracks = info.get("tracks", [])
+    _audio_tracks = [t for t in _all_tracks if t.get("type") == "audio"]
+    if _audio_tracks and audio_idx >= len(_audio_tracks):
+        audio_idx = 0
+    seg_suffix = f"_a{audio_idx}" if audio_idx else ""
+
+    # Remux directo del sparse con ffmpeg -ss (funciona si la zona está contigua)
+    seg_path = os.path.join(_HLS_SEQ_SEG_DIR, f"seq_{episode_key}_{n}{seg_suffix}.ts")
+    if os.path.isfile(seg_path) and os.path.getsize(seg_path) > 0:
+        with open(seg_path, 'rb') as f:
+            data = f.read()
+        return Response(content=data, media_type="video/mp2t",
+                       headers={"Cache-Control": "max-age=3600", "Access-Control-Allow-Origin": "*"})
+
+    # Usar semaphore dinámico (2..5) para mantener holgura >=3s
+    import time as _t2
+    async with _hls_seq_get_semaphore():
+        _t0 = _t2.time()
+        ffmpeg = stream_packager._find_ffmpeg()
+        if not ffmpeg:
+            raise HTTPException(500, "ffmpeg no encontrado")
+
+        _audio_map = ["-map", "0:v:0", "-map", f"0:a:{audio_idx}"] if _audio_tracks else []
+        _audio_opts = ["-c:a", "aac", "-ac", "2", "-b:a", "128k"] if _audio_tracks or True else []
+        cmd = [ffmpeg, "-y", "-ss", str(target_time), "-i", sparse,
+               "-t", str(_HLS_SEG_DURATION)] + _audio_map + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"] + _audio_opts + ["-muxdelay", "0", "-muxpreload", "0", "-output_ts_offset", str(target_time), "-f", "mpegts", seg_path]
+        printLog(f" [HLS-SEQ] seg={n} ffmpeg: {' '.join(cmd)}")
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await proc.communicate()
+        _t1 = _t2.time()
+        _hls_seq_track_generation_time(_t1 - _t0)
+        if proc.returncode != 0 or not os.path.isfile(seg_path) or os.path.getsize(seg_path) <= 0:
+            err = stderr.decode(errors="replace")[-500:] if stderr else ""
+            print(f" [HLS-SEQ] error ffmpeg seg {n}: {err}")
+            try:
+                os.remove(seg_path)
+            except:
+                pass
+            raise HTTPException(500, "Error generando segmento")
+
+        with open(seg_path, 'rb') as f:
+            data = f.read()
+        return Response(content=data, media_type="video/mp2t",
+                       headers={"Cache-Control": "max-age=3600", "Access-Control-Allow-Origin": "*"})
+
+
+@app.get(api_url("/api/hls_seq/{episode_key}/status"))
+async def hls_seq_status(episode_key: str):
+    """Estado de la descarga SEQ (progreso del servicio central) + pistas para el combo."""
+    from services.download_service import get_status
+    status = get_status(episode_key)
+    info2 = _HLS_SEG_CACHE.get(episode_key, {})
+    tr = info2.get("tracks", [])
+    audio_tracks = [t for t in tr if t.get("type") == "audio"] if tr else []
+    sub_tracks = [t for t in tr if t.get("type") == "subs"] if tr else []
+    # Asegurar tracks si aún no (master ya lo intenta; aquí por si el player lo pide antes)
+    if not tr:
+        try:
+            msg_h, _, fs_h, dc_h = await _hls_resolve_episode(episode_key)
+            if msg_h and fs_h > 0:
+                from services.userbot_service import get_active_client as _gac3
+                ub3 = await _gac3()
+                if ub3:
+                    await _hls_ensure_header_cache(ub3, msg_h, dc_h, fs_h, episode_key)
+            info2 = _HLS_SEG_CACHE.get(episode_key, {})
+            tr = info2.get("tracks", [])
+            audio_tracks = [t for t in tr if t.get("type") == "audio"] if tr else []
+            sub_tracks = [t for t in tr if t.get("type") == "subs"] if tr else []
+        except Exception:
+            pass
+    status["audio_tracks"] = audio_tracks
+    status["sub_tracks"] = sub_tracks
+    return status
+
+
 # === Helper: verificar si thumbnail está cacheado ===
-def _thumb_exists(telegram_msg_id):
-    """Retorna True si el thumbnail del episodio está cacheado en catalog_assets."""
+def _thumb_exists(telegram_msg_id, telegram_link=None):
+    """Retorna True si el thumbnail del episodio está cacheado en catalog_assets.
+    Con telegram_link filtra por canal canónico (evita falsos positivos entre canales)."""
     from services.catalog_service import get_conn
     try:
+        from services.cache_keys import canon_channel
+        _tch = ""
+        if telegram_link:
+            import re as _re
+            _tm = _re.search(r"/c/(\d+)/", telegram_link)
+            _tch = canon_channel(_tm.group(1)) if _tm else ""
+    except Exception:
+        _tch = ""
+    try:
         conn = get_conn()
-        row = conn.execute(
-            "SELECT 1 FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
-            (telegram_msg_id,)).fetchone()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
+                (_tch, telegram_msg_id,)).fetchone()
+        except Exception:
+            row = conn.execute(
+                "SELECT 1 FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
+                (telegram_msg_id,)).fetchone()
         if row:
             conn.close()
             return True
@@ -4267,9 +4843,14 @@ def _thumb_exists(telegram_msg_id):
             continue
         try:
             pconn = sqlite3.connect(db_path)
-            row = pconn.execute(
-                "SELECT 1 FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
-                (telegram_msg_id,)).fetchone()
+            try:
+                row = pconn.execute(
+                    "SELECT 1 FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
+                    (_tch, telegram_msg_id,)).fetchone()
+            except Exception:
+                row = pconn.execute(
+                    "SELECT 1 FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
+                    (telegram_msg_id,)).fetchone()
             pconn.close()
             if row:
                 return True
@@ -4297,7 +4878,7 @@ def _find_episodes_in_plugin_dbs(item_id):
                     "FROM item_episodes WHERE item_id=? OR item_id=? ORDER BY season_number, episode_number",
                     (item_id, plugin_int)).fetchall()]
                 for ep in eps:
-                    ep["has_thumb"] = 1 if (ep.get("telegram_msg_id") and _thumb_exists(ep["telegram_msg_id"])) else 0
+                    ep["has_thumb"] = 1 if (ep.get("telegram_msg_id") and _thumb_exists(ep["telegram_msg_id"], ep.get("telegram_link"))) else 0
                     ep["episode_key"] = _derive_episode_key(ep.get("telegram_link"))
                 if eps:
                     results = eps
@@ -4342,6 +4923,15 @@ async def get_item_details(item_id: str, request: Request = None):
         conn.close()
         raise HTTPException(404)
     result = dict(row)
+    # Overlay de cover enriquecido (plugin tvcat_enricher, server-level para todos los usuarios)
+    try:
+        from services.cover_override_registry import get_enriched_by_item_id
+        enriched = get_enriched_by_item_id(item_id)
+        if enriched and enriched.get("cover_text"):
+            result["description"] = enriched["cover_text"]
+            # opcional: si el cover trae api_cover como imagen externa, exponerla via metadata
+    except Exception:
+        pass
     # Verificar si está en favoritos del usuario actual
     is_fav = False
     if request:
@@ -4361,7 +4951,7 @@ async def get_item_details(item_id: str, request: Request = None):
         raw_eps = _find_episodes_in_plugin_dbs(item_id)
     for ep in raw_eps:
         ep["video_src"] = f"/api/stream/episode/{ep['id']}"
-        ep["has_thumb"] = 1 if (ep["telegram_msg_id"] and _thumb_exists(ep["telegram_msg_id"])) else 0
+        ep["has_thumb"] = 1 if (ep["telegram_msg_id"] and _thumb_exists(ep["telegram_msg_id"], ep.get("telegram_link"))) else 0
         ep["item_id"] = item_id
     result["episodes"] = raw_eps
     variants, rep_id = _get_variants_and_rep(conn, item_id)
@@ -4398,7 +4988,7 @@ async def get_item_episodes(item_id: str):
             eps = _find_episodes_in_plugin_dbs(vid)
         for ep in eps:
             ep["video_src"] = f"/api/stream/episode/{ep['id']}"
-            ep["has_thumb"] = 1 if (ep["telegram_msg_id"] and _thumb_exists(ep["telegram_msg_id"])) else 0
+            ep["has_thumb"] = 1 if (ep["telegram_msg_id"] and _thumb_exists(ep["telegram_msg_id"], ep.get("telegram_link"))) else 0
             ep["item_id"] = vid
             if not ep.get("episode_key"):
                 ep["episode_key"] = _derive_episode_key(ep.get("telegram_link"))
@@ -4412,62 +5002,48 @@ async def _extract_and_cache_thumb(telegram_msg_id: int, telegram_link: str, tg=
     """Extrae thumbnail de un mensaje Telegram y lo cachea en catalog_assets."""
     if telegram_msg_id in _thumb_pending_extractions:
         return
+    # Quiet global: si el servicio está en cooldown por flood, no sumar tráfico
+    try:
+        from services.telegram_service import get_telegram_service as _gts
+        if _gts().quiet_remaining() > 0:
+            return
+    except Exception:
+        pass
     _thumb_pending_extractions.add(telegram_msg_id)
     try:
         async with _thumb_extract_semaphore:
-            chat_entity = None
-            if "/c/" in telegram_link:
+            # 2026-09-04: descarga vía servicio central (fetch_thumb). Sin
+            # llamadas directas a Telegram desde el gateway.
+            from services.telegram_service import get_telegram_service as _gts2
+            from services.userbot_service import get_active_client as _gac2
+            _svc = _gts2()
+            _chat = None
+            if "/c/" in (telegram_link or ""):
                 m = re.search(r"/c/(\d+)/", telegram_link)
                 if m:
-                    chat_entity = int("-100" + m.group(1))
-            elif "t.me/" in telegram_link:
+                    _chat = "-100" + m.group(1)
+            elif "t.me/" in (telegram_link or ""):
                 m = re.search(r"t\.me/([^/]+)/", telegram_link)
                 if m:
-                    chat_entity = m.group(1)
-            if not chat_entity:
+                    _chat = m.group(1)
+            if not _chat:
                 return
-
-            if tg is None:
-                from services.userbot_service import get_active_client
-                tg = await get_active_client()
-                if not tg:
-                    return
-
+            _ub = await _gac2()
+            _sessd = getattr(_ub, "session_data", None) or {} if _ub else {}
+            _tid = _sessd.get("tg_user_id")
+            if not _tid:
+                print(f" [THUMB] {telegram_msg_id}: sin userbot activo")
+                return
             try:
-                async with _HLS_DOWNLOAD_LOCK:  # serializar con HLS (mismo cliente Telethon)
-                    msg = await tg.get_messages(chat_entity, ids=telegram_msg_id)
+                _est = _svc.estimate_wait(int(_tid))
             except Exception:
+                _est = 0.0
+            if _est > 3.0:
                 return
-            if isinstance(msg, list):
-                msg = msg[0] if msg else None
-            if not msg or not msg.media or not hasattr(msg.media, "document"):
+            _tr = await _svc.fetch_thumb(_chat, int(telegram_msg_id), tg_user_id=int(_tid))
+            if not (isinstance(_tr, dict) and _tr.get("ok") and _tr.get("data")):
                 return
-
-            doc = msg.media.document
-            if not doc.thumbs:
-                return
-
-            thumb_type = "x" if any(t.type == "x" for t in doc.thumbs) else "m"
-
-            from telethon.tl.types import InputDocumentFileLocation
-            loc = InputDocumentFileLocation(
-                id=doc.id,
-                access_hash=doc.access_hash,
-                file_reference=doc.file_reference,
-                thumb_size=thumb_type
-            )
-            import io
-            buffer = io.BytesIO()
-            try:
-                async with _HLS_DOWNLOAD_LOCK:  # serializar con HLS (mismo cliente Telethon)
-                    async for chunk in tg.iter_download(loc, offset=0, chunk_size=256 * 1024):
-                        if chunk:
-                            buffer.write(chunk)
-            except Exception:
-                return
-            blob = buffer.getvalue()
-            if not blob:
-                return
+            blob = bytes(_tr["data"])
 
             if blob[:2] == b'\xff\xd8':
                 mime = "image/jpeg"
@@ -4479,11 +5055,17 @@ async def _extract_and_cache_thumb(telegram_msg_id: int, telegram_link: str, tg=
                 mime = "image/jpeg"
 
             from services.catalog_service import get_conn
+            from services.cache_keys import canon_channel
+            try:
+                _tm = re.search(r"/c/(\d+)/", telegram_link or "")
+                _tch = canon_channel(_tm.group(1)) if _tm else ""
+            except Exception:
+                _tch = ""
             conn = get_conn()
             try:
                 conn.execute(
-                    "INSERT OR REPLACE INTO catalog_assets (telegram_msg_id, asset_type, asset_index, image_blob, mime_type) VALUES (?, 'episode_thumb', 0, ?, ?)",
-                    (telegram_msg_id, blob, mime))
+                    "INSERT OR REPLACE INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type) VALUES (?, ?, 'episode_thumb', 0, ?, ?)",
+                    (_tch, telegram_msg_id, blob, mime))
                 conn.commit()
             except Exception:
                 pass
@@ -4495,8 +5077,8 @@ async def _extract_and_cache_thumb(telegram_msg_id: int, telegram_link: str, tg=
                 try:
                     pconn = sqlite3.connect(db_path, timeout=5)
                     pconn.execute(
-                        "INSERT OR REPLACE INTO catalog_assets (telegram_msg_id, asset_type, asset_index, image_blob, mime_type) VALUES (?, 'episode_thumb', 0, ?, ?)",
-                        (telegram_msg_id, blob, mime))
+                        "INSERT OR REPLACE INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type) VALUES (?, ?, 'episode_thumb', 0, ?, ?)",
+                        (_tch, telegram_msg_id, blob, mime))
                     pconn.commit()
                     pconn.close()
                 except Exception:
@@ -4510,10 +5092,43 @@ async def _extract_and_cache_thumb(telegram_msg_id: int, telegram_link: str, tg=
 async def serve_episode_thumbnail(telegram_msg_id: int):
     """Thumbnail de episodio. Si no está cacheado, gatilla descarga async y devuelve 404."""
     from services.catalog_service import get_conn
+    from services.cache_keys import canon_channel
     conn = get_conn()
-    asset = conn.execute(
-        "SELECT image_blob, mime_type FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
-        (telegram_msg_id,)).fetchone()
+    # Resolver primero el link (para derivar el canal canónico de la clave)
+    telegram_link = None
+    try:
+        _crow = conn.execute("SELECT telegram_link FROM item_episodes WHERE telegram_msg_id=? LIMIT 1", (telegram_msg_id,)).fetchone()
+        if _crow and _crow["telegram_link"]:
+            telegram_link = _crow["telegram_link"]
+    except Exception:
+        pass
+    if not telegram_link:
+        for db_path, _ in get_enabled_plugin_dbs_with_names():
+            if not os.path.isfile(db_path):
+                continue
+            try:
+                pconn = sqlite3.connect(db_path)
+                pconn.row_factory = sqlite3.Row
+                row = pconn.execute("SELECT telegram_link FROM item_episodes WHERE telegram_msg_id=? LIMIT 1", (telegram_msg_id,)).fetchone()
+                pconn.close()
+                if row and row["telegram_link"]:
+                    telegram_link = row["telegram_link"]
+                    break
+            except Exception:
+                pass
+    _tch = ""
+    try:
+        _tm = re.search(r"/c/(\d+)/", telegram_link or "")
+        _tch = canon_channel(_tm.group(1)) if _tm else ""
+    except Exception:
+        _tch = ""
+    asset = None
+    try:
+        asset = conn.execute(
+            "SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
+            (_tch, telegram_msg_id,)).fetchone()
+    except Exception:
+        asset = None
     if asset and asset["image_blob"]:
         blob = asset["image_blob"]
         mime = asset["mime_type"] or "image/jpeg"
@@ -4526,8 +5141,8 @@ async def serve_episode_thumbnail(telegram_msg_id: int):
             pconn = sqlite3.connect(db_path)
             pconn.row_factory = sqlite3.Row
             passet = pconn.execute(
-                "SELECT image_blob, mime_type FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
-                (telegram_msg_id,)).fetchone()
+                "SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='episode_thumb' LIMIT 1",
+                (_tch, telegram_msg_id,)).fetchone()
             if passet and passet["image_blob"]:
                 blob = passet["image_blob"]
                 mime = passet["mime_type"] or "image/jpeg"
@@ -4537,34 +5152,117 @@ async def serve_episode_thumbnail(telegram_msg_id: int):
             pconn.close()
         except Exception:
             pass
-    # No cacheado: buscar telegram_link para gatillar descarga async
-    telegram_link = None
-    for db_path, _ in get_enabled_plugin_dbs_with_names():
-        if not os.path.isfile(db_path):
-            continue
-        try:
-            pconn = sqlite3.connect(db_path)
-            pconn.row_factory = sqlite3.Row
-            row = pconn.execute("SELECT telegram_link FROM item_episodes WHERE telegram_msg_id=?", (telegram_msg_id,)).fetchone()
-            pconn.close()
-            if row and row["telegram_link"]:
-                telegram_link = row["telegram_link"]
-                break
-        except Exception:
-            pass
+    # No cacheado: gatillar descarga async con el link ya resuelto
     if telegram_link:
-        asyncio.create_task(_extract_and_cache_thumb(telegram_msg_id, telegram_link))
+        _spawn(_extract_and_cache_thumb(telegram_msg_id, telegram_link))
     conn.close()
     raise HTTPException(status_code=404, detail="Thumbnail no disponible")
 
 
-# --- API: Cover ---
-@app.get(api_url("/api/cover/{item_id}"))
-async def get_cover(item_id: str):
+# --- API: Hero thumbs warm (carrusel fase 2, máx 14) ---
+_HERO_THUMB_MAX = 14
+
+def _hero_episode_thumbs(item_id: str, limit: int = _HERO_THUMB_MAX):
+    """Lista plana [(telegram_msg_id, telegram_link)] de los primeros `limit`
+    episodios con msg_id, en orden de temporada/episodio (todas las variantes)."""
     from services.catalog_service import get_conn
     conn = get_conn()
-    data = conn.execute("SELECT source, telegram_msg_id FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+    out = []
+    try:
+        row = conn.execute("SELECT group_title_flat FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+        if not row:
+            return out
+        gtf = row["group_title_flat"]
+        if gtf:
+            vars_rows = conn.execute("SELECT item_id FROM unified_catalog WHERE group_title_flat=? ORDER BY id ASC", (gtf,)).fetchall()
+        else:
+            vars_rows = [{"item_id": item_id}]
+        for vr in vars_rows:
+            vid = vr["item_id"]
+            cat_int = conn.execute("SELECT id FROM unified_catalog WHERE item_id=?", (vid,)).fetchone()
+            int_id_str = str(cat_int["id"]) if cat_int else vid
+            eps = conn.execute(
+                "SELECT telegram_msg_id, telegram_link FROM item_episodes WHERE (item_id=? OR item_id=?) AND telegram_msg_id IS NOT NULL AND telegram_msg_id != 0 ORDER BY season_number, episode_number",
+                (vid, int_id_str)).fetchall()
+            if not eps:
+                eps = _find_episodes_in_plugin_dbs(vid)
+            for ep in eps:
+                mid = ep["telegram_msg_id"] if isinstance(ep, dict) else ep["telegram_msg_id"]
+                link = ep["telegram_link"] if isinstance(ep, dict) else ep["telegram_link"]
+                try:
+                    mid = int(mid)
+                except Exception:
+                    continue
+                if mid and not any(m == mid for m, _ in out):
+                    out.append((mid, link))
+                if len(out) >= limit:
+                    return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return out
+
+
+async def _hero_warm_thumbs(item_id: str, pairs):
+    """Task background: cachea secuencialmente vía servicio centralizado."""
+    for mid, link in pairs:
+        try:
+            if _thumb_exists(mid, link):
+                continue
+            await _extract_and_cache_thumb(mid, link or "")
+        except Exception as e:
+            print(f" [HERO WARM] thumb {mid}: {e}")
+
+
+@app.post(api_url("/api/hero/thumbs/warm"))
+async def hero_thumbs_warm(request: Request):
+    body = await request.json()
+    item_id = (body.get("item_id") or "").strip()
+    if not item_id:
+        raise HTTPException(400, "item_id requerido")
+    pairs = _hero_episode_thumbs(item_id)
+    missing = [(m, l) for m, l in pairs if not _thumb_exists(m, l)]
+    print(f" [HERO WARM] {item_id}: total={len(pairs)} queued={len(missing)}")
+    if missing:
+        _spawn(_hero_warm_thumbs(item_id, missing))
+    return {"ok": True, "total": len(pairs), "queued": len(missing)}
+
+
+@app.get(api_url("/api/hero/thumbs/status"))
+async def hero_thumbs_status(item_id: str):
+    pairs = _hero_episode_thumbs(item_id)
+    return {"items": [{"telegram_msg_id": m, "ready": bool(_thumb_exists(m, l))} for m, l in pairs]}
+
+
+# --- API: Cover ---
+@app.get(api_url("/api/cover/{item_id}"))
+async def get_cover(item_id: str, request: Request = None):
+    # 2026-09-04: ?cached=1 -> solo caché (enriquecido, assets, redirect api_cover,
+    # genérico topo). Nunca JIT ni Telegram: 200/404 en ms, cero efectos laterales.
+    # El frontal lo usa en fase 1 para pintar al instante lo disponible.
+    from services.catalog_service import get_conn
+    from services.cache_keys import canon_channel
+    _only_cached = False
+    try:
+        _only_cached = (request.query_params.get("cached", "") == "1") if request is not None else False
+    except Exception:
+        _only_cached = False
+    conn = get_conn()
+    data = conn.execute("SELECT source, telegram_msg_id, telegram_link FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
     conn.close()
+    # Canal canónico para la clave del asset (una sola key en todo el proyecto)
+    asset_channel = ""
+    try:
+        _tl = data["telegram_link"] if data else ""
+        if _tl:
+            import re as _re
+            _m = _re.search(r"/c/(\d+)/", _tl)
+            if _m:
+                asset_channel = canon_channel(_m.group(1))
+    except Exception:
+        asset_channel = ""
     if not data:
         raise HTTPException(404)
     source = data["source"]
@@ -4572,6 +5270,16 @@ async def get_cover(item_id: str):
         color = abs(hash(item_id)) % 0xFFFFFF
         svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450"><rect fill="#{color:06x}" width="300" height="450"/><text fill="white" font-family="Outfit,sans-serif" font-size="24" text-anchor="middle" x="150" y="225">{item_id[-4:] if len(item_id)>4 else item_id}</text></svg>'
         return Response(content=svg, media_type="image/svg+xml")
+
+    # Cover enriquecido (plugin tvcat_enricher) — server-level, antes de la cache central (Project_Architecture.md §21.6)
+    try:
+        from services.cover_override_registry import get_enriched_by_item_id
+        enriched = get_enriched_by_item_id(item_id)
+        if enriched and enriched.get("poster_blob"):
+            mime = enriched.get("poster_mime") or "image/jpeg"
+            return Response(content=enriched["poster_blob"], media_type=mime)
+    except Exception:
+        pass
 
     # Buscar portada en la CACHÉ CENTRAL (contiene todos los assets copiados de plugins)
     msg_id = data["telegram_msg_id"]
@@ -4582,76 +5290,180 @@ async def get_cover(item_id: str):
         asset = None
         # -999/-1000 son marcadores de cover genérico (topo 0) -> no buscar asset -999 (colisiona con PEER), ir directo a fallback
         if msg_id and int(msg_id) not in (-999, -1000):
-            asset = cache_conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='cover' LIMIT 1", (msg_id,)).fetchone()
+            asset = cache_conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='cover' LIMIT 1", (asset_channel, msg_id,)).fetchone()
         if not asset and msg_id and int(msg_id) not in (-999, -1000):
-            asset = cache_conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE telegram_msg_id=? LIMIT 1", (msg_id,)).fetchone()
+            asset = cache_conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? LIMIT 1", (asset_channel, msg_id,)).fetchone()
         if asset and asset["image_blob"]:
             blob = asset["image_blob"]
             mime = asset["mime_type"] or "image/jpeg"
-            cache_conn.close()
-            return Response(content=blob, media_type=mime)
+            # Auto-limpieza 2026-09-04: mini-assets fosilizados (stripped ~30px
+            # guardados como cover) no se sirven: se borran y se deja al JIT
+            # re-descargar la foto real. Solo se inspeccionan blobs <30KB
+            # (un cover real de 300px siempre pesa más).
+            try:
+                if len(blob) < 30720:
+                    from PIL import Image
+                    import io as _io
+                    with Image.open(_io.BytesIO(bytes(blob))) as _im:
+                        _w, _h = _im.size
+                    if min(_w, _h) < 150:
+                        print(f" [COVER] mini-asset descartado ch={asset_channel} msg={msg_id} ({_w}x{_h})")
+                        try:
+                            cache_conn.execute("DELETE FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='cover'", (asset_channel, msg_id,))
+                            cache_conn.commit()
+                        except Exception:
+                            pass
+                        asset = None
+                        blob = None
+            except Exception as _e:
+                print(f" [COVER] mini-check error ch={asset_channel} msg={msg_id}: {_e}")
+            if blob:
+                cache_conn.close()
+                return Response(content=blob, media_type=mime)
     except Exception as e:
         print(f" [COVER] Cache error: {e}")
     cache_conn.close()
 
     # JIT Download: probar todas las sesiones disponibles (con rate limiting global)
-    if source != "demo" and msg_id and int(msg_id) not in (-999, -1000):
+    _jit_cooldown_skip = False
+    try:
+        if asyncio.get_event_loop().time() < _jit_fail_cooldown.get((asset_channel, int(msg_id or 0)), 0):
+            _jit_cooldown_skip = True
+    except Exception:
+        pass
+    _jit_failed_transient = False
+    if source != "demo" and msg_id and int(msg_id) not in (-999, -1000) and not _jit_cooldown_skip and not _only_cached:
         try:
-            global _jit_last_call
-            async with _jit_semaphore:
-                # Rate limiting: esperar si es muy pronto desde la última llamada
-                now = asyncio.get_event_loop().time()
-                elapsed = now - _jit_last_call
-                if elapsed < _get_jit_interval():
-                    await asyncio.sleep(_get_jit_interval() - elapsed)
-                _jit_last_call = asyncio.get_event_loop().time()
-
-                c4 = get_conn()
-                c4.row_factory = sqlite3.Row
-                link_row = c4.execute("SELECT telegram_link FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
-                c4.close()
-                tel_link = link_row["telegram_link"] if link_row else ""
-                if tel_link and msg_id:
-                    import re
-                    chat_entity = None
-                    if "/c/" in tel_link:
-                        m = re.search(r"/c/(\d+)/", tel_link)
-                        if m:
-                            chat_entity = int("-100" + m.group(1))
-                    else:
-                        m = re.search(r"t\.me/([^/]+)/", tel_link)
-                        if m:
-                            chat_entity = m.group(1)
-                    if chat_entity:
-                        from services.userbot_service import get_active_client
-                        ubot = await get_active_client()
-                        if ubot:
+            c4 = get_conn()
+            c4.row_factory = sqlite3.Row
+            link_row = c4.execute("SELECT telegram_link FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+            c4.close()
+            tel_link = link_row["telegram_link"] if link_row else ""
+            if tel_link and msg_id:
+                import re
+                chat_entity = None
+                if "/c/" in tel_link:
+                    m = re.search(r"/c/(\d+)/", tel_link)
+                    if m:
+                        chat_entity = int("-100" + m.group(1))
+                else:
+                    m = re.search(r"t\.me/([^/]+)/", tel_link)
+                    if m:
+                        chat_entity = m.group(1)
+                if chat_entity:
+                    _is_numeric = "/c/" in tel_link
+                    photo_bytes = None
+                    # UNA sola operación cover = 1 token (fetch+download internos en el servicio).
+                    # Sin semáforo global aquí: el servicio ya pagina por bucket; las respuestas
+                    # HTTP progresan en paralelo y el navegador carga en oleadas.
+                    _tid = None
+                    _svc_attempted = False
+                    if _is_numeric:
+                        try:
+                            from services.userbot_service import get_active_client as _gac
+                            _ub = await _gac()
+                            _sessd = getattr(_ub, "session_data", None) or {}
+                            _tid = _sessd.get("tg_user_id")
+                        except Exception:
+                            _tid = None
+                    if _tid:
+                        # 2026-09-04: todo por el servicio (numérico o username
+                        # vía _to_entity_id). Sin tid -> fallthrough honesto.
+                        from services.telegram_service import get_telegram_service
+                        _svc = get_telegram_service()
+                        _svc_attempted = True
+                        # Fail-fast 2026-09-04: si la espera estimada supera 3s, NO
+                        # ocupar la conexión HTTP (el navegador solo tiene ~6 y la UI
+                        # se congela). 404 rápido + retry en fondo; el cliente muestra
+                        # el genérico y el próximo render trae el cover real.
+                        try:
+                            _est = _svc.estimate_wait(int(_tid))
+                        except Exception:
+                            _est = 0.0
+                        if _est > 3.0:
+                            # 2026-09-04b: diferido SIN cooldown (el retry en fondo ya
+                            # esta programado; el gate estimate frena reintentos y un
+                            # cooldown de 600s dejaria logos colgados 10 min).
+                            _bg_cover_retry(asset_channel, int(msg_id), str(chat_entity), _tid, source)
+                            _jit_failed_transient = True
+                            _res = {"ok": False, "error": "busy-deferred"}
+                        else:
                             try:
-                                async with _HLS_DOWNLOAD_LOCK:  # serializar con HLS (mismo cliente Telethon)
-                                    entity = await ubot.get_entity(chat_entity)
-                                    cover_msg = await ubot.get_messages(entity, ids=int(msg_id))
-                                if cover_msg and getattr(cover_msg, 'photo', None):
-                                    async with _HLS_DOWNLOAD_LOCK:
-                                        photo_bytes = await ubot.download_media(cover_msg)
-                                    if photo_bytes:
-                                        from PIL import Image
-                                        import io
-                                        buf = io.BytesIO()
-                                        with Image.open(io.BytesIO(photo_bytes)) as img:
-                                            img.thumbnail((300, 300), Image.Resampling.LANCZOS)
-                                            img.save(buf, "WEBP", quality=85)
-                                            webp_bytes = buf.getvalue()
-                                        cc = get_conn()
-                                        cc.execute("INSERT OR REPLACE INTO catalog_assets (telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, source) VALUES (?, 'cover', 0, ?, 'image/webp', ?, ?)", (msg_id, webp_bytes, len(webp_bytes), source))
-                                        cc.commit()
-                                        cc.close()
-                                        print(f" [JIT COVER] Portada descargada para msg_id {msg_id}")
-                                        return Response(content=webp_bytes, media_type="image/webp")
+                                _res = await asyncio.wait_for(
+                                    _svc.fetch_cover(str(chat_entity), int(msg_id), tg_user_id=int(_tid)),
+                                    timeout=25)
+                            except asyncio.TimeoutError:
+                                _res = {"ok": False, "error": "timeout"}
                             except Exception as e:
-                                print(f" [JIT COVER] Error sesion {sess.get('name','?')}: {e}")
-                                await asyncio.sleep(0.3)
+                                _res = {"ok": False, "error": str(e)[:200]}
+                        if isinstance(_res, dict) and _res.get("ok"):
+                            photo_bytes = _res.get("data")
+                            # ok sin data = ausencia honesta (sin foto): fallthrough, SIN retry
+                        else:
+                            _err = (_res.get("error", "") if isinstance(_res, dict) else "unknown")
+                            if _err == "message-missing":
+                                pass  # ausencia: fallthrough sin retry (nunca lo habrá)
+                            else:
+                                # Transitorio: retry persistente en background + 404 rápido (NUNCA genérico)
+                                _bg_cover_retry(asset_channel, int(msg_id), str(chat_entity), _tid, source)
+                                _mark_jit_fail(asset_channel, int(msg_id))
+                                _jit_failed_transient = True
+                    else:
+                        # 2026-09-04: SIN rama legacy (desarrollo nuevo, sin compat).
+                        # Username links los resuelve el servicio (_to_entity_id);
+                        # sin tid no hay cuenta que elegir -> fallthrough honesto.
+                        pass
+                    if photo_bytes and not isinstance(photo_bytes, (bytes, bytearray, memoryview)):
+                        # Telethon devuelve path str cuando el size es stripped/cached: leer y limpiar
+                        _pb_path = str(photo_bytes)
+                        try:
+                            import os as _os
+                            if _os.path.isfile(_pb_path):
+                                with open(_pb_path, 'rb') as _f:
+                                    photo_bytes = _f.read()
+                                try:
+                                    _os.remove(_pb_path)
+                                except Exception:
+                                    pass
+                                print(f" [JIT COVER] salvado desde path local item={item_id} ch={asset_channel} msg={msg_id}")
+                            else:
+                                raise ValueError("path inexistente")
+                        except Exception as _e:
+                            print(f" [JIT COVER] photo_bytes tipo inesperado item={item_id} ch={asset_channel} msg={msg_id}: {type(photo_bytes)} preview={_pb_path[:120]!r} ({_e})")
+                            _mark_jit_fail(asset_channel, int(msg_id))
+                            photo_bytes = None
+                            _jit_failed_transient = True
+                    if photo_bytes:
+                        # 2026-09-04: el thumbnail PIL (LANCZOS sobre foto grande)
+                        # es CPU puro y congelaba el loop de asyncio -> todas las
+                        # peticiones (incluido /api/movie del hero) esperaban.
+                        def _mk_thumb(_raw):
+                            from PIL import Image as _PIL
+                            import io as _io
+                            _buf = _io.BytesIO()
+                            with _PIL.open(_io.BytesIO(bytes(_raw))) as _img:
+                                _img.thumbnail((300, 300), _PIL.Resampling.LANCZOS)
+                                _img.save(_buf, "WEBP", quality=85)
+                                return _buf.getvalue()
+                        webp_bytes = await asyncio.to_thread(_mk_thumb, photo_bytes)
+                        cc = get_conn()
+                        cc.execute("INSERT OR REPLACE INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, source) VALUES (?, ?, 'cover', 0, ?, 'image/webp', ?, ?)", (asset_channel, msg_id, webp_bytes, len(webp_bytes), source))
+                        cc.commit()
+                        cc.close()
+                        print(f" [JIT COVER] Portada descargada para {asset_channel}:{msg_id}")
+                        return Response(content=webp_bytes, media_type="image/webp")
         except Exception as e:
-            print(f" [JIT COVER] Error general: {e}")
+            import traceback as _tb
+            print(f" [JIT COVER] Error general item={item_id} ch={asset_channel} msg={msg_id}: {e}\n{_tb.format_exc()}")
+            _jit_failed_transient = True
+            try:
+                _mark_jit_fail(asset_channel, int(msg_id))
+            except Exception:
+                pass
+    if _jit_failed_transient:
+        # Fallo transitorio: 404 rápido (el retry en background lo dejará en caché).
+        # NUNCA genérico aquí: el genérico es solo para casos particulares (topo 4).
+        raise HTTPException(status_code=404, detail="Cover en descarga en segundo plano")
 
     # Redirección a api_cover (portada externa)
     try:
@@ -4667,14 +5479,57 @@ async def get_cover(item_id: str):
     except Exception as e:
         print(f" [COVER] API error: {e}")
 
-    # Fallback: portada genérica por categoría
+    # Fallback: portada genérica por categoría SOLO para casos particulares (topo 4: -999/-1000).
+    # En el resto de casos NO se enmascara con genérico: 404 (el cover debe descargarse).
+    try:
+        _is_generic_case = msg_id is not None and int(msg_id) in (-999, -1000)
+    except Exception:
+        _is_generic_case = False
+    if not _is_generic_case:
+        raise HTTPException(status_code=404, detail="Sin cover")
     try:
         c2 = get_conn()
-        cat_row = c2.execute("SELECT category FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+        cat_row = c2.execute("SELECT category, subcategory FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
         c2.close()
-        cat = (cat_row["category"] if cat_row else "").lower()
-        fb_id = -1 if cat in ("juegos","games","game") else (-2 if cat in ("comic","kiosko","book","manga") else -3)
-        fb = get_conn().execute("SELECT image_blob, mime_type FROM catalog_assets WHERE telegram_msg_id=? AND asset_type='cover' LIMIT 1", (fb_id,)).fetchone()
+        cat = (cat_row["category"] if cat_row else "" or "").strip().lower()
+        sub = ""
+        try:
+            sub = (cat_row["subcategory"] if cat_row and "subcategory" in cat_row.keys() else "") or ""
+            sub = sub.strip().lower()
+        except Exception:
+            sub = ""
+        # 1) Customización del usuario (tvcat_settings:cover_defaults) antes que legacy -1/-2/-3
+        try:
+            cc = get_conn()
+            cd_row = cc.execute("SELECT value FROM tvcat_settings WHERE key='cover_defaults'").fetchone()
+            cc.close()
+            if cd_row and cd_row["value"]:
+                import json as _js
+                _defs = _js.loads(cd_row["value"])
+                _items = _defs.get("items", []) if isinstance(_defs, dict) else (_defs if isinstance(_defs, list) else [])
+                def _norm_list(v):
+                    parts = []
+                    for p in str(v or "").replace(",", ";").split(";"):
+                        q = p.strip().lower()
+                        if q:
+                            parts.append(q)
+                    return parts
+                for _d in _items:
+                    _cats = _norm_list(_d.get("categories", ""))
+                    _subs = _norm_list(_d.get("subcategories", ""))
+                    _cat_ok = (not _cats) or (cat in _cats) or ("*" in _cats)
+                    _sub_ok = (not _subs) or (sub in _subs) or ("*" in _subs)
+                    if _cat_ok and _sub_ok:
+                        _aid = int(_d.get("asset_id", -3))
+                        _fb = get_conn().execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id='' AND telegram_msg_id=? AND asset_type='cover' LIMIT 1", (_aid,)).fetchone()
+                        if _fb and _fb[0]:
+                            return Response(content=_fb[0], media_type=_fb[1] or "image/jpeg")
+        except Exception as _e:
+            print(f" [COVER] Custom defaults error: {_e}")
+        _games = ("juego", "juegos", "game", "games", "consola", "consolas", "ps3", "3ds")
+        _books = ("comic", "comics", "kiosko", "book", "books", "ebook", "ebooks", "manga", "mangas")
+        fb_id = -1 if (cat in _games or sub in _games) else (-2 if (cat in _books or sub in _books) else -3)
+        fb = get_conn().execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id='' AND telegram_msg_id=? AND asset_type='cover' LIMIT 1", (fb_id,)).fetchone()
         if fb and fb[0]:
             return Response(content=fb[0], media_type=fb[1] or "image/jpeg")
     except Exception as e:
@@ -4682,6 +5537,379 @@ async def get_cover(item_id: str):
 
     raise HTTPException(404)
 
+@app.post(api_url("/api/cover/{item_id}/refresh"))
+async def refresh_cover(item_id: str, request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s or s.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    from services.catalog_service import get_conn
+    import json, re, sqlite3
+    conn = get_conn()
+    row = conn.execute("SELECT telegram_msg_id, telegram_link, title FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+    conn.close()
+    if not row or not row["telegram_msg_id"]:
+        raise HTTPException(404, "Item sin telegram_msg_id")
+    msg_id = int(row["telegram_msg_id"])
+    tel_link = row["telegram_link"] or ""
+    # Extraer chat_id del link
+    chat_entity = None
+    m = re.search(r"/c/(\d+)/", tel_link)
+    if m:
+        chat_entity = int("-100" + m.group(1))
+    else:
+        m2 = re.search(r"t\.me/([^/]+)/", tel_link)
+        if m2:
+            chat_entity = m2.group(1)
+    if not chat_entity:
+        raise HTTPException(400, "No se pudo determinar chat_id")
+    # 2026-09-04: refresh 100% vía servicio central (forzado: raw + foto).
+    # El servicio actualiza telegram_message_cache; aquí solo se reconstruye el asset.
+    try:
+        from services.telegram_service import get_telegram_service
+        from services.userbot_service import get_active_client as _gac
+        svc = get_telegram_service()
+        _ub = await _gac()
+        _sessd = getattr(_ub, "session_data", None) or {} if _ub else {}
+        _tid = _sessd.get("tg_user_id")
+        if not _tid:
+            raise HTTPException(503, "No hay userbot activo")
+        _chat = str(chat_entity)
+        # 1) raw fresco (también confirma que el mensaje existe) + texto para título
+        _one = await svc.fetch_one(_chat, int(msg_id), tg_user_id=int(_tid), force=True)
+        _rawm = (_one.get("message") if isinstance(_one, dict) else None) or {}
+        _text = _rawm.get("message", "") if isinstance(_rawm, dict) else ""
+        if _one is None:
+            raise HTTPException(404, "Mensaje no encontrado en Telegram")
+        # 2) foto fresca + asset (600px, como antes)
+        _res = await svc.fetch_cover(_chat, int(msg_id), tg_user_id=int(_tid), force=True)
+        if not (isinstance(_res, dict) and _res.get("ok") and _res.get("data")):
+            raise HTTPException(404, "No es foto")
+        photo_bytes = _res["data"]
+        from PIL import Image
+        import io
+        buf = io.BytesIO()
+        with Image.open(io.BytesIO(bytes(photo_bytes))) as img:
+            img.thumbnail((600, 600), Image.Resampling.LANCZOS)
+            img.save(buf, "WEBP", quality=85)
+            webp = buf.getvalue()
+        cc = get_conn()
+        try:
+            from services.cache_keys import canon_channel as _cc2
+            _rch = _cc2(m.group(1)) if m else ""
+        except Exception:
+            _rch = ""
+        cc.execute("INSERT OR REPLACE INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, source) VALUES (?, ?, 'cover', 0, ?, 'image/webp', ?, 'refresh')", (_rch, msg_id, webp, len(webp)))
+        cc.commit()
+        cc.close()
+        # Si el título era ":" o pending, intentar re-parsear
+        if row["title"] and row["title"].strip() in (":", "Título pending", "Título", ""):
+            try:
+                new_title = None
+                for line in (_text or "").split("\n"):
+                    line = line.strip()
+                    if line.startswith("#"):
+                        new_title = line.lstrip("#").strip().replace("_", " ")
+                        break
+                if new_title:
+                    cc2 = get_conn()
+                    cc2.execute("UPDATE unified_catalog SET title=?, group_title=?, group_title_flat=? WHERE item_id=?", (new_title, new_title, re.sub(r"[^a-zA-Z0-9]", "", new_title).lower(), item_id))
+                    cc2.commit()
+                    cc2.close()
+            except Exception as e:
+                print(f" [COVER REFRESH] title update error: {e}")
+        return {"success": True, "refreshed": True, "msg_id": msg_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f" [COVER REFRESH] general error: {e}")
+        raise HTTPException(500, str(e))
+
+
+def _default_cover_defaults():
+    return {"items": [
+        {"id": "media", "name": "Media / Películas / Series", "asset_id": -3, "categories": "media;video", "subcategories": "movie;movies;peli;pelis;película;películas;tvshow;tv show;serie;series;anime"},
+        {"id": "games", "name": "Juegos", "asset_id": -1, "categories": "juego;juegos;game;games", "subcategories": "3ds;ps3;ps4;ps5;switch;pc;game;juego"},
+        {"id": "books", "name": "eBooks / Cómics", "asset_id": -2, "categories": "comic;comics;kiosko;book;books;ebook;ebooks;manga", "subcategories": "manga;comic;book;ebook"},
+    ]}
+
+
+def _get_cover_session(request: Request):
+    from services.auth_service import get_session
+    token = request.cookies.get("tvcat_session", "")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    return get_session(token) if token else None
+
+
+@app.get(api_url("/api/cover-default/{asset_id}"))
+async def get_cover_default(asset_id: int):
+    from services.catalog_service import get_conn
+    if asset_id not in (-3, -2, -1):
+        raise HTTPException(404)
+    conn = get_conn()
+    row = conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id='' AND telegram_msg_id=? AND asset_type='cover' LIMIT 1", (asset_id,)).fetchone()
+    conn.close()
+    if not row or not row["image_blob"]:
+        raise HTTPException(404)
+    return Response(content=row["image_blob"], media_type=row["mime_type"] or "image/jpeg")
+
+
+@app.get(api_url("/api/config/cover-defaults"))
+async def get_cover_defaults(request: Request):
+    s = _get_cover_session(request)
+    if not s or s.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    row = conn.execute("SELECT value FROM tvcat_settings WHERE key='cover_defaults'").fetchone()
+    conn.close()
+    if row and row["value"]:
+        try:
+            return json.loads(row["value"])
+        except Exception:
+            pass
+    return _default_cover_defaults()
+
+
+@app.put(api_url("/api/config/cover-defaults"))
+async def save_cover_defaults(request: Request):
+    s = _get_cover_session(request)
+    if not s or s.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    body = await request.json()
+    items = body.get("items", []) if isinstance(body, dict) else []
+    clean = []
+    for it in items[:20]:
+        try:
+            aid = int(it.get("asset_id", -3))
+        except Exception:
+            aid = -3
+        if aid not in (-3, -2, -1):
+            aid = -3
+        clean.append({
+            "id": str(it.get("id", ""))[:32] or ("a%d" % aid),
+            "name": str(it.get("name", ""))[:64],
+            "asset_id": aid,
+            "categories": str(it.get("categories", ""))[:500],
+            "subcategories": str(it.get("subcategories", ""))[:500],
+        })
+    if not clean:
+        raise HTTPException(400, "Sin items")
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES ('cover_defaults', ?)", (json.dumps({"items": clean}, ensure_ascii=False),))
+    conn.commit()
+    conn.close()
+    return {"success": True, "items": clean}
+
+
+def _sanitize_plugin_list(raw: str):
+    import re
+    parts = re.split(r"[;\n,]+", raw or "")
+    out = []
+    for p in parts:
+        raw_p = p.strip()
+        if raw_p == "*":
+            if "*" not in out:
+                out.append("*")
+            continue
+        s = re.sub(r"\s+", " ", raw_p.lower().replace("_", " ").replace("-", " ")).strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+def _sanitize_for_compare(s: str) -> str:
+    import re
+    v = str(s or "").strip()
+    if v == "*":
+        return "*"
+    return re.sub(r"[^a-z0-9]", "", v.lower().strip())
+
+@app.get(api_url("/api/plugins/cats"))
+async def get_all_plugin_cats(request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s: raise HTTPException(401)
+    from services.catalog_service import get_conn
+    import json
+    conn = get_conn()
+    loader = _plugin_loader
+    result = {}
+    # Defaults específicos por plugin (para no tener que configurar manualmente)
+    _video_defaults = (["media", "multimedia"], ["series", "video", "tvshow", "tv show", "movie", "movies", "peli", "pelis", "película", "películas", "anime", "dibujos animados", "monos animados"])
+    _player_defaults = {
+        "tvcat_player": _video_defaults,
+        "tvcat_player_pro": _video_defaults,
+        "tvcat_player_pro2": _video_defaults,
+        "tvcat_player_tv": _video_defaults,
+        "tvcat_player_hls": _video_defaults,
+        "tvcat_player_hls_seq": _video_defaults,
+        "tvcat_player_hls_smarttv": _video_defaults,
+        "tvcat_player_hls_test": _video_defaults,
+        "tvcat_player_hls_tv": _video_defaults,
+    }
+    for name, data in loader.registry.items():
+        if data.get("type") not in ("player", "heropage-action"):
+            continue
+        if name not in ("tvcat_enricher", "tvcat_installer_ps3", "tvcat_installer_3ds") and data.get("type") != "player":
+            continue
+        # aplicar defaults específicos si existen y no hay custom
+        _def_cats, _def_subs = _player_defaults.get(name, (None, None))
+        c = conn.execute("SELECT value FROM tvcat_settings WHERE key=?", (f"plugin_cats_{name}",)).fetchone()
+        sc = conn.execute("SELECT value FROM tvcat_settings WHERE key=?", (f"plugin_subs_{name}",)).fetchone()
+        cats = json.loads(c[0]) if c and c[0] else None
+        subs = json.loads(sc[0]) if sc and sc[0] else None
+        # Fallback a applies_to o a JSON específico del plugin (PS3/3DS)
+        if cats is None:
+            # intentar leer del JSON del plugin si es PS3/3DS
+            try:
+                import os, json as _js
+                plug_dir = data.get("_dir") or f"tvcat/plugins/{name}"
+                # resolver dir real
+                base = pathlib.Path(__file__).parent
+                cand = base / "plugins" / name / "data" / ("installer_ps3.json" if name=="tvcat_installer_ps3" else "installer_3ds.json" if name=="tvcat_installer_3ds" else "config.json")
+                if cand.exists():
+                    j = _js.loads(cand.read_text(encoding="utf-8"))
+                    if isinstance(j.get("categories"), list):
+                        cats = j["categories"]
+                    elif isinstance(j.get("categories"), str):
+                        cats = j["categories"]
+            except Exception:
+                pass
+            if cats is None:
+                if name in _player_defaults:
+                    cats = _player_defaults[name][0]
+                else:
+                    cats = data.get("applies_to") or []
+        if subs is None:
+            try:
+                import os, json as _js
+                plug_dir = data.get("_dir") or f"tvcat/plugins/{name}"
+                base = pathlib.Path(__file__).parent
+                cand = base / "plugins" / name / "data" / ("installer_ps3.json" if name=="tvcat_installer_ps3" else "installer_3ds.json" if name=="tvcat_installer_3ds" else "config.json")
+                if cand.exists():
+                    j = _js.loads(cand.read_text(encoding="utf-8"))
+                    if isinstance(j.get("subcategories"), list):
+                        subs = j["subcategories"]
+                    elif isinstance(j.get("subcategories"), str):
+                        subs = j["subcategories"]
+            except Exception:
+                pass
+            if subs is None:
+                if name in _player_defaults:
+                    subs = _player_defaults[name][1]
+                elif name == "tvcat_enricher":
+                    subs = ["*"]
+                else:
+                    subs = []
+        # Enricher por defecto * para que aparezca en cualquier título
+        if name == "tvcat_enricher" and not cats:
+            cats = ["*"]
+        if name == "tvcat_enricher" and not subs:
+            subs = ["*"]
+        # normalizar si son listas
+        if isinstance(cats, str):
+            cats = [cats]
+        if isinstance(subs, str):
+            subs = [subs]
+        result[name] = {"categories": cats, "subcategories": subs, "applies_to": data.get("applies_to") or []}
+    conn.close()
+    return result
+
+@app.get(api_url("/api/plugin/{name}/cats"))
+async def get_plugin_cats(name: str, request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s: raise HTTPException(401)
+    from services.catalog_service import get_conn
+    import json
+    conn = get_conn()
+    c = conn.execute("SELECT value FROM tvcat_settings WHERE key=?", (f"plugin_cats_{name}",)).fetchone()
+    sc = conn.execute("SELECT value FROM tvcat_settings WHERE key=?", (f"plugin_subs_{name}",)).fetchone()
+    conn.close()
+    loader = _plugin_loader
+    data = loader.registry.get(name, {})
+    default_cats = data.get("applies_to") or []
+    cats = json.loads(c[0]) if c and c[0] else None
+    subs = json.loads(sc[0]) if sc and sc[0] else None
+    # fallback a JSON del plugin
+    if cats is None:
+        try:
+            import pathlib as _pl, json as _js2
+            base2 = _pl.Path(__file__).parent
+            cand2 = base2 / "plugins" / name / "data" / ("installer_ps3.json" if name=="tvcat_installer_ps3" else "installer_3ds.json" if name=="tvcat_installer_3ds" else "config.json")
+            if cand2.exists():
+                j2 = _js2.loads(cand2.read_text(encoding="utf-8"))
+                if isinstance(j2.get("categories"), list):
+                    cats = j2["categories"]
+                elif isinstance(j2.get("categories"), str):
+                    cats = _sanitize_plugin_list(j2["categories"])
+        except Exception:
+            pass
+        if cats is None:
+            _vd = {"tvcat_player", "tvcat_player_pro", "tvcat_player_pro2", "tvcat_player_tv", "tvcat_player_hls", "tvcat_player_hls_seq", "tvcat_player_hls_smarttv", "tvcat_player_hls_test", "tvcat_player_hls_tv"}
+            if name in _vd:
+                cats = ["media", "multimedia"]
+            else:
+                cats = default_cats
+    if subs is None:
+        try:
+            import pathlib as _pl2, json as _js3
+            base3 = _pl2.Path(__file__).parent
+            cand3 = base3 / "plugins" / name / "data" / ("installer_ps3.json" if name=="tvcat_installer_ps3" else "installer_3ds.json" if name=="tvcat_installer_3ds" else "config.json")
+            if cand3.exists():
+                j3 = _js3.loads(cand3.read_text(encoding="utf-8"))
+                if isinstance(j3.get("subcategories"), list):
+                    subs = j3["subcategories"]
+                elif isinstance(j3.get("subcategories"), str):
+                    subs = _sanitize_plugin_list(j3["subcategories"])
+        except Exception:
+            pass
+        if subs is None:
+            _vd2 = {"tvcat_player", "tvcat_player_pro", "tvcat_player_pro2", "tvcat_player_tv", "tvcat_player_hls", "tvcat_player_hls_seq", "tvcat_player_hls_smarttv", "tvcat_player_hls_test", "tvcat_player_hls_tv"}
+            if name in _vd2:
+                subs = ["series", "video", "tvshow", "tv show", "movie", "movies", "peli", "pelis", "película", "películas", "anime", "dibujos animados", "monos animados"]
+            else:
+                subs = []
+        if name == "tvcat_enricher" and not cats:
+            cats = ["*"]
+        if name == "tvcat_enricher" and not subs:
+            subs = ["*"]
+    if isinstance(cats, str):
+        cats = [cats]
+    if isinstance(subs, str):
+        subs = [subs]
+    return {"categories": cats, "subcategories": subs, "raw_categories": "; ".join(cats), "raw_subcategories": "; ".join(subs), "has_custom": bool(c or sc)}
+
+@app.post(api_url("/api/plugin/{name}/cats"))
+async def set_plugin_cats(name: str, request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    body = await request.json()
+    cats_raw = body.get("categories", "")
+    subs_raw = body.get("subcategories", "")
+    if isinstance(cats_raw, list):
+        cats = [str(x).strip() for x in cats_raw if str(x).strip()]
+        cats = _sanitize_plugin_list(";".join(cats))
+    else:
+        cats = _sanitize_plugin_list(str(cats_raw))
+    if isinstance(subs_raw, list):
+        subs = [str(x).strip() for x in subs_raw if str(x).strip()]
+        subs = _sanitize_plugin_list(";".join(subs))
+    else:
+        subs = _sanitize_plugin_list(str(subs_raw))
+    from services.catalog_service import get_conn
+    import json
+    conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?,?)", (f"plugin_cats_{name}", json.dumps(cats, ensure_ascii=False)))
+    conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?,?)", (f"plugin_subs_{name}", json.dumps(subs, ensure_ascii=False)))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "categories": cats, "subcategories": subs}
 
 # --- API: Favorites, Watch, Sync, Config, Admin, Visibility ---
 @app.post(api_url("/api/favorites/toggle"))
@@ -4878,8 +6106,11 @@ async def admin_users(request: Request):
     from services.catalog_service import get_conn
     conn = get_conn()
     users = [dict(r) for r in conn.execute("""
-        SELECT u.id, u.username, u.role, u.profile_id, p.name as profile_name
-        FROM tvcat_users u LEFT JOIN tvcat_profiles p ON p.id = u.profile_id
+        SELECT u.id, u.username, u.role, u.profile_id, p.name as profile_name,
+               up.display_name, up.avatar, up.avatar_url, up.color
+        FROM tvcat_users u
+        LEFT JOIN tvcat_profiles p ON p.id = u.profile_id
+        LEFT JOIN tvcat_user_prefs up ON up.user_id = u.id
         ORDER BY u.id
     """).fetchall()]
     conn.close()
@@ -5170,26 +6401,56 @@ async def scan_network(request: Request):
 
 @app.get(api_url("/api/network/interfaces"))
 async def get_network_interfaces():
-    """Devuelve las IPs reales de los adaptadores (filtra loopback y APIPA)."""
-    import psutil
+    """Devuelve las IPs reales de los adaptadores (filtra loopback y APIPA). Fallback sin psutil."""
     ifaces = []
-    for name, addrs in psutil.net_if_addrs().items():
-        for a in addrs:
-            if a.family == 2:
-                ip = a.address
-                if ip.startswith("127."): continue
-                if ip.startswith("169.254."): continue
-                nl = name.lower()
-                if any(k in nl for k in ("loopback","docker","vmware","vbox","bluetooth","ws_win5","vpn","tunnel","hyper-v")): continue
-                t = "wifi" if ("wi" in nl and "win" not in nl) else "lan"
-                ifaces.append({"name": name, "ip": ip, "type": t})
-    ifaces.sort(key=lambda x: (0 if x["type"]=="lan" else 1, x["name"]))
+    try:
+        import psutil
+        for name, addrs in psutil.net_if_addrs().items():
+            for a in addrs:
+                if a.family == 2:
+                    ip = a.address
+                    if ip.startswith("127."): continue
+                    if ip.startswith("169.254."): continue
+                    nl = name.lower()
+                    if any(k in nl for k in ("loopback","docker","vmware","vbox","bluetooth","ws_win5","vpn","tunnel","hyper-v")): continue
+                    t = "wifi" if ("wi" in nl and "win" not in nl) else "lan"
+                    ifaces.append({"name": name, "ip": ip, "type": t})
+        ifaces.sort(key=lambda x: (0 if x["type"]=="lan" else 1, x["name"]))
+    except ImportError:
+        # Fallback sin psutil: usar socket
+        import socket
+        try:
+            hostname = socket.gethostname()
+            ips = []
+            try:
+                ips = socket.gethostbyname_ex(hostname)[2]
+            except Exception:
+                pass
+            for ip in ips:
+                if ip.startswith("127.") or ip.startswith("169.254."): continue
+                ifaces.append({"name": "lan", "ip": ip, "type": "lan"})
+            if not ifaces:
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.settimeout(2)
+                    s.connect(("8.8.8.8", 80))
+                    ip = s.getsockname()[0]
+                    s.close()
+                    if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                        ifaces.append({"name": "lan", "ip": ip, "type": "lan"})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception:
+        pass
     from services.catalog_service import get_conn
     conn = get_conn()
     p = conn.execute("SELECT value FROM tvcat_settings WHERE key='mobile_preferred_ip'").fetchone()
     d = conn.execute("SELECT value FROM tvcat_settings WHERE key='mobile_dns_custom'").fetchone()
+    mp = conn.execute("SELECT value FROM tvcat_settings WHERE key='mobile_port'").fetchone()
     conn.close()
-    return {"interfaces": ifaces, "preferred": p[0] if p else (ifaces[0]["ip"] if ifaces else ""), "dns_custom": d[0] if d else ""}
+    return {"interfaces": ifaces, "preferred": p[0] if p else (ifaces[0]["ip"] if ifaces else ""), "dns_custom": d[0] if d else "", "port": mp[0] if mp and mp[0] else ""}
 
 @app.post(api_url("/api/mobile/config"))
 async def save_mobile_config(request: Request):
@@ -5201,6 +6462,7 @@ async def save_mobile_config(request: Request):
     conn = get_conn()
     if "preferred" in body: conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?,?)", ("mobile_preferred_ip", body["preferred"]))
     if "dns_custom" in body: conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?,?)", ("mobile_dns_custom", body["dns_custom"]))
+    if "port" in body: conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?,?)", ("mobile_port", str(body["port"])))
     conn.commit(); conn.close()
     return {"success": True}
 
@@ -5289,6 +6551,15 @@ async def set_settings(request: Request):
     conn.close()
     return {"success": True}
 
+# --- Telegram Throttle Status (solo lectura, diagnóstico) ---
+@app.get(api_url("/api/telegram/throttle"))
+async def telegram_throttle_status(request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    from services.telegram_service import get_telegram_service
+    return get_telegram_service().throttle_status()
+
 # --- Telegram Users API ---
 @app.get(api_url("/api/telegram/users"))
 async def list_telegram_users(request: Request):
@@ -5324,13 +6595,21 @@ async def update_telegram_user(tg_user_id: int, request: Request):
     s = get_session(request.cookies.get("tvcat_session",""))
     if not s or s.get("role") != "admin": raise HTTPException(403)
     body = await request.json()
-    from services.userbot_service import get_default_telegram_user, set_active_client, set_default_telegram_user
+    from services.userbot_service import get_default_telegram_user, set_active_client, set_default_telegram_user, _get_conn
     client_type = body.get("active_client")
     if client_type:
         set_active_client(tg_user_id, client_type)
     is_default = body.get("is_default")
     if is_default:
         set_default_telegram_user(tg_user_id)
+    name = body.get("name")
+    if name is not None:
+        name = str(name).strip()
+        if name:
+            conn = _get_conn()
+            conn.execute("UPDATE telegram_users SET name=? WHERE tg_user_id=?", (name, tg_user_id))
+            conn.commit()
+            conn.close()
     return {"success": True}
 
 @app.delete(api_url("/api/telegram/users/{tg_user_id}"))

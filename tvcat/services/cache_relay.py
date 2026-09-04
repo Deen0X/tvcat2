@@ -16,6 +16,7 @@ import gzip
 import json
 import time
 import uuid
+import base64
 import sqlite3
 import hashlib
 import asyncio
@@ -122,9 +123,9 @@ def _build_db(channel_id: Optional[str] = None) -> bytes:
     tmp = io.BytesIO()
     dst = sqlite3.connect(':memory:') if False else sqlite3.connect(os.path.join(_TVCAT_DIR, "data", "_cache_relay_tmp.db"))
     try:
-        # esquema
+        # esquema (canónico: channel_id sin -100 en ambas tablas)
         dst.execute("CREATE TABLE telegram_message_cache (channel_id TEXT NOT NULL, topic_id INTEGER, msg_id INTEGER NOT NULL, message TEXT NOT NULL, fetched_at INTEGER)")
-        dst.execute("CREATE TABLE catalog_assets (telegram_msg_id INTEGER, asset_type TEXT, asset_index INTEGER DEFAULT 0, image_blob BLOB, mime_type TEXT, file_size INTEGER, width INTEGER, height INTEGER, source TEXT)")
+        dst.execute("CREATE TABLE catalog_assets (channel_id TEXT NOT NULL DEFAULT '', telegram_msg_id INTEGER, asset_type TEXT, asset_index INTEGER DEFAULT 0, image_blob BLOB, mime_type TEXT, file_size INTEGER, width INTEGER, height INTEGER, source TEXT)")
 
         if channel_id is not None:
             variants = _channel_variants(channel_id)
@@ -135,21 +136,39 @@ def _build_db(channel_id: Optional[str] = None) -> bytes:
         else:
             rows = src.execute("SELECT channel_id, topic_id, msg_id, message, fetched_at FROM telegram_message_cache").fetchall()
 
+        try:
+            from services.cache_keys import canon_channel
+        except Exception:
+            def canon_channel(x):
+                return str(x or "").replace("-100", "").lstrip("-")
         msg_ids = set()
         for r in rows:
             dst.execute("INSERT INTO telegram_message_cache VALUES (?,?,?,?,?)",
-                        (r["channel_id"], r["topic_id"], r["msg_id"], r["message"], r["fetched_at"]))
+                        (canon_channel(r["channel_id"]), r["topic_id"], r["msg_id"], r["message"], r["fetched_at"]))
             msg_ids.add(r["msg_id"])
 
         if msg_ids:
             ph = ",".join("?" for _ in msg_ids)
-            assets = src.execute(
-                f"SELECT telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source FROM catalog_assets WHERE telegram_msg_id IN ({ph})",
-                list(msg_ids)).fetchall()
+            # Filtrar assets también por canal (evita arrastrar el asset de otro canal con mismo msg_id)
+            exp_chan = canon_channel(channel_id) if channel_id is not None else None
+            try:
+                _acols = [rr[1] for rr in src.execute("PRAGMA table_info(catalog_assets)").fetchall()]
+            except Exception:
+                _acols = []
+            if exp_chan is not None and "channel_id" in _acols:
+                assets = src.execute(
+                    f"SELECT channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source FROM catalog_assets WHERE telegram_msg_id IN ({ph}) AND channel_id=?",
+                    list(msg_ids) + [exp_chan]).fetchall()
+            else:
+                assets = src.execute(
+                    f"SELECT telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source FROM catalog_assets WHERE telegram_msg_id IN ({ph})",
+                    list(msg_ids)).fetchall()
             for a in assets:
-                dst.execute("INSERT INTO catalog_assets VALUES (?,?,?,?,?,?,?,?,?)",
-                            (a["telegram_msg_id"], a["asset_type"], a["asset_index"], a["image_blob"],
-                             a["mime_type"], a["file_size"], a["width"], a["height"], a["source"]))
+                ad = dict(a)
+                dst.execute("INSERT INTO catalog_assets VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (canon_channel(ad.get("channel_id", exp_chan or "")),
+                             ad["telegram_msg_id"], ad["asset_type"], ad["asset_index"], ad["image_blob"],
+                             ad["mime_type"], ad["file_size"], ad["width"], ad["height"], ad["source"]))
         dst.commit()
         with open(os.path.join(_TVCAT_DIR, "data", "_cache_relay_tmp.db"), "rb") as f:
             raw_db = f.read()
@@ -177,10 +196,48 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# Constantes para encriptación simple
+_CACHE_RELAY_KEY = b"TVCatCacheRelayV1"
+
+
+def _xor_bytes(data: bytes, key: bytes) -> bytes:
+    return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+
+
+def _encrypt_payload(payload: str) -> str:
+    digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    combined = (payload + "|" + digest).encode()
+    enc = _xor_bytes(combined, _CACHE_RELAY_KEY)
+    return base64.urlsafe_b64encode(enc).decode().rstrip("=")
+
+
+def _decrypt_payload(token: str) -> Optional[str]:
+    try:
+        enc = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+        combined = _xor_bytes(enc, _CACHE_RELAY_KEY).decode()
+        payload, digest = combined.rsplit("|", 1)
+        if hashlib.sha256(payload.encode()).hexdigest()[:16] != digest:
+            return None
+        return payload
+    except Exception:
+        return None
+
+
 def _manifest(bk, channel_id, full, max_msg_id, count, parts, size, hash_val):
     if full:
-        return f"#cacheRelay bk={bk} full=1 max={max_msg_id} n={count} ts={int(time.time())} parts={parts} size={size} hash={hash_val}"
-    return f"#cacheRelay bk={bk} ch={channel_id} max={max_msg_id} n={count} ts={int(time.time())} parts={parts} size={size} hash={hash_val}"
+        payload = f"bk={bk} full=1 max={max_msg_id} n={count} ts={int(time.time())} parts={parts} size={size} hash={hash_val}"
+    else:
+        payload = f"bk={bk} ch={channel_id} max={max_msg_id} n={count} ts={int(time.time())} parts={parts} size={size} hash={hash_val}"
+    token = _encrypt_payload(payload)
+    return (
+        "#cacheRelay\n\n"
+        "Cache Relay de sistema TVCat\n\n"
+        "Este mensaje es un respaldo de caché del sistema TVCat. "
+        "Se utiliza para sincronizar el historial de mensajes entre instancias. "
+        "No lo borres ni lo modifiques.\n\n"
+        "NO MODIFIQUES LA SIGUIENTE LINEA:\n"
+        f"enc={token}"
+    )
 
 
 def _parse_manifest(caption: str) -> Optional[dict]:
@@ -444,27 +501,39 @@ async def download_backup(manifest: dict, chat: str, progress_callback=None) -> 
             return None
         return done.get("_downloaded")
 
+    # Helper para buscar por #cacheRelay y filtrar por bk (funciona con ambos formatos)
+    async def _find_by_bk():
+        found = await svc.search_messages_by_text(chat, "#cacheRelay", **creds)
+        result = []
+        for m in found:
+            d = _parse_manifest(m.get("caption", ""))
+            if d and d.get("bk") == bk:
+                result.append(m)
+        return result
+
     if parts <= 1:
         target = manifest.get("msg_id")
         if not target:
-            # Buscar el mensaje por texto si no trae msg_id
-            found = await svc.search_messages_by_text(chat, bk, **creds)
+            found = await _find_by_bk()
             if not found:
                 return None
             target = found[0].get("msg_id")
         return await _one(target)
 
-    # Multipartes: buscar por bk
-    found = await svc.search_messages_by_text(chat, bk, **creds)
+    # Multipartes: buscar por #cacheRelay, filtrar por bk, y detectar partes
+    found = await _find_by_bk()
     parts_map = {}
     for m in found:
-        d = _parse_manifest(m.get("caption", ""))
         cap = m.get("caption", "")
+        d = _parse_manifest(cap)
+        if not d or d.get("bk") != bk:
+            continue
         mm = re.search(r'part=(\d+)/(\d+)', cap)
         if mm:
             parts_map[int(mm.group(1))] = m.get("msg_id")
-        elif d and d.get("bk") == bk:
-            parts_map[parts] = m.get("msg_id")  # cabecera = última parte
+        else:
+            # cabecera = última parte (usa parts del manifest descifrado)
+            parts_map[d.get("parts", parts)] = m.get("msg_id")
 
     if len(parts_map) < parts:
         return None
@@ -556,7 +625,12 @@ def import_channel_cache(gz_bytes: bytes, channel_id: str, overwrite: bool, mani
                 to_insert = [r for r in rows if r["msg_id"] not in existing_ids]
 
             mode = "OR REPLACE" if overwrite else "OR IGNORE"
-            data = [(r["channel_id"], r["topic_id"], r["msg_id"], r["message"], r["fetched_at"]) for r in to_insert]
+            try:
+                from services.cache_keys import canon_channel as _cc
+            except Exception:
+                def _cc(x):
+                    return str(x or "").replace("-100", "").lstrip("-")
+            data = [(_cc(r["channel_id"]), r["topic_id"], r["msg_id"], r["message"], r["fetched_at"]) for r in to_insert]
             BATCH = 500
             for i in range(0, len(data), BATCH):
                 conn.executemany(
@@ -566,8 +640,18 @@ def import_channel_cache(gz_bytes: bytes, channel_id: str, overwrite: bool, mani
 
             imported = len(to_insert)
 
-            # catalog_assets: solo los de los mensajes importados
+            # catalog_assets: solo los de los mensajes importados (con canal canónico;
+            # backups viejos sin channel_id heredan el canal importado)
             if to_insert:
+                try:
+                    _bcols = [rr[1] for rr in src.execute("PRAGMA table_info(catalog_assets)").fetchall()]
+                except Exception:
+                    _bcols = []
+                _bhas_chan = "channel_id" in _bcols
+                try:
+                    _imp_chan = _cc(channel_id) if channel_id and channel_id != "*" else ""
+                except Exception:
+                    _imp_chan = ""
                 msg_ids = [r["msg_id"] for r in to_insert]
                 # ejecutar por lotes de msg_ids para no exceder límite de parámetros SQL
                 assets = []
@@ -575,13 +659,14 @@ def import_channel_cache(gz_bytes: bytes, channel_id: str, overwrite: bool, mani
                     sub = msg_ids[j:j+500]
                     ph2 = ",".join("?" for _ in sub)
                     for a in src.execute(f"SELECT * FROM catalog_assets WHERE telegram_msg_id IN ({ph2})", sub).fetchall():
-                        assets.append(tuple(a))
+                        assets.append(dict(a))
                 if assets:
-                    adata = [(a["telegram_msg_id"], a["asset_type"], a["asset_index"], a["image_blob"],
+                    adata = [((_cc(a.get("channel_id")) if (_bhas_chan and a.get("channel_id")) else _imp_chan),
+                              a["telegram_msg_id"], a["asset_type"], a["asset_index"], a["image_blob"],
                               a["mime_type"], a["file_size"], a["width"], a["height"], a["source"]) for a in assets]
                     for j in range(0, len(adata), BATCH):
                         conn.executemany(
-                            f"INSERT {mode} INTO catalog_assets (telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source) VALUES (?,?,?,?,?,?,?,?,?)",
+                            f"INSERT {mode} INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source) VALUES (?,?,?,?,?,?,?,?,?,?)",
                             adata[j:j+BATCH])
 
             conn.commit()

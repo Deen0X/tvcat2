@@ -109,7 +109,55 @@ DEFAULT_TEMPLATE = (
 )
 
 
+def _sanitize_tpl_val(s: str) -> str:
+    v = (s or "").strip().lower()
+    if v == "*":
+        return "*"
+    return re.sub(r"[^a-z0-9]", "", v)
+
+
 def _resolve_template(templates: dict, category, subcategory) -> str:
+    # Nuevo formato: templates.templates = [{name, categories, subcategories, content}]
+    lst = templates.get("templates") or []
+    if isinstance(lst, list) and lst:
+        cat_n = _sanitize_tpl_val(category)
+        sub_n = _sanitize_tpl_val(subcategory)
+        for tpl in lst:
+            if not isinstance(tpl, dict):
+                continue
+            content = tpl.get("content") or ""
+            if not content:
+                continue
+            # categorías / subcategorías como "a; b; c" o lista
+            raw_cats = tpl.get("categories", "") or ""
+            raw_subs = tpl.get("subcategories", "") or ""
+            # permitir lista o string
+            if isinstance(raw_cats, list):
+                cats = [str(x) for x in raw_cats]
+            else:
+                cats = [x.strip() for x in str(raw_cats).split(";")]
+            if isinstance(raw_subs, list):
+                subs = [str(x) for x in raw_subs]
+            else:
+                subs = [x.strip() for x in str(raw_subs).split(";")]
+            cats_n = [_sanitize_tpl_val(x) for x in cats if x.strip()]
+            subs_n = [_sanitize_tpl_val(x) for x in subs if x.strip()]
+            # comodín * o vacío en el template → no filtra (coincide con cualquiera)
+            cat_match = not cats_n or "*" in cats_n or cat_n in cats_n
+            sub_match = not subs_n or "*" in subs_n or sub_n in subs_n
+            # Primera ocurrencia que coincide en alguna de las dos listas
+            if cat_match or sub_match:
+                # Requiere al menos una lista con datos; si ambas vacías, es genérica (matchea todo, pero la pondremos al final)
+                # Evitar que una plantilla genérica capture todo al inicio: solo matchea si al menos una lista tiene datos
+                if cats_n or subs_n:
+                    return content
+                # Si ambas vacías, solo si no hay otra (fallback genérico) — la dejamos como último recurso
+        # Si ninguna del nuevo formato matchea, probar genérica vacía
+        for tpl in lst:
+            if isinstance(tpl, dict) and not (tpl.get("categories") or "").strip() and not (tpl.get("subcategories") or "").strip():
+                if tpl.get("content"):
+                    return tpl["content"]
+    # Compatibilidad: formato antiguo categories { "cat|sub": "...", "cat": "..." }
     cat = (category or "").strip().lower()
     sub = (subcategory or "").strip().lower()
     cats = templates.get("categories", {}) or {}
@@ -127,7 +175,7 @@ def render_template(details: dict, category="", subcategory="") -> str:
       {title}, {release_year}, {year}, {description}, {sinopsis}, {overview},
       {rating}, {rating_count}, {genres}, {generos}, {themes}, {temas},
       {author}, {autor}, {director}, {release_date}, {fecha}, {category},
-      {categoria}, {id}, {cover}
+      {categoria}, {id}, {cover}, {originalmsg}
     """
     templates = _load_templates()
     tpl = _resolve_template(templates, category, subcategory)
@@ -184,11 +232,67 @@ def render_template(details: dict, category="", subcategory="") -> str:
         "{categoria}": str(details.get("api_category") or ""),
         "{id}": str(details.get("api_id") or ""),
         "{cover}": cover,
+        "{originalmsg}": str(details.get("originalmsg") or details.get("original_msg") or ""),
     }
 
     out = tpl
     for tag, value in replacements.items():
         out = out.replace(tag, value)
+    # f-tags con formato (cover_tags.json): {ftitle} -> "Title: {value}" con salto de línea, se omite si vacío
+    try:
+        _FTAGS = {
+            "title": "Title: {value}",
+            "year": "Year: {value}",
+            "release_year": "Year: {value}",
+            "rating": "Rating: {value}",
+            "rating_count": "Rating count: {value}",
+            "genres": "Genres: {value}",
+            "generos": "Genres: {value}",
+            "themes": "Themes: {value}",
+            "temas": "Themes: {value}",
+            "author": "Author: {value}",
+            "autor": "Author: {value}",
+            "director": "Director: {value}",
+            "release_date": "Release date: {value}",
+            "fecha": "Release date: {value}",
+            "category": "Category: {value}",
+            "categoria": "Category: {value}",
+            "id": "ID: {value}",
+            "cover": "Cover: {value}",
+            "episodes": "Episodes: {value}",
+            "ext": "Ext: {value}",
+            "extension": "Ext: {value}",
+            "description": "Description:\n{value}",
+            "sinopsis": "Sinopsis:\n{value}",
+            "overview": "Overview:\n{value}",
+            "originalmsg": "{value}",
+        }
+        # Cargar personalizaciones desde TGHirayi si existe
+        try:
+            _ftags_path = os.path.join(os.path.dirname(__file__), "..", "plugins", "tvcat_TGHirayi", "data", "cover_tags.json")
+            if os.path.isfile(_ftags_path):
+                with open(_ftags_path, "r", encoding="utf-8") as _f:
+                    _cfg = json.load(_f)
+                    for _k, _v in (_cfg.get("ftags") or {}).items():
+                        if isinstance(_v, str):
+                            _FTAGS[_k] = _v
+        except Exception:
+            pass
+        has_title = ("{title}" in tpl) or ("{ftitle}" in tpl)
+        raw_map = {k.strip("{}"): v for k, v in replacements.items()}
+        for k, f_tpl in _FTAGS.items():
+            val = raw_map.get(k, "")
+            rendered = f_tpl.replace("{value}", val) if val else ""
+            if k == "tagtitle" and not has_title:
+                rendered = ""
+            f_form = "{f" + k + "}"
+            if f_form in out:
+                if rendered:
+                    out = out.replace(f_form, rendered + "\n")
+                else:
+                    out = out.replace(f_form, "")
+    except Exception:
+        pass
     # Colapsar líneas vacías
     out = re.sub(r'\n{3,}', '\n\n', out)
     return out.strip()
@@ -327,11 +431,35 @@ def _provider_enabled(provider_name: str, creds: dict) -> bool:
     return False
 
 
+def _load_behavior() -> dict:
+    from .catalog_service import get_conn
+    import json
+    conn = get_conn()
+    row = conn.execute("SELECT value FROM tvcat_settings WHERE key='enrich_behavior'").fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return {"auto_scan": False, "overwrite": False}
+    try:
+        d = json.loads(row[0])
+        return {"auto_scan": bool(d.get("auto_scan")), "overwrite": bool(d.get("overwrite"))}
+    except Exception:
+        return {"auto_scan": False, "overwrite": False}
+
+def _save_behavior(behavior: dict):
+    from .catalog_service import get_conn
+    import json
+    conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
+                 ("enrich_behavior", json.dumps({"auto_scan": bool(behavior.get("auto_scan")), "overwrite": bool(behavior.get("overwrite"))})))
+    conn.commit()
+    conn.close()
+
 def get_config() -> dict:
     """Devuelve la config (sin secretos en claro) para el frontend admin."""
     creds = _load_credentials()
     templates = _load_templates()
     threshold = _load_threshold()
+    behavior = _load_behavior()
     # Enmascarar secretos: devolver solo si está configurado (bool), no el valor
     masked = {}
     for k, v in creds.items():
@@ -343,10 +471,11 @@ def get_config() -> dict:
         "credentials": masked,
         "templates": templates,
         "threshold": threshold,
+        "behavior": behavior,
     }
 
 
-def save_config(credentials: dict = None, templates: dict = None, threshold: float = None) -> dict:
+def save_config(credentials: dict = None, templates: dict = None, threshold: float = None, behavior: dict = None) -> dict:
     """Guarda la config. credentials: dict parcial (solo se actualizan los campos con valor)."""
     if threshold is not None:
         from .catalog_service import get_conn
@@ -371,5 +500,8 @@ def save_config(credentials: dict = None, templates: dict = None, threshold: flo
 
     if templates is not None:
         _save_templates(templates)
+
+    if behavior is not None:
+        _save_behavior(behavior)
 
     return get_config()

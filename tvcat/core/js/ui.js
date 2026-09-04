@@ -268,8 +268,21 @@ var UI = {
         }
     },
 
-    // Cambiar de pestaña en el modal
+    // Persistencia local por usuario-dispositivo de la última sección de configuración
+    _settingsLastTabKey: function() {
+        try {
+            var u = window.Catalog && window.Catalog.currentUser;
+            var suffix = (u && (u.username || u.id)) ? '_' + (u.username || u.id) : '';
+            return 'tvcat_settings_last_tab' + suffix;
+        } catch(e) { return 'tvcat_settings_last_tab'; }
+    },
+
+    // Cambiar de pestaña en el modal — bloquea si hay cambios sin guardar
     switchSettingsTab: function(tabName) {
+        if (window._settingsDirty) {
+            if (!confirm('Tienes cambios sin guardar. ¿Cambiar de sección sin guardar?')) return;
+            window._settingsDirty = false;
+        }
         var user = window.Catalog.currentUser;
         var isAdmin = user && (user.username === 'admin' || user.is_admin);
         if (tabName === 'admin' && !isAdmin) {
@@ -281,7 +294,19 @@ var UI = {
         if (tabName === 'userbot' && !isAdmin) {
             tabName = 'profile';
         }
-        var tabs = ['profile', 'security', 'screen', 'categories', 'remote', 'admin', 'plugins', 'version', 'userbot', 'mobile', 'logs'];
+        if (tabName === 'contents' && !isAdmin) {
+            tabName = 'profile';
+        }
+        if (tabName === 'administration' && !isAdmin) {
+            tabName = 'profile';
+        }
+        if (tabName === 'enricher' && !isAdmin) {
+            tabName = 'profile';
+        }
+        if (tabName === 'covers' && !isAdmin) {
+            tabName = 'profile';
+        }
+        var tabs = ['profile', 'security', 'screen', 'cache', 'categories', 'remote', 'admin', 'plugins', 'version', 'userbot', 'mobile', 'contents', 'administration', 'logs', 'enricher', 'covers'];
         for (var ti = 0; ti < tabs.length; ti++) {
             var t = tabs[ti];
             var btn = document.getElementById('tab-btn-' + t);
@@ -302,17 +327,27 @@ var UI = {
             }
         }
 
+        try { localStorage.setItem(this._settingsLastTabKey(), tabName); } catch(e) {}
+        try { localStorage.setItem('tvcat_settings_last_tab', tabName); } catch(e) {}
+
         // Actualizar dinámicamente el título del modal en la cabecera
         var friendlyNames = {
             'profile': 'Mi Perfil',
             'security': 'Seguridad',
-            'screen': 'Pantalla',
+            'screen': 'Interfaz',
+            'cache': 'Caché',
             'categories': 'Categorías',
             'remote': 'Mapeo Mando',
             'admin': 'Usuarios',
             'plugins': 'Plugins',
             'version': 'Versión',
-            'userbot': 'Userbot'
+            'userbot': 'Userbot',
+            'mobile': 'Móvil',
+            'contents': 'Contenidos',
+            'administration': 'Mantenimiento',
+            'logs': 'Logs',
+            'enricher': 'Enriquecedor',
+            'covers': 'Customización'
         };
         var titleTextEl = document.getElementById('settings-title-text');
         if (titleTextEl) {
@@ -328,6 +363,7 @@ var UI = {
         if (tabName === 'plugins') {
             this.loadPluginsList();
             this.loadGlobalPluginsConfig();
+
         }
 
         // Si entramos en la pestaña version, cargamos la información de versión
@@ -339,14 +375,28 @@ var UI = {
         if (tabName === 'userbot') {
             this.loadGlobalUserbotConfig();
             this.initGlobalUserbotEvents();
+            // aplicar estado colapsado de secciones userbot (si existe helper de app.js)
+            var self2 = this;
+            setTimeout(function(){
+                if (typeof window._initUserbotCollaps === 'function') {
+                    var filled = false;
+                    try {
+                        var a = document.getElementById('userbot-api-id');
+                        filled = !!(a && a.getAttribute('data-real'));
+                    } catch(e){}
+                    window._initUserbotCollaps(filled);
+                }
+            }, 350);
         }
 
-        // Si entramos en la pestaña de mando, activar el tester en vivo y sincronizar toggle Forzar mando
+        // Si entramos en la pestaña de mando, activar el tester en vivo y sincronizar toggles
         if (tabName === 'remote') {
             this.startKeyTester();
             this.renderKeyMapTable();
             var fr = document.getElementById('force-remote-toggle');
             if (fr) { try { fr.checked = localStorage.getItem('tvcat_force_remote') === 'true'; } catch(e) {} }
+            var inv = document.getElementById('invert-keyboard-toggle');
+            if (inv) { try { inv.checked = window.inputHelper ? window.inputHelper.isInverted() : (localStorage.getItem('tvcat_invert_keyboard')==='1'); } catch(e){} }
         } else {
             this.stopKeyTester();
         }
@@ -356,10 +406,15 @@ var UI = {
             this.refreshLogs();
         }
 
-        // Mostrar el botón global de Guardar Cambios en todas las pestañas excepto en la de administración, plugins, userbot o logs
+        // Si entramos en Customización, cargar mapeo de covers
+        if (tabName === 'covers') {
+            this.loadCoverDefaults();
+        }
+
+        // Mostrar el botón global de Guardar Cambios en todas las pestañas excepto en las de administración
         var saveBtn = document.getElementById('save-profile-btn');
         if (saveBtn) {
-            if (tabName === 'admin' || tabName === 'plugins' || tabName === 'userbot' || tabName === 'logs') {
+            if (tabName === 'admin' || tabName === 'plugins' || tabName === 'userbot' || tabName === 'logs' || tabName === 'contents' || tabName === 'administration' || tabName === 'enricher' || tabName === 'covers') {
                 saveBtn.classList.add('hidden');
             } else {
                 saveBtn.classList.remove('hidden');
@@ -549,6 +604,41 @@ var UI = {
     _keyTesterHandler: null,
     _keyTesterFlashTimers: {},
 
+    loadCoverDefaults: function() {
+        var list = document.getElementById('covers-list');
+        var st = document.getElementById('covers-status');
+        if (list) list.innerHTML = '<span style="font-size:0.75rem;color:#888;">Cargando...</span>';
+        window.API.ajax({
+            url: '/api/config/cover-defaults',
+            success: function(res) {
+                var items = (res && res.items) || [];
+                try { window._coverDefaultsCache = items; } catch(e) {}
+                if (!list) return;
+                var html = '';
+                for (var i = 0; i < items.length; i++) {
+                    (function(it, idx) {
+                        var aid = it.asset_id;
+                        var nm = (it.name || '').replace(/</g, '&lt;');
+                        var cats = (it.categories || '').replace(/</g, '&lt;');
+                        var subs = (it.subcategories || '').replace(/</g, '&lt;');
+                        html += '<div data-cover-idx="' + idx + '" data-asset="' + aid + '" style="display:flex;gap:12px;align-items:center;background:rgba(255,255,255,0.04);border:1px solid #333;border-radius:8px;padding:8px;">' +
+                            '<img src="/api/cover-default/' + aid + '" style="width:60px;height:88px;object-fit:cover;background:#18181b;border-radius:6px;flex-shrink:0;" onerror="this.onerror=null;this.src=\'/static/TVCat.png\'">' +
+                            '<div style="flex:1;min-width:0;">' +
+                            '<div style="font-size:0.8rem;font-weight:600;color:#fff;">' + nm + ' <span style="color:#71717a;font-weight:400;">(cover ' + aid + ')</span></div>' +
+                            '<label style="font-size:0.7rem;color:#888;">Categoría</label>' +
+                            '<input data-cover-cats value="' + cats.replace(/"/g, '&quot;') + '" placeholder="media;video" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 8px;color:#fff;font-size:0.8rem;box-sizing:border-box;margin-bottom:6px;">' +
+                            '<label style="font-size:0.7rem;color:#888;">Subcategoría</label>' +
+                            '<input data-cover-subs value="' + subs.replace(/"/g, '&quot;') + '" placeholder="movie;movies;peli" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 8px;color:#fff;font-size:0.8rem;box-sizing:border-box;">' +
+                            '</div></div>';
+                    })(items[i], i);
+                }
+                list.innerHTML = html || '<span style="font-size:0.75rem;color:#888;">Sin items</span>';
+                if (st) { st.textContent = items.length + ' covers'; st.style.color = '#71717a'; }
+            },
+            error: function() { if (list) list.innerHTML = '<span style="font-size:0.75rem;color:#f87171;">Error al cargar (solo admin)</span>'; }
+        });
+    },
+
     renderKeyMapTable: function() {
         var container = document.getElementById('keymap-table-container');
         if (!container) return;
@@ -579,6 +669,8 @@ var UI = {
         self._keyTesterHandler = function(e) {
             // No interferir con la calibración
             if (window.UI && window.UI.isCalibrating) return;
+            // Si el modo Test persistente está ON, ya lo gestiona _mandoTestListeners (persistente + bloqueo). No hacer flash de 500ms que lo borraría.
+            if (window.mandoTestActive) return;
 
             var keyCode = e.keyCode || e.which;
             var digit = window.keyMapper ? window.keyMapper.getVirtualDigit(e) : null;
@@ -607,6 +699,28 @@ var UI = {
                         btn.style.borderColor = '#444';
                         btn.style.boxShadow = 'none';
                     }, 500);
+                }
+            }
+            // A-J tester via inputHelper
+            if (digit !== null && window.inputHelper) {
+                var act = window.inputHelper.eventToAction(e);
+                if (act && act.position) {
+                    var ajBtn = document.getElementById('aj-' + act.position);
+                    if (ajBtn) {
+                        ajBtn.style.background = '#e11d48';
+                        ajBtn.style.color = '#fff';
+                        if (self._keyTesterFlashTimers['aj_'+act.position]) clearTimeout(self._keyTesterFlashTimers['aj_'+act.position]);
+                        self._keyTesterFlashTimers['aj_'+act.position] = setTimeout(function(){
+                            ajBtn.style.background = '#222';
+                            ajBtn.style.color = '#fff';
+                        }, 500);
+                        var leg = document.querySelector('#aj-legend span[data-pos="'+act.position+'"]');
+                        if (leg) {
+                            leg.style.color = '#e11d48';
+                            leg.style.fontWeight = '700';
+                            setTimeout(function(){ leg.style.color='#888'; leg.style.fontWeight='400'; }, 500);
+                        }
+                    }
                 }
             }
         };
@@ -741,6 +855,7 @@ var UI = {
         var pluginsTab = document.getElementById('tab-btn-plugins');
         var userbotTab = document.getElementById('tab-btn-userbot');
         var contentsTab = document.getElementById('tab-btn-contents');
+        var administrationTab = document.getElementById('tab-btn-administration');
         if (adminTab) {
             adminTab.classList.toggle('hidden', !isAdmin);
         }
@@ -753,9 +868,20 @@ var UI = {
         if (contentsTab) {
             contentsTab.classList.toggle('hidden', !isAdmin);
         }
+        if (administrationTab) {
+            administrationTab.classList.toggle('hidden', !isAdmin);
+        }
 
-        // Regresar a la primera pestaña (Perfil)
-        this.switchSettingsTab('profile');
+        // Restaurar última sección visitada (persistente por usuario-dispositivo en localStorage)
+        var lastTab = null;
+        try { lastTab = localStorage.getItem(this._settingsLastTabKey()); } catch(e) {}
+        if (!lastTab) { try { lastTab = localStorage.getItem('tvcat_settings_last_tab'); } catch(e) {} }
+        var validTabs = ['profile','security','screen','cache','categories','remote','admin','plugins','version','userbot','mobile','contents','administration','logs'];
+        if (!lastTab || validTabs.indexOf(lastTab) === -1) lastTab = 'profile';
+        if ((lastTab === 'admin' || lastTab === 'plugins' || lastTab === 'userbot' || lastTab === 'contents' || lastTab === 'administration') && !isAdmin) {
+            lastTab = 'profile';
+        }
+        this.switchSettingsTab(lastTab);
         this.updateEpisodeCacheUI();
 
         // 2. Cargar Nombre
@@ -778,12 +904,15 @@ var UI = {
                     for (var i = 0; i < items.length; i++) items[i].classList.remove('active');
                     el.classList.add('active');
                     self.selectedAvatar = emoji;
-                    
+                    window._settingsDirty = true;
+                    self.updateAvatarPreview();
                     // Limpiar inputs de URL y archivo ya que eligió emoji
                     var urlInput = document.getElementById('profile-avatar-url');
                     if (urlInput) urlInput.value = '';
                     var fileInput = document.getElementById('profile-avatar-file');
                     if (fileInput) fileInput.value = '';
+                    var localInput = document.getElementById('profile-avatar-local');
+                    if (localInput) localInput.value = '';
                 };
                 avatarContainer.appendChild(el);
             });
@@ -812,10 +941,11 @@ var UI = {
         if (avatarVal.indexOf('http') === 0) {
             this.switchAvatarTab(null, 'url');
         } else if (avatarVal.indexOf('data:image/') === 0 || avatarVal.indexOf('/api/') === 0 || avatarVal.indexOf('/static/') === 0) {
-            this.switchAvatarTab(null, 'upload');
+            this.switchAvatarTab(null, 'local');
         } else {
             this.switchAvatarTab(null, 'presets');
         }
+        this.updateAvatarPreview();
 
         // 4. Renderizar Presets de Color
         this.selectedColor = user.color || '#e11d48';
@@ -832,6 +962,8 @@ var UI = {
                     for (var i = 0; i < items.length; i++) items[i].classList.remove('active');
                     el.classList.add('active');
                     self.selectedColor = color;
+                    window._settingsDirty = true;
+                    self.updateAvatarPreview();
                 };
                 colorContainer.appendChild(el);
             });
@@ -912,6 +1044,7 @@ var UI = {
                 window.Catalog.load(window.Catalog.currentCategory);
 
                 // UX: Cerrar el modal silenciosamente sin alertas molestas
+                window._settingsDirty = false;
                 self.toggleSettingsModal();
             } else {
                 alert("Error al actualizar el perfil.");
@@ -963,6 +1096,8 @@ var UI = {
         // Guardar perfil y categorías preferidas
         window.API.updateProfile(payload, function(profileRes) {
             if (profileRes && profileRes.success) {
+                // Guardar también los cambios del enriquecedor si su pestaña se abrió esta sesión
+                try { if (window._enricherLoaded && window.saveEnrichConfig) window.saveEnrichConfig(); } catch (e) { }
                 var avatarUrl = document.getElementById('profile-avatar-url');
                 // Actualizar estado local del usuario en memoria
                 window.Catalog.currentUser.display_name = displayName;
@@ -999,6 +1134,7 @@ var UI = {
 
                     window.API.changePassword(currentPassword, newPassword, function(passRes) {
                         if (passRes && passRes.success) {
+                            window._settingsDirty = false;
                             alert("¡Configuración y contraseña actualizadas con éxito!");
                             if (currentPassEl) currentPassEl.value = '';
                             if (newPassEl) newPassEl.value = '';
@@ -1010,11 +1146,56 @@ var UI = {
                     });
                 } else {
                     // Sin cambio de contraseña: ¡guardado directo exitoso!
+                    window._settingsDirty = false;
                     self.toggleSettingsModal();
                 }
             } else {
                 alert("Error al actualizar la configuración.");
             }
+        });
+    },
+
+    applyGlobalSettings: function() {
+        var self = this;
+        var nameInput = document.getElementById('profile-display-name');
+        var displayName = nameInput ? nameInput.value.trim() : '';
+        if (!displayName) {
+            displayName = (window.Catalog.currentUser && (window.Catalog.currentUser.display_name || window.Catalog.currentUser.username)) || '';
+            if (!displayName) { alert("El nombre de pantalla no puede estar vacío"); return; }
+        }
+        var prefs = {};
+        var checkboxes = document.querySelectorAll('.pref-cat-checkbox');
+        for (var i = 0; i < checkboxes.length; i++) {
+            var cat = checkboxes[i].getAttribute('data-cat');
+            prefs[cat] = checkboxes[i].checked;
+        }
+        var payload = {
+            display_name: displayName,
+            avatar: this.selectedAvatar,
+            avatar_url: document.getElementById('profile-avatar-url') ? document.getElementById('profile-avatar-url').value.trim() : '',
+            color: this.selectedColor,
+            category_preferences: JSON.stringify(prefs)
+        };
+        window.API.updateProfile(payload, function(profileRes) {
+            if (profileRes && profileRes.success) {
+                var avatarUrl = document.getElementById('profile-avatar-url');
+                window.Catalog.currentUser.display_name = displayName;
+                window.Catalog.currentUser.avatar = self.selectedAvatar;
+                window.Catalog.currentUser.avatar_url = avatarUrl ? avatarUrl.value.trim() : '';
+                window.Catalog.currentUser.color = self.selectedColor;
+                window.Catalog.currentUser.category_preferences = payload.category_preferences;
+                window.Catalog.updateSidebarProfileUI();
+                if (window.Catalog && window.Catalog.initCategoriesTree) window.Catalog.initCategoriesTree();
+                window.Catalog.load(window.Catalog.currentCategory);
+                window._settingsDirty = false;
+                // guardar saltos también
+                var jsInput = document.getElementById('player-jump-short');
+                var jlInput = document.getElementById('player-jump-long');
+                var siInput = document.getElementById('player-skip-intro');
+                if (jsInput) localStorage.setItem('tvcat_small_jump', parseInt(jsInput.value) || 5);
+                if (jlInput) localStorage.setItem('tvcat_large_jump', parseInt(jlInput.value) || 20);
+                if (siInput) localStorage.setItem('tvcat_intro_jump', parseInt(siInput.value) || 80);
+            } else { alert("Error al aplicar la configuración."); }
         });
     },
 
@@ -1359,7 +1540,23 @@ var UI = {
         container.innerHTML = '<div style="color: var(--text-secondary); font-size: 0.85rem; padding: 10px; text-align: center;">⏳ Cargando plugins...</div>';
         
         var self = this;
-        window.API.getPlugins(function(plugins) {
+        window.API.getPlugins(function(resp) {
+            var plugins = resp;
+            if (resp && resp.plugins && Array.isArray(resp.plugins)) {
+                var map = {};
+                for (var mi = 0; mi < resp.plugins.length; mi++) {
+                    var mp = resp.plugins[mi];
+                    if (mp && mp.name) map[mp.name] = mp;
+                }
+                plugins = map;
+                try { _pluginListCache = resp.plugins.slice(); } catch (e) {}
+            } else {
+                try {
+                    var arr = [];
+                    for (var k2 in plugins) if (plugins.hasOwnProperty(k2)) arr.push(plugins[k2]);
+                    _pluginListCache = arr;
+                } catch (e) {}
+            }
             container.innerHTML = '';
             if (!plugins || Object.keys(plugins).length === 0) {
                 container.innerHTML = '<div style="color: var(--text-secondary); font-size: 0.85rem; padding: 10px; text-align: center;">📭 No hay plugins instalados.</div>';
@@ -1599,6 +1796,8 @@ var UI = {
     // Seleccionar URL manual
     selectAvatarUrl: function(url) {
         this.selectedAvatar = url.trim();
+        window._settingsDirty = true;
+        this.updateAvatarPreview();
         // Desmarcar todos los emojis preset
         var avatarContainer = document.getElementById('avatar-presets');
         if (avatarContainer) {
@@ -1614,13 +1813,15 @@ var UI = {
             var reader = new FileReader();
             reader.onload = function(e) {
                 self.selectedAvatar = e.target.result; // Base64 Data URL
-                
+                window._settingsDirty = true;
+                self.updateAvatarPreview();
+                var localInput = document.getElementById('profile-avatar-local');
+                if (localInput) localInput.value = input.files[0].name;
                 // Rellenar campo de texto para avisar
                 var urlInput = document.getElementById('profile-avatar-url');
                 if (urlInput) {
                     urlInput.value = '(Imagen subida desde PC)';
                 }
-                
                 // Desmarcar emojis preset
                 var avatarContainer = document.getElementById('avatar-presets');
                 if (avatarContainer) {
@@ -1631,6 +1832,7 @@ var UI = {
             reader.readAsDataURL(input.files[0]);
         }
     },
+    handleLocalAvatarFile: function(input) { return this.uploadAvatarFile(input); },
 
     // Cambiar contraseña de usuario actual
     changeUserPassword: function() {
@@ -1781,6 +1983,27 @@ var UI = {
         var activePane = document.getElementById('avatar-pane-' + tabName);
         if (activePane) {
             activePane.classList.remove('hidden');
+        }
+    },
+
+    updateAvatarPreview: function() {
+        var prev = document.getElementById('profile-avatar-preview');
+        if (!prev) return;
+        var urlInput = document.getElementById('profile-avatar-url');
+        var urlVal = urlInput ? urlInput.value.trim() : '';
+        var avatar = this.selectedAvatar || '👤';
+        var color = this.selectedColor || '#e11d48';
+        prev.style.background = color;
+        // prioridad: si hay fichero local (data:image) en selectedAvatar, mostrarlo
+        var isData = avatar && avatar.indexOf('data:image/') === 0;
+        var isHttp = avatar && avatar.indexOf('http') === 0;
+        if (isData || isHttp) {
+            prev.innerHTML = '<img src="' + avatar + '" style="width:100%;height:100%;object-fit:cover;">';
+        } else if (urlVal && (urlVal.indexOf('http')===0 || urlVal.indexOf('data:image/')===0)) {
+            prev.innerHTML = '<img src="' + urlVal + '" style="width:100%;height:100%;object-fit:cover;" onerror="this.parentNode.textContent=\'' + avatar + '\'">';
+        } else {
+            // emoji
+            try { prev.innerHTML = window.getSVGIcon ? window.getSVGIcon(avatar, 28) : avatar; } catch(e) { prev.textContent = avatar; }
         }
     },
 
@@ -2328,6 +2551,146 @@ window.changeUserPassword = function() { UI.changeUserPassword(); };
 window.toggleUserCategoryAccess = function(uid, cat, allowed) { UI.toggleUserCategoryAccess(uid, cat, allowed); };
 window.switchAvatarTab = function(ev, tab) { if (typeof ev === 'string' && tab === undefined) { tab = ev; ev = null; } UI.switchAvatarTab(ev, tab); };
 window.selectAvatarUrl = function(url) { UI.selectAvatarUrl(url); };
+window.handleLocalAvatarFile = function(input) { UI.handleLocalAvatarFile(input); };
+window.selectLocalAvatar = function(v) { UI.selectAvatarUrl(v); };
+window.applyGlobalSettings = function() { UI.applyGlobalSettings(); };
+window.saveCoverDefaults = function() {
+    var list = document.getElementById('covers-list');
+    var st = document.getElementById('covers-status');
+    if (!list) return;
+    var rows = list.querySelectorAll('[data-cover-idx]');
+    var cache = window._coverDefaultsCache || [];
+    var items = [];
+    for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        var idx = parseInt(r.getAttribute('data-cover-idx'), 10);
+        var src = cache[idx] || {};
+        var catsEl = r.querySelector('[data-cover-cats]');
+        var subsEl = r.querySelector('[data-cover-subs]');
+        items.push({
+            id: src.id || ('a' + idx),
+            name: src.name || '',
+            asset_id: src.asset_id !== undefined ? src.asset_id : parseInt(r.getAttribute('data-asset'), 10),
+            categories: catsEl ? catsEl.value : '',
+            subcategories: subsEl ? subsEl.value : ''
+        });
+    }
+    if (st) { st.textContent = 'Guardando...'; st.style.color = '#71717a'; }
+    window.API.ajax({
+        method: 'PUT', url: '/api/config/cover-defaults',
+        data: {items: items},
+        success: function() { if (st) { st.textContent = 'Guardado'; st.style.color = '#4ade80'; } try { window._coverDefaultsCache = items; } catch(e) {} },
+        error: function() { if (st) { st.textContent = 'Error al guardar'; st.style.color = '#f87171'; } }
+    });
+};
+window.resetCoverDefaults = function() { if (window.UI && window.UI.loadCoverDefaults) window.UI.loadCoverDefaults(); };
+window.mandoTestActive = false;
+window._mandoZeroTimer = null;
+window._mandoZeroDown = false;
+window._mandoTestExitAt = 0;
+window.toggleMandoTest = function(){ window.setMandoTest(!window.mandoTestActive); };
+window.setMandoTest = function(on){
+    var wasActive = window.mandoTestActive;
+    window.mandoTestActive = !!on;
+    if (wasActive && !window.mandoTestActive) {
+        try { window._mandoTestExitAt = Date.now(); } catch(e) { window._mandoTestExitAt = 0; }
+        window._mandoZeroDown = false;
+        if (window._mandoZeroTimer) { try { clearTimeout(window._mandoZeroTimer); } catch(e2) {} window._mandoZeroTimer = null; }
+    }
+    var btn = document.getElementById('aj-test-btn');
+    var st = document.getElementById('aj-test-status');
+    if (btn) {
+        btn.textContent = window.mandoTestActive ? '\u23F9 Salir' : '\u25B6 Test';
+        btn.style.background = window.mandoTestActive ? '#e11d48' : '#27272a';
+        btn.style.borderColor = window.mandoTestActive ? '#e11d48' : '#52525b';
+    }
+    if (st) {
+        if (window.mandoTestActive) {
+            st.textContent = 'Modo test ON \u2014 pulsa 0-9 (mant\u00E9n 0 >2s para salir)';
+            st.style.color = '#4ade80';
+        } else {
+            st.textContent = 'Pulsa Test y toca el mando/teclado';
+            st.style.color = '#71717a';
+        }
+    }
+    if (!window.mandoTestActive) { window._mandoClearHighlight(); }
+};
+window._mandoClearHighlight = function(){
+    var btns = document.querySelectorAll('.aj-btn');
+    for (var i = 0; i < btns.length; i++) { btns[i].style.background = '#222'; btns[i].style.color = ''; }
+    var legs = document.querySelectorAll('#aj-legend span');
+    for (var j = 0; j < legs.length; j++) { legs[j].style.color = ''; legs[j].style.fontWeight = ''; }
+};
+window._mandoHighlight = function(pos, digit, device){
+    window._mandoClearHighlight();
+    var el = document.getElementById('aj-' + pos);
+    if (el) { el.style.background = '#e11d48'; el.style.color = '#fff'; }
+    var legs2 = document.querySelectorAll('#aj-legend span[data-pos="' + pos + '"]');
+    for (var k = 0; k < legs2.length; k++) { legs2[k].style.color = '#fff'; legs2[k].style.fontWeight = '700'; }
+    var st = document.getElementById('aj-test-status');
+    var lbl = '';
+    try { var a = window.inputHelper ? window.inputHelper.positionToAction(pos) : null; if (a) lbl = a.label || a.short || ''; } catch(e) {}
+    if (st) { st.textContent = 'Tecla ' + digit + ' (' + device + ') \u2192 ' + pos + ' \u00B7 ' + lbl; st.style.color = '#fff'; }
+};
+window.updateMandoTester = function(){
+    try {
+        var chk = document.getElementById('invert-keyboard-toggle');
+        if (chk && window.inputHelper) chk.checked = window.inputHelper.isInverted();
+    } catch(e) {}
+};
+(function _mandoTestListeners(){
+    if (window._mandoTestHooked) return;
+    window._mandoTestHooked = true;
+    function _digitFromEvent(e){
+        try { if (window.keyMapper && window.keyMapper.getVirtualDigit) return window.keyMapper.getVirtualDigit(e); } catch(err) {}
+        return null;
+    }
+    window.addEventListener('keydown', function(e){
+        var d = _digitFromEvent(e);
+        if (d === null || d === undefined) return;
+        var raw = String(d);
+        if (raw === '0' && window.mandoTestActive && !window._mandoZeroDown) {
+            window._mandoZeroDown = true;
+            window._mandoZeroTimer = setTimeout(function(){ window.setMandoTest(false); window._mandoZeroDown = false; }, 2000);
+        }
+        if (!window.mandoTestActive) {
+            try {
+                if (window._mandoTestExitAt && (Date.now() - window._mandoTestExitAt < 1000)) {
+                    try { e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); } catch(errG) {}
+                    return;
+                }
+            } catch(errG2) {}
+            return;
+        }
+        var device = 'keyboard';
+        try { if (window.inputHelper && window.inputHelper.getDeviceType) device = window.inputHelper.getDeviceType(e); } catch(err2) {}
+        var pos = null;
+        try { if (window.inputHelper && window.inputHelper.digitToPosition) pos = window.inputHelper.digitToPosition(raw, device); } catch(err3) {}
+        if (pos) {
+            window._mandoHighlight(pos, raw, device);
+            try { e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); } catch(err4) {}
+        }
+    }, true);
+    document.addEventListener('keyup', function(e){
+        var d = _digitFromEvent(e);
+        if (d !== null && String(d) === '0') {
+            window._mandoZeroDown = false;
+            if (window._mandoZeroTimer) { clearTimeout(window._mandoZeroTimer); window._mandoZeroTimer = null; }
+        }
+    });
+    document.addEventListener('click', function(e){
+        if (!window.mandoTestActive) return;
+        var t = e.target;
+        while (t && t !== document) {
+            if (t.className && typeof t.className === 'string' && t.className.indexOf('aj-btn') !== -1 && t.id && t.id.indexOf('aj-') === 0) {
+                var p = t.id.replace('aj-', '');
+                window._mandoHighlight(p, 'tap', 't\u00E1ctil');
+                break;
+            }
+            t = t.parentNode;
+        }
+    });
+})();
 window.promptAdminChangePassword = function(uid, uname) { UI.promptAdminChangePassword(uid, uname); };
 window.confirmAdminDeleteUser = function(uid, uname) { UI.confirmAdminDeleteUser(uid, uname); };
 window.toggleOpenLastSectionPreference = function(chk) { UI.toggleOpenLastSectionPreference(chk); };

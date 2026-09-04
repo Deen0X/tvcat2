@@ -77,14 +77,60 @@ function loadFavorites() {
     window.Catalog.load('favorites');
 }
 
+// Helper: construye query string con búsqueda + filtros activos (para continue/completed/favorites)
+function buildCatalogQuery() {
+    var params = [];
+    var si = document.getElementById('global-search');
+    var st = si ? si.value.trim() : '';
+    if (st.length >= 2) {
+        var processed = parseWildcardSearch(st).join(' ');
+        params.push('search=' + encodeURIComponent(processed));
+        var fields = [];
+        if (window._activeFilters) {
+            if (window._activeFilters.fields.title) fields.push('title');
+            if (window._activeFilters.fields.alt_titles) fields.push('alt_titles');
+            if (window._activeFilters.fields.description) fields.push('description');
+            params.push('fields=' + encodeURIComponent(fields.join(',')));
+            if (window._activeFilters.year_from) params.push('year_from=' + window._activeFilters.year_from);
+            if (window._activeFilters.year_to) params.push('year_to=' + window._activeFilters.year_to);
+        }
+        // géneros excluidos
+        var exg = [];
+        if (window._activeFilters && window._activeFilters.categories) {
+            for (var g in window._activeFilters.categories) {
+                if (window._activeFilters.categories[g] !== false) continue;
+                var tags = (window._tagDictionary && window._tagDictionary[g]) || [g];
+                for (var i = 0; i < tags.length; i++) if (exg.indexOf(tags[i]) === -1) exg.push(tags[i]);
+            }
+        }
+        if (exg.length) params.push('genres=' + encodeURIComponent(exg.join(',')));
+    } else {
+        if (window._activeFilters) {
+            if (window._activeFilters.year_from) params.push('year_from=' + window._activeFilters.year_from);
+            if (window._activeFilters.year_to) params.push('year_to=' + window._activeFilters.year_to);
+        }
+        var exg2 = [];
+        if (window._activeFilters && window._activeFilters.categories) {
+            for (var g2 in window._activeFilters.categories) {
+                if (window._activeFilters.categories[g2] !== false) continue;
+                var tags2 = (window._tagDictionary && window._tagDictionary[g2]) || [g2];
+                for (var j = 0; j < tags2.length; j++) if (exg2.indexOf(tags2[j]) === -1) exg2.push(tags2[j]);
+            }
+        }
+        if (exg2.length) params.push('genres=' + encodeURIComponent(exg2.join(',')));
+    }
+    return params.length ? '?' + params.join('&') : '';
+}
+
 // --- Continue Watching ---
 function loadContinueWatching() {
     showLoading(true);
+    var url = '/api/catalog/continue' + buildCatalogQuery();
     window.API.ajax({
-        url: '/api/catalog/continue',
+        url: url,
         success: function(data) {
             window.Catalog.renderItems(data.items || []);
-            updateBadge(data.count || 0);
+            updateBadge(data.count !== undefined ? data.count : (data.items||[]).length);
             showLoading(false);
         },
         error: function() { showLoading(false); }
@@ -94,11 +140,12 @@ function loadContinueWatching() {
 // --- Completed ---
 function loadCompleted() {
     showLoading(true);
+    var url = '/api/catalog/completed' + buildCatalogQuery();
     window.API.ajax({
-        url: '/api/catalog/completed',
+        url: url,
         success: function(data) {
             window.Catalog.renderItems(data.items || []);
-            updateBadge(data.count || 0);
+            updateBadge(data.count !== undefined ? data.count : (data.items||[]).length);
             showLoading(false);
         },
         error: function() { showLoading(false); }
@@ -112,7 +159,7 @@ function showLoading(show) {
     if (show) {
         var items = [];
         for (var i = 0; i < 12; i++) {
-            items.push('<div class="grid-item grid-item-skeleton"><div class="grid-item-cover" style="background:var(--bg-surface);animation:pulse 1.5s infinite;"></div></div>');
+            items.push('<div class="grid-item grid-item-skeleton"><div class="grid-item-cover" style="background:#18181b;background:var(--bg-surface);animation:pulse 1.5s infinite;"><img src="/static/TVCat.png" alt="" style="object-fit:contain;padding:25%;opacity:0.5;" onerror="this.style.display=\'none\'"></div></div>');
         }
         grid.innerHTML = items.join('');
     }
@@ -126,6 +173,8 @@ function updateBadge(count) {
 }
 
 // --- Refresh (respeta búsqueda activa + filtros del modal) ---
+// Catalog.load/performSearch ya coalescen ráfagas internamente (120 ms),
+// así que aquí se llama directo.
 window.refreshCatalog = function() {
     var searchInput = document.getElementById('global-search');
     var text = searchInput ? searchInput.value.trim() : '';
@@ -360,6 +409,19 @@ window.toggleSettingsModal = function() {
         modal.style.opacity = '';
         loadSettings();
         if (window.UI) window.UI.loadSettings();
+        // Restaurar última sección visitada (persistente por usuario-dispositivo) — diferido para que currentUser esté cargado
+        setTimeout(function(){
+            try {
+                var _last = null;
+                if (window.UI && window.UI._settingsLastTabKey) _last = localStorage.getItem(window.UI._settingsLastTabKey());
+                if (!_last) _last = localStorage.getItem('tvcat_settings_last_tab');
+                var valid = ['profile','security','screen','cache','categories','remote','admin','plugins','version','userbot','enricher','mobile','contents','administration','logs'];
+                if (_last && valid.indexOf(_last) !== -1) {
+                    if (typeof switchSettingsTab === 'function') switchSettingsTab(_last);
+                    else if (window.UI && window.UI.switchSettingsTab) window.UI.switchSettingsTab(_last);
+                }
+            } catch(e) {}
+        }, 350);
         setTimeout(fixSettingsHeight, 100);
     }
 };
@@ -382,6 +444,16 @@ function switchSettingsTab(tab) {
         alert('Guarda o cancela la configuraci\u00F3n del plugin antes de cambiar de secci\u00F3n.');
         return;
     }
+    if (window._settingsDirty) {
+        if (!confirm('Tienes cambios sin guardar. ¿Cambiar de sección sin guardar?')) return;
+        window._settingsDirty = false;
+    }
+    // persistencia por usuario-dispositivo
+    try {
+        var k = (window.UI && window.UI._settingsLastTabKey) ? window.UI._settingsLastTabKey() : 'tvcat_settings_last_tab';
+        localStorage.setItem(k, tab);
+        localStorage.setItem('tvcat_settings_last_tab', tab);
+    } catch(e) {}
     var tabs = document.querySelectorAll('.tab-btn');
     for (var i = 0; i < tabs.length; i++) {
         tabs[i].classList.remove('active');
@@ -405,9 +477,41 @@ function switchSettingsTab(tab) {
     if (tab === 'mobile') loadMobileConfig();
     if (tab === 'contents') loadContentsTrees();
     if (tab === 'administration') window.adminLoadLog();
+    if (tab === 'enricher') { window.loadEnrichConfig(); if (window.loadFtags) window.loadFtags(); }
+    if (tab === 'userbot') {
+        // asegurar colapsables inicializados aunque config aún no haya vuelto
+        setTimeout(function(){
+            if (document.getElementById('collap-creds-body') && document.getElementById('collap-creds-body').style.display === '' && typeof window._initUserbotCollaps === 'function') {
+                // si aún no se aplicó (p.ej. primera visita sin prefs), aplicar defaults google/enrich/behavior colapsados
+                var credsFilled = false;
+                try {
+                    var a = document.getElementById('userbot-api-id');
+                    credsFilled = !!(a && a.getAttribute('data-real'));
+                } catch(e){}
+                window._initUserbotCollaps(credsFilled);
+            }
+        }, 300);
+    }
 }
 
 window.switchSettingsTab = switchSettingsTab;
+
+window._settingsDirty = false;
+(function(){
+  function markDirty(e){
+    var m=document.getElementById('settings-modal');
+    if(!m||m.classList.contains('hidden')) return;
+    var t=e.target;
+    if(t && t.closest && t.closest('#settings-modal')) window._settingsDirty=true;
+    else if(t && t.id && document.getElementById('settings-modal').contains(t)) window._settingsDirty=true;
+  }
+  document.addEventListener('input', markDirty, true);
+  document.addEventListener('change', markDirty, true);
+  document.addEventListener('click', function(e){
+    var t=e.target;
+    if(t && t.closest && t.closest('#settings-modal .avatar-preset-item, #settings-modal .color-preset-item')) window._settingsDirty=true;
+  }, true);
+})();
 
 // --- Userbot Session List ---
 var _userbotVisible = false;
@@ -454,6 +558,9 @@ function loadUserbotConfig() {
                     }
                 };
             }
+            // colapsables: creds colapsado si rellenas, expandido si vacío
+            var filled = !!(config.telegram_api_id && config.telegram_api_hash);
+            if (window._initUserbotCollaps) window._initUserbotCollaps(filled);
         }
     });
 
@@ -463,6 +570,13 @@ function loadUserbotConfig() {
             var interval = settings.jit_cover_interval || '1.0';
             var sel = document.getElementById('setting-jit-cover-interval');
             if (sel) sel.value = interval;
+            var cli = settings.telegram_client_type || 'telethon';
+            var csel = document.getElementById('setting-telegram-client');
+            if (csel) csel.value = cli;
+            var tpm = document.getElementById('setting-tg-throttle-per-minute');
+            if (tpm) tpm.value = settings.tg_throttle_per_minute || '20';
+            var tbu = document.getElementById('setting-tg-throttle-burst');
+            if (tbu) tbu.value = settings.tg_throttle_burst || '5';
         }
     });
 
@@ -536,64 +650,190 @@ function loadUserbotConfig() {
                 badge('comicvine', 'enrich-comicvine-key');
                 // Plantillas de cover
                 var tpls = cfg.templates || {};
-                var fallbackEl = document.getElementById('enrich-tpl-fallback');
-                if (fallbackEl) fallbackEl.value = tpls.fallback || '';
-                renderEnrichTemplates(tpls.categories || {});
+                renderEnrichTemplates(tpls);
+                window._enricherLoaded = true;
+                // Comportamiento
+                var beh = cfg.behavior || {};
+                var autoEl = document.getElementById('enrich-auto-scan');
+                var overEl = document.getElementById('enrich-overwrite');
+                if (autoEl) autoEl.checked = !!beh.auto_scan;
+                if (overEl) overEl.checked = !!beh.overwrite;
+
             }
         });
     };
 
-    function renderEnrichTemplates(cats) {
-        var list = document.getElementById('enrich-tpl-list');
-        if (!list) return;
-        var keys = Object.keys(cats || {}).sort();
-        if (!keys.length) { list.innerHTML = '<div style="font-size:0.7rem;color:var(--text-secondary);">Sin plantillas específicas</div>'; return; }
-        var html = '';
-        for (var i = 0; i < keys.length; i++) {
-            html += '<div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:4px;">' +
-                '<span style="font-size:0.7rem;color:var(--accent);min-width:90px;padding-top:6px;word-break:break-word;">' + keys[i] + '</span>' +
-                '<textarea data-tpl-key="' + keys[i] + '" rows="3" style="flex:1;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-size:0.75rem;box-sizing:border-box;resize:vertical;">' + (cats[keys[i]] || '') + '</textarea>' +
-                '<button class="btn-secondary" onclick="removeEnrichTemplate(this)" style="padding:4px 8px;font-size:0.75rem;" title="Quitar">&times;</button>' +
-                '</div>';
+    window._enricherTplCache = { fallback: '', templates: [] };
+
+    function renderEnrichTemplates(tpls) {
+        tpls = tpls || {};
+        // Normalizar a nuevo formato: si viene antiguo categories dict, migrar a templates[]
+        var list = tpls.templates || [];
+        if ((!list || !list.length) && tpls.categories) {
+            var oldCats = tpls.categories || {};
+            list = [];
+            for (var k in oldCats) {
+                var parts = k.split('|');
+                list.push({ name: k, categories: parts[0] || '', subcategories: parts[1] || '', content: oldCats[k] || '' });
+            }
         }
-        list.innerHTML = html;
+        window._enricherTplCache = { fallback: tpls.fallback || '', templates: list };
+        var sel = document.getElementById('enrich-tpl-select');
+        if (!sel) return;
+        sel.innerHTML = '';
+        var optAll = document.createElement('option'); optAll.value = '__fallback__'; optAll.textContent = '— Fallback (Default) —'; sel.appendChild(optAll);
+        for (var i = 0; i < list.length; i++) {
+            var o = document.createElement('option'); o.value = String(i); o.textContent = list[i].name || ('Plantilla ' + (i+1));
+            sel.appendChild(o);
+        }
+        if (list.length === 0) {
+            sel.value = '__fallback__';
+            onEnricherTplSelect();
+        } else {
+            sel.value = '0';
+            onEnricherTplSelect();
+        }
     }
 
-    window.addEnrichTemplate = function() {
-        var keyEl = document.getElementById('enrich-tpl-key');
-        var list = document.getElementById('enrich-tpl-list');
-        if (!keyEl || !list) return;
-        var key = (keyEl.value || '').trim();
-        if (!key) return;
-        keyEl.value = '';
-        // Evitar duplicados: reutilizar textarea existente
-        var existing = list.querySelector('textarea[data-tpl-key="' + key + '"]');
-        if (existing) { existing.focus(); return; }
-        var div = document.createElement('div');
-        div.style.cssText = 'display:flex;gap:6px;align-items:flex-start;margin-bottom:4px;';
-        div.innerHTML =
-            '<span style="font-size:0.7rem;color:var(--accent);min-width:90px;padding-top:6px;word-break:break-word;">' + key + '</span>' +
-            '<textarea data-tpl-key="' + key + '" rows="3" style="flex:1;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-size:0.75rem;box-sizing:border-box;resize:vertical;"></textarea>' +
-            '<button class="btn-secondary" onclick="removeEnrichTemplate(this)" style="padding:4px 8px;font-size:0.75rem;" title="Quitar">&times;</button>';
-        list.appendChild(div);
-        list.querySelector('textarea[data-tpl-key="' + key + '"]').focus();
+    window.onEnricherTplSelect = function() {
+        var sel = document.getElementById('enrich-tpl-select');
+        var nameEl = document.getElementById('enrich-tpl-name');
+        var catsEl = document.getElementById('enrich-tpl-cats');
+        var subsEl = document.getElementById('enrich-tpl-subs');
+        var contEl = document.getElementById('enrich-tpl-content');
+        if (!sel || !nameEl || !catsEl || !subsEl || !contEl) return;
+        var v = sel.value;
+        if (v === '__fallback__' || v === '') {
+            nameEl.value = 'Fallback'; nameEl.disabled = true;
+            catsEl.value = ''; catsEl.disabled = true;
+            subsEl.value = ''; subsEl.disabled = true;
+            contEl.value = window._enricherTplCache.fallback || '';
+        } else {
+            var idx = parseInt(v, 10);
+            var tpl = window._enricherTplCache.templates[idx];
+            if (!tpl) return;
+            nameEl.disabled = false; catsEl.disabled = false; subsEl.disabled = false;
+            nameEl.value = tpl.name || '';
+            catsEl.value = tpl.categories || '';
+            subsEl.value = tpl.subcategories || '';
+            contEl.value = tpl.content || '';
+        }
     };
 
-    window.removeEnrichTemplate = function(btn) {
-        var row = btn.parentElement;
-        if (row && row.parentElement) row.parentElement.removeChild(row);
+    window.addEnricherTemplateNew = function() {
+        var sel = document.getElementById('enrich-tpl-select');
+        if (!sel) return;
+        document.getElementById('enrich-tpl-name').value = '';
+        document.getElementById('enrich-tpl-cats').value = '';
+        document.getElementById('enrich-tpl-subs').value = '';
+        document.getElementById('enrich-tpl-content').value = '';
+        sel.value = '';
+        document.getElementById('enrich-tpl-name').disabled = false;
+        document.getElementById('enrich-tpl-cats').disabled = false;
+        document.getElementById('enrich-tpl-subs').disabled = false;
+        document.getElementById('enrich-tpl-name').focus();
     };
+
+    window.saveEnricherTemplate = function() {
+        var sel = document.getElementById('enrich-tpl-select');
+        var nameEl = document.getElementById('enrich-tpl-name');
+        var catsEl = document.getElementById('enrich-tpl-cats');
+        var subsEl = document.getElementById('enrich-tpl-subs');
+        var contEl = document.getElementById('enrich-tpl-content');
+        if (!sel || !nameEl || !contEl) return;
+        var isFallback = sel.value === '__fallback__';
+        if (isFallback) {
+            window._enricherTplCache.fallback = contEl.value || '';
+            persistEnrichTemplatesNow();
+            return;
+        }
+        var idx = parseInt(sel.value, 10);
+        var isNew = isNaN(idx) || sel.value === '' || !window._enricherTplCache.templates[idx];
+        var name = (nameEl.value || '').trim();
+        if (!name) { alert('Pon un nombre a la plantilla'); nameEl.focus(); return; }
+        // Duplicado de nombre (excepto el mismo índice)
+        for (var i = 0; i < window._enricherTplCache.templates.length; i++) {
+            if (i !== idx && (window._enricherTplCache.templates[i].name || '').toLowerCase() === name.toLowerCase()) {
+                alert('Ya existe una plantilla con ese nombre'); return;
+            }
+        }
+        var entry = { name: name, categories: (catsEl.value || '').trim(), subcategories: (subsEl.value || '').trim(), content: contEl.value || '' };
+        if (isNew) {
+            window._enricherTplCache.templates.push(entry);
+            renderEnrichTemplates(window._enricherTplCache);
+            sel.value = String(window._enricherTplCache.templates.length - 1);
+        } else {
+            window._enricherTplCache.templates[idx] = entry;
+            renderEnrichTemplates(window._enricherTplCache);
+            sel.value = String(idx);
+        }
+        onEnricherTplSelect();
+        persistEnrichTemplatesNow();
+    };
+
+    // Persiste las plantillas actuales al servidor de inmediato (sin alertas intermedias)
+    function persistEnrichTemplatesNow() {
+        var st = document.getElementById('enrich-config-status');
+        if (st) st.textContent = 'Guardando...';
+        window.API.ajax({
+            method: 'POST',
+            url: '/api/enrich/config',
+            data: { templates: collectEnrichTemplates() },
+            success: function() { if (st) { st.textContent = 'Guardado ✓'; setTimeout(function() { if (st) st.textContent = ''; }, 2000); } },
+            error: function() { if (st) st.textContent = 'Error al guardar'; }
+        });
+    }
+    window.persistEnrichTemplatesNow = persistEnrichTemplatesNow;
+
+    window.deleteEnricherTemplate = function() {
+        var sel = document.getElementById('enrich-tpl-select');
+        if (!sel || sel.value === '__fallback__' || sel.value === '') { alert('Selecciona una plantilla específica para eliminarla'); return; }
+        var idx = parseInt(sel.value, 10);
+        if (isNaN(idx)) return;
+        if (!confirm('¿Eliminar la plantilla "' + (window._enricherTplCache.templates[idx].name || '') + '"?')) return;
+        window._enricherTplCache.templates.splice(idx, 1);
+        renderEnrichTemplates(window._enricherTplCache);
+    };
+
+    // Compatibilidad: los antiguos addEnrichTemplate/remove usan el combo nuevo
+    window.addEnrichTemplate = function() { window.addEnricherTemplateNew(); };
+    window.removeEnrichTemplate = function() { window.deleteEnricherTemplate(); };
 
     function collectEnrichTemplates() {
-        var tpls = { fallback: (document.getElementById('enrich-tpl-fallback') || {}).value || '', categories: {} };
-        var list = document.getElementById('enrich-tpl-list');
-        if (!list) return tpls;
-        var rows = list.querySelectorAll('textarea[data-tpl-key]');
-        for (var i = 0; i < rows.length; i++) {
-            var k = rows[i].getAttribute('data-tpl-key');
-            if (k) tpls.categories[k] = rows[i].value;
+        // Recoge fallback + templates[] desde el cache (ya incluye ediciones no guardadas del formulario actual si se pulsó Guardar plantilla)
+        // Si el usuario editó el formulario pero no pulsó Guardar plantilla, volcar el formulario actual como plantilla temporal
+        var fallback = window._enricherTplCache.fallback || '';
+        var templates = (window._enricherTplCache.templates || []).slice();
+        // Si hay una edición en curso en el formulario y no coincide con el cache, incluirla
+        var sel = document.getElementById('enrich-tpl-select');
+        var nameEl = document.getElementById('enrich-tpl-name');
+        var catsEl = document.getElementById('enrich-tpl-cats');
+        var subsEl = document.getElementById('enrich-tpl-subs');
+        var contEl = document.getElementById('enrich-tpl-content');
+        if (sel && sel.value !== '__fallback__' && nameEl && contEl) {
+            var curName = (nameEl.value || '').trim();
+            var curContent = contEl.value || '';
+            if (curName && curContent) {
+                var idx = parseInt(sel.value, 10);
+                var curEntry = { name: curName, categories: (catsEl.value||'').trim(), subcategories: (subsEl.value||'').trim(), content: curContent };
+                if (isNaN(idx) || !templates[idx] || templates[idx].name !== curName) {
+                    // No guardada aún, pero la incluimos para no perderla al pulsar Guardar enriquecedor
+                    var found = false;
+                    for (var k=0;k<templates.length;k++) if (templates[k].name===curName) { templates[k]=curEntry; found=true; break; }
+                    if (!found) templates.push(curEntry);
+                } else {
+                    templates[idx] = curEntry;
+                }
+            }
         }
-        return tpls;
+        // Fallback y compatibilidad con formato antiguo (categories dict) para el backend
+        var legacyCats = {};
+        for (var t=0; t<templates.length; t++) {
+            var tpl = templates[t];
+            var key = (tpl.categories || '').split(';')[0] || '';
+            if (key) legacyCats[key.trim()] = tpl.content || '';
+        }
+        return { fallback: fallback, templates: templates, categories: legacyCats };
     }
 
     // Guardar configuración del enriquecedor (admin)
@@ -621,6 +861,85 @@ function loadUserbotConfig() {
             error: function() { if (st) st.textContent = 'Error al guardar'; }
         });
     };
+    window.saveEnrichBehavior = function() {
+        var autoEl = document.getElementById('enrich-auto-scan');
+        var overEl = document.getElementById('enrich-overwrite');
+        var st = document.getElementById('enrich-behavior-status');
+        var beh = { auto_scan: !!(autoEl && autoEl.checked), overwrite: !!(overEl && overEl.checked) };
+        if (st) st.textContent = 'Guardando...';
+        window.API.ajax({
+            method: 'POST',
+            url: '/api/enrich/config',
+            data: { behavior: beh },
+            success: function(r){ if(st) st.textContent='Guardado ✓'; setTimeout(function(){ if(st) st.textContent=''; },2000); },
+            error: function(){ if(st) st.textContent='Error'; }
+        });
+    };
+
+    window.loadFtags = function() {
+        var sel = document.getElementById('ftag-tag-select');
+        var input = document.getElementById('ftag-template');
+        if (!sel || !input) return;
+        window.API.ajax({
+            url: '/api/enricher/ftags',
+            success: function(data) {
+                var ftags = data.ftags || data || {};
+                var keys = Object.keys(ftags).sort();
+                var defaults = ["tagtitle","title","year","release_year","rating","rating_count","genres","generos","themes","temas","author","autor","director","release_date","fecha","category","categoria","id","cover","episodes","ext","extension","description","sinopsis","overview","originalmsg"];
+                for (var i=0;i<defaults.length;i++) if (keys.indexOf(defaults[i])===-1) keys.push(defaults[i]);
+                keys.sort();
+                sel.innerHTML = '';
+                for (var k=0;k<keys.length;k++){
+                    var o=document.createElement('option'); o.value=keys[k]; o.textContent='{' + keys[k] + '} → {f' + keys[k] + '}';
+                    sel.appendChild(o);
+                }
+                if (keys.length) { sel.value=keys[0]; window.onFtagSelect(); }
+            },
+            error: function(){
+                var defaults = ["tagtitle","title","year","rating","genres","author","description","originalmsg"];
+                sel.innerHTML = '';
+                for (var k=0;k<defaults.length;k++){
+                    var o=document.createElement('option'); o.value=defaults[k]; o.textContent='{' + defaults[k] + '} → {f' + defaults[k] + '}';
+                    sel.appendChild(o);
+                }
+            }
+        });
+    };
+    window.onFtagSelect = function() {
+        var sel = document.getElementById('ftag-tag-select');
+        var input = document.getElementById('ftag-template');
+        var status = document.getElementById('ftag-status');
+        if (!sel || !input) return;
+        var tag = sel.value;
+        window.API.ajax({
+            url: '/api/enricher/ftags',
+            success: function(data){
+                var ftags = data.ftags || data || {};
+                input.value = ftags[tag] || '';
+                if (status) status.textContent='';
+            }
+        });
+    };
+    window.saveFtag = function() {
+        var sel = document.getElementById('ftag-tag-select');
+        var input = document.getElementById('ftag-template');
+        var status = document.getElementById('ftag-status');
+        if (!sel || !input) return;
+        var tag = sel.value;
+        var tpl = input.value;
+        if (!tag) return;
+        if (status) status.textContent='Guardando...';
+        window.API.ajax({
+            method: 'POST',
+            url: '/api/enricher/ftags',
+            data: { tag: tag, template: tpl },
+            success: function(){ if(status) status.textContent='Guardado ✓'; setTimeout(function(){ if(status) status.textContent=''; },2000); },
+            error: function(){ if(status) status.textContent='Error al guardar'; }
+        });
+    };
+
+
+
 
     // Cargar usuarios Telegram + sesiones
     window.loadUserbotSessions = function() {
@@ -631,40 +950,30 @@ function loadUserbotConfig() {
         var html = '';
         for (var u = 0; u < users.length; u++) {
             var user = users[u];
-            var checked = user.is_default ? '\u25CB' : '\u25C9';
+            var checked = user.is_default ? '\u25C9' : '\u25CB';
             html += '<div class="plugin-item" style="flex-wrap:wrap;margin-top:8px;" data-tg="' + user.tg_user_id + '">' +
                 '<div style="flex:1;display:flex;align-items:center;gap:8px;min-width:0;">' +
                 '<span class="user-radio" onclick="toggleDefaultUser(' + user.tg_user_id + ')" ' +
-                'style="cursor:pointer;font-size:1.2rem;user-select:none;width:1.2rem;text-align:center;color:var(--accent);">' + checked + '</span>' +
+                'style="cursor:pointer;font-size:1.2rem;user-select:none;width:1.2rem;text-align:center;color:var(--accent);" title="Marcar como principal">' + checked + '</span>' +
                 '<span class="user-name" style="font-weight:600;">' + user.name + '</span>' +
                 '</div>' +
-                '<div style="display:flex;align-items:center;gap:4px;margin-left:auto;">' +
+                '<div style="display:flex;align-items:center;gap:6px;margin-left:auto;">' +
                 '<span class="test-t" id="test-t-' + user.tg_user_id + '" style="font-size:0.8rem;color:var(--text-secondary);font-family:monospace;display:none;"></span>' +
                 '<span class="test-p" id="test-p-' + user.tg_user_id + '" style="font-size:0.8rem;color:var(--text-secondary);font-family:monospace;display:none;"></span>' +
                 '<button class="plugin-config-btn" onclick="testUserSessions(' + user.tg_user_id + ')" title="Probar">\u25B6</button>' +
-                '<button class="plugin-config-btn" onclick="editUserSessions(' + user.tg_user_id + ')" title="Editar sesiones">\u270E</button>' +
+                '<button class="plugin-config-btn" onclick="editUserSessions(' + user.tg_user_id + ')" title="Editar nombre">\u270E</button>' +
                 '<button class="plugin-config-btn" onclick="deleteTelegramUser(' + user.tg_user_id + ')" title="Eliminar usuario" style="color:var(--accent);">\u2715</button>' +
                 '</div></div>';
-
-            // Sub-info: selector cliente activo + sesiones
-            html += '<div style="padding:2px 12px 4px 40px;display:flex;align-items:center;gap:12px;font-size:0.75rem;color:var(--text-secondary);">' +
-                'Cliente: ' +
-                '<select onchange="setActiveClient(' + user.tg_user_id + ', this.value)" ' +
-                'style="background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:1px 4px;font-size:0.75rem;">' +
-                '<option value="telethon"' + (user.active_client === 'telethon' ? ' selected' : '') + '>Telethon</option>' +
-                '<option value="pyrogram"' + (user.active_client === 'pyrogram' ? ' selected' : '') + '>Pyrogram</option>' +
-                '</select>';
-            var sessList = user.sessions || [];
-            for (var j = 0; j < sessList.length; j++) {
-                var sess = sessList[j];
-                html += ' &middot; ' + sess.name +
-                    ' <button class="plugin-config-btn" onclick="editSession(' + sess.id + ')" title="Editar" style="font-size:0.7rem;padding:0 4px;">\u270E</button>' +
-                    ' <button class="plugin-config-btn" onclick="deleteSession(' + sess.id + ')" title="Eliminar" style="font-size:0.7rem;padding:0 4px;color:var(--accent);">\u2715</button>';
-            }
-            html += '</div>';
         }
-        if (!html) html = '<p style="color:var(--text-secondary);font-size:0.85rem;">Sin usuarios Telegram. Crea una sesi\u00F3n primero.</p>';
+        if (!html) html = '<p style="color:var(--text-secondary);font-size:0.85rem;">Sin usuarios Telegram. Crea una sesi\u00F3n dual.</p>';
         container.innerHTML = html;
+        // actualizar colapsable sesiones: expandida si 0, colapsada si hay
+        try {
+            var pref = localStorage.getItem('tvcat_userbot_collap_sessions');
+            if (pref === null) {
+                window._applyUserbotCollap('sessions', users.length > 0);
+            }
+        } catch(e) {}
     }
 
     window.API.ajax({
@@ -747,14 +1056,70 @@ window.toggleUserbotVisibility = function() {
     });
 };
 
+// --- Colapsables Userbot ---
+window.toggleUserbotCollap = function(name) {
+    var body = document.getElementById('collap-' + name + '-body');
+    var ind = document.getElementById('collap-' + name + '-ind');
+    if (!body) return;
+    var isHidden = body.style.display === 'none';
+    body.style.display = isHidden ? '' : 'none';
+    if (ind) ind.style.transform = isHidden ? '' : 'rotate(-90deg)';
+    try { localStorage.setItem('tvcat_userbot_collap_' + name, isHidden ? '0' : '1'); } catch(e) {}
+};
+window._applyUserbotCollap = function(name, collapsed) {
+    var body = document.getElementById('collap-' + name + '-body');
+    var ind = document.getElementById('collap-' + name + '-ind');
+    if (!body) return;
+    body.style.display = collapsed ? 'none' : '';
+    if (ind) ind.style.transform = collapsed ? 'rotate(-90deg)' : '';
+};
+window._initUserbotCollaps = function(credsFilled) {
+    // creds: colapsado si rellenas, expandido si vacías (si no hay preferencia guardada)
+    var credsPref = null; try { credsPref = localStorage.getItem('tvcat_userbot_collap_creds'); } catch(e) {}
+    if (credsPref === null) {
+        window._applyUserbotCollap('creds', !!credsFilled);
+    } else {
+        window._applyUserbotCollap('creds', credsPref === '1');
+    }
+    // sessions: expandida si no hay sesiones, colapsada si hay al menos 1 (si no hay pref)
+    var sessPref = null; try { sessPref = localStorage.getItem('tvcat_userbot_collap_sessions'); } catch(e) {}
+    if (sessPref === null) {
+        // se decidirá tras cargar usuarios; por ahora expandida
+        window._applyUserbotCollap('sessions', false);
+    } else {
+        window._applyUserbotCollap('sessions', sessPref === '1');
+    }
+    // behavior, enrich, enrich-behavior, google: colapsados por defecto (google siempre oculto)
+    ['behavior','enrich','enrich-behavior','google'].forEach(function(n){
+        var pref = null; try { pref = localStorage.getItem('tvcat_userbot_collap_' + n); } catch(e) {}
+        if (pref === null) {
+            window._applyUserbotCollap(n, true);
+        } else {
+            window._applyUserbotCollap(n, pref === '1');
+        }
+    });
+};
+
 window.saveTelegramSettings = function() {
     var interval = document.getElementById('setting-jit-cover-interval');
-    if (!interval) return;
+    var client = document.getElementById('setting-telegram-client');
+    var tpm = document.getElementById('setting-tg-throttle-per-minute');
+    var tbu = document.getElementById('setting-tg-throttle-burst');
+    var st = document.getElementById('telegram-behavior-status');
+    var data = {};
+    if (interval) data.jit_cover_interval = interval.value;
+    if (client) data.telegram_client_type = client.value;
+    if (tpm) data.tg_throttle_per_minute = String(Math.max(5, Math.min(120, parseInt(tpm.value, 10) || 20)));
+    if (tbu) data.tg_throttle_burst = String(Math.max(1, Math.min(30, parseInt(tbu.value, 10) || 5)));
+    if (!Object.keys(data).length) return;
     window.API.ajax({
         method: 'POST',
         url: '/api/settings',
-        data: { jit_cover_interval: interval.value },
-        success: function() { console.log('Settings guardados'); }
+        data: data,
+        success: function() {
+            if (st) { st.textContent = '✓ Guardado'; setTimeout(function(){ if(st) st.textContent=''; }, 2000); }
+        },
+        error: function(){ if(st) st.textContent = '✗ Error'; }
     });
 };
 
@@ -975,21 +1340,25 @@ window.testUserSessions = function(tgUserId) {
 
 window.editUserSessions = function(tgUserId) {
     window.API.ajax({
-        url: '/api/userbot/sessions',
+        url: '/api/telegram/users',
         success: function(data) {
-            var sessions = data.sessions || [];
-            var userSessions = [];
-            for (var i = 0; i < sessions.length; i++) {
-                if (sessions[i].tg_user_id === tgUserId) {
-                    userSessions.push(sessions[i]);
+            var users = data.users || [];
+            var user = null;
+            for (var i = 0; i < users.length; i++) if (users[i].tg_user_id == tgUserId) { user = users[i]; break; }
+            if (!user) { alert('Usuario no encontrado.'); return; }
+            var newName = prompt('Nuevo nombre para "' + user.name + '":', user.name);
+            if (newName === null) return;
+            newName = newName.trim();
+            if (!newName || newName === user.name) return;
+            window.API.ajax({
+                method: 'PUT',
+                url: '/api/telegram/users/' + tgUserId,
+                data: { name: newName },
+                success: function(res) {
+                    if (res && res.success) loadUserbotSessions();
+                    else alert('Error al renombrar');
                 }
-            }
-            if (userSessions.length === 0) { alert('No hay sesiones para este usuario.'); return; }
-            var msg = userSessions.map(function(s) {
-                return s.id + ' - ' + s.name + ' (' + s.client_type + ')';
-            }).join('\n');
-            var sessId = prompt('Introduce el ID de la sesion a editar:\n' + msg);
-            if (sessId) editSession(parseInt(sessId));
+            });
         }
     });
 };
@@ -1388,6 +1757,9 @@ function loadPluginsList() {
     });
 }
 
+
+
+
 function renderPluginList(container, plugins) {
     // Agrupar por secci\u00F3n
     var sections = {};
@@ -1418,7 +1790,7 @@ function renderPluginList(container, plugins) {
                 var isOn = p.enabled;
                 html += '<div class="plugin-item" draggable="true" data-name="' + p.name + '">' +
                     '<span class="plugin-drag-handle">\u2630\u2630</span>' +
-                    pluginIconHtml(p, 20) +
+                    pluginIconHtml(p, 25) +
                     '<div class="plugin-item-name">' + (p.displayName || p.name) + '</div>' +
                     '<div class="plugin-item-status">' +
                     '<button class="plugin-info-btn" onclick="event.stopPropagation();showPluginInfo(\'' + p.name + '\')" title="Informaci\u00F3n">\u2139\uFE0F</button>' +
@@ -1435,7 +1807,7 @@ function renderPluginList(container, plugins) {
             var hasError = !!p.load_error;
             html += '<div class="plugin-item" draggable="true" data-name="' + p.name + '">' +
                 '<span class="plugin-drag-handle">\u2630\u2630</span>' +
-                pluginIconHtml(p, 20) +
+                pluginIconHtml(p, 25) +
                 '<div class="plugin-item-name">' + (p.displayName || p.name) + '</div>' +
                 '<div class="plugin-item-status">' +
                 '<button class="plugin-info-btn" onclick="event.stopPropagation();showPluginInfo(\'' + p.name + '\')" title="Informaci\u00F3n">\u2139\uFE0F</button>' +
@@ -2742,8 +3114,76 @@ window.showPluginInfo = function(name) {
         html += '</div>';
     }
 
+    // Condiciones de aparición en Hero (genérico para player/heropage-action sin settings_ui propio).
+    // PS3/3DS/Enriquecedor ya la llevan dentro de su iframe, no duplicar.
+    if ((plugin.type === 'player' || plugin.type === 'heropage-action') && !plugin.settings_ui) {
+        html += '<div id="hero-cats-card" style="margin-top:12px;border:1px solid var(--border-color);border-radius:8px;overflow:hidden;">' +
+            '<div onclick="toggleHeroCatsCard()" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;background:var(--bg-card);user-select:none;">' +
+            '<b style="font-size:0.85rem;">Condiciones de aparición en Hero</b>' +
+            '<span id="hero-cats-ind" style="font-size:10px;transition:transform 0.2s;">▼</span></div>' +
+            '<div id="hero-cats-body" style="padding:10px 12px;">' +
+            '<div style="color:#a1a1aa;font-size:12px;margin-bottom:8px;">El botón aparece si categoría o subcategoría coinciden (saneado, minúsculas). Use <code>*</code> para cualquier. Separe con <code>;</code> o salto.</div>' +
+            '<label style="display:block;margin-bottom:8px;"><span style="display:block;color:#a1a1aa;font-size:12px;margin-bottom:3px;">Categorías (ej: media; multimedia)</span>' +
+            '<textarea id="hero-cats" rows="2" placeholder="media; multimedia" style="width:100%;box-sizing:border-box;background:#0d0d0f;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;padding:8px;font-size:13px;resize:vertical;"></textarea></label>' +
+            '<label style="display:block;margin-bottom:8px;"><span style="display:block;color:#a1a1aa;font-size:12px;margin-bottom:3px;">Subcategorías (ej: series; anime)</span>' +
+            '<textarea id="hero-subs" rows="2" placeholder="series; video; anime" style="width:100%;box-sizing:border-box;background:#0d0d0f;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;padding:8px;font-size:13px;resize:vertical;"></textarea></label>' +
+            '<div style="display:flex;gap:8px;align-items:center;">' +
+            '<button onclick="saveHeroCats(\'' + plugin.name + '\')" style="padding:8px 14px;border:none;border-radius:6px;background:#e11d48;color:#fff;cursor:pointer;font-size:13px;">Guardar condiciones</button>' +
+            '<span id="hero-cats-status" style="color:#a1a1aa;font-size:12px;"></span></div>' +
+            '</div></div>';
+    }
+
     html += '</div>';
     container.innerHTML = html;
+    if ((plugin.type === 'player' || plugin.type === 'heropage-action') && !plugin.settings_ui) {
+        loadHeroCats(plugin.name);
+    }
+};
+
+window.toggleHeroCatsCard = function() {
+    var body = document.getElementById('hero-cats-body');
+    var ind = document.getElementById('hero-cats-ind');
+    if (!body) return;
+    var hidden = body.style.display === 'none';
+    body.style.display = hidden ? '' : 'none';
+    if (ind) ind.style.transform = hidden ? '' : 'rotate(-90deg)';
+};
+
+window.loadHeroCats = function(name) {
+    window.API.ajax({
+        url: '/api/plugin/' + encodeURIComponent(name) + '/cats',
+        success: function(res) {
+            var catsEl = document.getElementById('hero-cats');
+            var subsEl = document.getElementById('hero-subs');
+            if (!catsEl || !subsEl || !res) return;
+            if (res.raw_categories !== undefined) catsEl.value = res.raw_categories;
+            if (res.raw_subcategories !== undefined) subsEl.value = res.raw_subcategories;
+            var hasCats = res.raw_categories && res.raw_categories.trim().length > 0;
+            var hasSubs = res.raw_subcategories && res.raw_subcategories.trim().length > 0;
+            var body = document.getElementById('hero-cats-body');
+            var ind = document.getElementById('hero-cats-ind');
+            if (body) body.style.display = (hasCats || hasSubs) ? 'none' : '';
+            if (ind) ind.style.transform = (hasCats || hasSubs) ? 'rotate(-90deg)' : '';
+        }
+    });
+};
+
+window.saveHeroCats = function(name) {
+    var catsEl = document.getElementById('hero-cats');
+    var subsEl = document.getElementById('hero-subs');
+    var st = document.getElementById('hero-cats-status');
+    if (st) st.textContent = 'Guardando...';
+    window.API.ajax({
+        method: 'POST',
+        url: '/api/plugin/' + encodeURIComponent(name) + '/cats',
+        data: { categories: catsEl ? catsEl.value : '', subcategories: subsEl ? subsEl.value : '' },
+        success: function(res) {
+            if (st) st.textContent = res && res.ok ? 'Guardado ✓' : 'Error';
+            setTimeout(function() { if (st) st.textContent = ''; }, 2000);
+            try { if (window.Catalog && window.Catalog.loadPluginCats) window.Catalog.loadPluginCats(); } catch (e) {}
+        },
+        error: function() { if (st) st.textContent = 'Error'; }
+    });
 };
 
 window.savePluginSettings = function(pluginName) {
@@ -2919,8 +3359,12 @@ function loadAdminUsers() {
                                 sel += '<option value="' + profiles[pj].id + '"' + (u.profile_id === profiles[pj].id ? ' selected' : '') + '>' + profiles[pj].name + '</option>';
                             }
                             sel += '</select>';
+                            var avHtml = '';
+                            if (u.avatar_url) avHtml = '<img src="' + u.avatar_url + '" style="width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1px solid var(--border-color);" onerror="this.style.display=\'none\'">';
+                            else if (u.avatar) avHtml = '<span style="width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;background:' + (u.color || '#27272a') + ';border:1px solid var(--border-color);">' + u.avatar + '</span>';
+                            else avHtml = '<span style="width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-size:12px;background:#27272a;color:#a1a1aa;border:1px solid var(--border-color);">' + (u.username || '?').charAt(0).toUpperCase() + '</span>';
                             html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:var(--bg-surface);border-radius:6px;border:1px solid var(--border-color);">' +
-                                '<div><span ' + roleBadge + '>' + u.username + '</span> <span style="font-size:0.75rem;color:var(--text-secondary);margin-left:6px;">(' + u.role + ')</span></div>' +
+                                '<div style="display:flex;align-items:center;gap:8px;min-width:0;">' + avHtml + '<span ' + roleBadge + '>' + u.username + '</span> <span style="font-size:0.75rem;color:var(--text-secondary);margin-left:2px;">(' + u.role + ')</span></div>' +
                                 '<div style="display:flex;align-items:center;gap:8px;">' + sel +
                                 (u.role !== 'admin' ? '<button onclick="deleteUser(' + u.id + ',\'' + u.username + '\')" style="padding:4px 10px;border-radius:4px;border:1px solid var(--accent);background:transparent;color:var(--accent);cursor:pointer;font-size:0.8rem;font-family:Outfit,sans-serif;">Eliminar</button>' : '') +
                                 '</div></div>';
@@ -3246,41 +3690,70 @@ window.toggleSubcategoryVis = function(key, cb) {
 function loadMobileConfig() {
     var listEl = document.getElementById('mobile-iface-list');
     if (!listEl) return;
+    var portEl = document.getElementById('mobile-scan-port');
+    var srvPort = (location.port || '8098');
     window.API.ajax({
         url: '/api/network/interfaces',
         success: function(res) {
             var ifaces = res.interfaces || [];
             var pref = res.preferred || '';
             var dns = res.dns_custom || '';
+            var savedPort = res.port || '';
+            var curPort = savedPort || (portEl && portEl.value) || srvPort || '8098';
+            if (portEl) portEl.value = curPort;
             var html = '';
-            for (var i = 0; i < ifaces.length; i++) {
-                var f = ifaces[i];
-                var icon = f.type === 'wifi' ? '\ud83d\udcf6' : '\ud83d\udd0c';
-                html += '<label style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;font-size:0.85rem;">' +
-                    '<input type="radio" name="mobile-ip" value="' + f.ip + '"' + (f.ip === pref ? ' checked' : '') + ' onchange="saveMobilePref(this.value)" style="accent-color:var(--accent);">' +
-                    '<span>' + icon + ' ' + f.name + '</span>' +
-                    '<span style="color:var(--text-secondary);font-size:0.8rem;">' + f.ip + ':8093</span></label>';
+            if (!ifaces.length) {
+                html = '<span style="color:var(--text-secondary);font-size:0.8rem;">No se detectaron interfaces.</span>';
+            } else {
+                for (var i = 0; i < ifaces.length; i++) {
+                    var f = ifaces[i];
+                    var icon = f.type === 'wifi' ? '\ud83d\udcf6' : '\ud83d\udd0c';
+                    html += '<label style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;font-size:0.85rem;">' +
+                        '<input type="radio" name="mobile-ip" value="' + f.ip + '"' + (f.ip === pref ? ' checked' : '') + ' onchange="saveMobilePref(this.value)" style="accent-color:var(--accent);">' +
+                        '<span>' + icon + ' ' + f.name + '</span>' +
+                        '<span style="color:var(--text-secondary);font-size:0.8rem;">' + f.ip + '</span></label>';
+                }
             }
-            listEl.innerHTML = html;
+            if (dns) {
+                var dnsHost = dns.replace(/^https?:\/\//,'').split(':')[0].split('/')[0];
+                var dnsDisplay = dnsHost;
+                var isDnsPref = (pref === dns || pref === dnsHost);
+                html += '<label style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;font-size:0.85rem;border-top:1px solid var(--border-color);margin-top:8px;padding-top:8px;">' +
+                    '<input type="radio" name="mobile-ip" value="' + dnsHost + '"' + (isDnsPref ? ' checked' : '') + ' onchange="saveMobilePref(this.value)" style="accent-color:var(--accent);">' +
+                    '<span>\uD83C\uDF10 DDNS</span><span style="color:var(--text-secondary);font-size:0.8rem;">' + dnsHost + ':' + curPort + '</span></label>';
+            }
+            listEl.innerHTML = html || '<span style="color:var(--text-secondary);font-size:0.8rem;">No se detectaron interfaces.</span>';
             var dnsEl = document.getElementById('mobile-dns-custom');
-            if (dnsEl) dnsEl.value = dns;
+            if (dnsEl) {
+                dnsEl.value = dns;
+                dnsEl.onchange = function(){ saveMobileDns(this.value); };
+            }
             updateMobileQR();
         },
         error: function() {
-            if (listEl) listEl.innerHTML = '<span style="color:var(--text-secondary);">No se detectaron interfaces.</span>';
+            if (listEl) listEl.innerHTML = '<span style="color:var(--text-secondary);font-size:0.8rem;">No se detectaron interfaces.</span>';
+            updateMobileQR();
         }
     });
-    // QR auth toggle
-    var authCb = document.getElementById('mobile-qr-auth');
-    if (authCb) {
-        authCb.checked = localStorage.getItem('tvcat_mobile_qr_auth') === '1';
-        authCb.onchange = function() {
-            localStorage.setItem('tvcat_mobile_qr_auth', authCb.checked ? '1' : '0');
-            updateMobileQR();
-        };
-    }
 }
-
+window.saveMobilePort = function(port) {
+    var p = parseInt(port,10);
+    if (!p || p<1 || p>65535) return;
+    window.API.ajax({
+        method: 'POST',
+        url: '/api/mobile/config',
+        data: { port: String(p) },
+        success: function(){ updateMobileQR(); loadMobileConfig(); }
+    });
+};
+window.saveMobileDns = function(val) {
+    window.API.ajax({
+        method: 'POST',
+        url: '/api/mobile/config',
+        data: { dns_custom: (val||'').trim() },
+        success: function(){ updateMobileQR(); }
+    });
+};
 window.saveMobilePref = function(ip) {
     window.API.ajax({
         method: 'POST',
@@ -3322,19 +3795,24 @@ window.scanNetworkServers = function() {
 window.testMobileDns = function() {
     var dnsEl = document.getElementById('mobile-dns-custom');
     var statusEl = document.getElementById('mobile-dns-status');
+    var portEl = document.getElementById('mobile-scan-port');
     if (!dnsEl) return;
-    var val = dnsEl.value.trim();
-    if (!val) { if (statusEl) statusEl.textContent = 'Introduce una URL'; return; }
-    if (statusEl) statusEl.textContent = 'Probando...';
+    var raw = dnsEl.value.trim();
+    if (!raw) { if (statusEl) statusEl.textContent = 'Introduce una URL'; return; }
+    var host = raw.replace(/^https?:\/\//,'').split(':')[0].split('/')[0].trim();
+    if (!host) { if (statusEl) statusEl.textContent = 'Host inválido'; return; }
+    var port = (portEl && portEl.value) || location.port || '8098';
+    var full = 'http://' + host + ':' + port;
+    if (statusEl) statusEl.textContent = 'Probando ' + full + '...';
     window.API.ajax({
         method: 'POST',
         url: '/api/mobile/config',
-        data: { dns_custom: val },
+        data: { dns_custom: host },
         success: function() {
             window.API.ajax({
                 method: 'POST',
                 url: '/api/mobile/test-dns',
-                data: { url: val },
+                data: { url: full },
                 success: function(res) {
                     if (statusEl) statusEl.textContent = res && res.success ? '\u2705 Conectado' : ('\u274C ' + (res.error || 'No accesible'));
                     updateMobileQR();
@@ -3350,30 +3828,19 @@ function updateMobileQR() {
     var container = document.getElementById('mobile-qr-container');
     if (!container) return;
     var prefRadio = document.querySelector('input[name="mobile-ip"]:checked');
-    var dnsEl = document.getElementById('mobile-dns-custom');
-    var useAuth = document.getElementById('mobile-qr-auth');
-    useAuth = useAuth ? useAuth.checked : false;
-    var base = (dnsEl && dnsEl.value.trim()) ? dnsEl.value.trim().replace(/\/+$/, '') : ('http://' + (prefRadio ? prefRadio.value : '127.0.0.1') + ':8093');
-    if (useAuth) {
-        // Generar token QR
-        window.API.ajax({
-            method: 'POST',
-            url: '/api/auth/qr-token',
-            success: function(res) {
-                if (res && res.token) {
-                    var url = base + '/?t=' + res.token;
-                    container.innerHTML = '<p style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:6px;">' + url + '</p><img src="/api/qr?data=' + encodeURIComponent(url) + '&size=5" style="max-width:200px;border-radius:8px;" alt="QR">';
-                } else {
-                    container.innerHTML = '<img src="/api/qr?data=' + encodeURIComponent(base) + '&size=5" style="max-width:200px;border-radius:8px;" alt="QR">';
-                }
-            },
-            error: function() {
-                container.innerHTML = '<img src="/api/qr?data=' + encodeURIComponent(base) + '&size=5" style="max-width:200px;border-radius:8px;" alt="QR">';
-            }
-        });
+    var curPort = (document.getElementById('mobile-scan-port') && document.getElementById('mobile-scan-port').value) || location.port || '8098';
+    var base = '';
+    if (prefRadio && prefRadio.value) {
+        var v = prefRadio.value.trim();
+        if (v.indexOf('http://')===0 || v.indexOf('https://')===0) {
+            base = v.replace(/\/+$/,'');
+        } else {
+            base = 'http://' + v + ':' + curPort;
+        }
     } else {
-        container.innerHTML = '<p style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:6px;">' + base + '</p><img src="/api/qr?data=' + encodeURIComponent(base) + '" style="max-width:240px;border-radius:8px;" alt="QR">';
+        base = 'http://' + (location.hostname || '127.0.0.1') + ':' + curPort;
     }
+    container.innerHTML = '<p style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:6px;word-break:break-all;">' + base + '</p><img src="/api/qr?data=' + encodeURIComponent(base) + '&size=5" style="max-width:240px;border-radius:8px;" alt="QR">';
 }
 
 window.changePassword = function() {
@@ -3580,6 +4047,32 @@ function dbgUpdate(fields) {
 function globalKeydownHandler(e) {
     var keyCode = e.keyCode || e.which;
     var digit = window.keyMapper ? window.keyMapper.getVirtualDigit(e) : null;
+    // Modo Test del mapeador: iluminar persistente y BLOQUEAR navegación
+    if (window.mandoTestActive && digit !== null) {
+        try {
+            var rawT = String(digit);
+            if (rawT === '0' && !window._mandoZeroDown) {
+                window._mandoZeroDown = true;
+                window._mandoZeroTimer = setTimeout(function(){ if (window.setMandoTest) window.setMandoTest(false); window._mandoZeroDown = false; }, 2000);
+            }
+            var devT = 'keyboard';
+            try { if (window.inputHelper && window.inputHelper.getDeviceType) devT = window.inputHelper.getDeviceType(e); } catch(errT) {}
+            var posT = null;
+            try { if (window.inputHelper && window.inputHelper.digitToPosition) posT = window.inputHelper.digitToPosition(rawT, devT); } catch(errT2) {}
+            if (posT && window._mandoHighlight) window._mandoHighlight(posT, rawT, devT);
+        } catch(errT3) {}
+        try { e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); } catch(errT4) {}
+        try { if (typeof dbgUpdate === 'function') dbgUpdate({ handler: 'BLOQ:test-AJ' }); } catch(errT5) {}
+        return;
+    }
+    // Gracia post-test (1s): el 0 mantenido que sale del test no debe cerrar Ajustes ni navegar
+    try {
+        if (!window.mandoTestActive && window._mandoTestExitAt && (Date.now() - window._mandoTestExitAt < 1000)) {
+            try { e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); } catch(errG) {}
+            try { if (typeof dbgUpdate === 'function') dbgUpdate({ handler: 'BLOQ:post-test' }); } catch(errG2) {}
+            return;
+        }
+    } catch(errG3) {}
     var activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : 'none';
     var focusedEl = document.querySelector('.focused');
     var ctx = window.navEngine ? window.navEngine.getActiveContext() : '?';
@@ -3739,8 +4232,14 @@ function changeSeasonCycle(dir) {
 
 function handleVirtualDigit(digit) {
     var context = window.navEngine.getActiveContext();
-    var isTVLayout = window.keyMapper.getProfileType() === 'custom';
-    var position = getPositionalLetter(digit, isTVLayout);
+    var position = null;
+    if (window.inputHelper) {
+        var r = window.inputHelper.digitToAction(digit, window.inputHelper.getDeviceType());
+        position = r ? r.position : null;
+    } else {
+        var isTVLayout = window.keyMapper.getProfileType() === 'custom';
+        position = getPositionalLetter(digit, isTVLayout);
+    }
     if (!position) return;
 
     if (context === 'player') {
@@ -3885,7 +4384,15 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     function applyPluginOrder(savedOrder, allPlugins) {
-        if (savedOrder.length === 0) return;
+        // Si el usuario no ha guardado un orden, sembrar pluginOrder con el orden actual de
+        // la lista (viene del servidor). Así el selector de reproductores usa el MISMO orden
+        // que la lista de plugins de gestión, de forma estable.
+        if (savedOrder.length === 0) {
+            var seed = [];
+            for (var si = 0; si < allPlugins.length; si++) seed.push(allPlugins[si].name);
+            if (seed.length && window.pluginSystem) window.pluginSystem.setPluginOrder(seed);
+            return;
+        }
         var ordered = [];
         var unordered = [];
         for (var i = 0; i < allPlugins.length; i++) {

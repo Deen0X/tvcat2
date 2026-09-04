@@ -15,7 +15,7 @@
     "cover": "Cover: {value}",
     "episodes": "Episodes: {value}",
     "description": "\nDescription:\n{value}",
-    "sinopsis": "\nSinopsis:\n{value}",
+    "sinopsis": "\\nSinopsis:{value}",
     "overview": "\nOverview:\n{value}"
   }
 }
