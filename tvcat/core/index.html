@@ -44,6 +44,16 @@
             </div>
         </div>
     </header>
+    <!-- Barra de progreso de scans (visible solo durante escaneos) -->
+    <div id="scan-global-bar" class="hidden" style="padding:4px 12px 0 12px;">
+        <div style="display:flex;align-items:center;gap:8px;font-size:0.72rem;color:var(--text-secondary);">
+            <span id="scan-global-text" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">Escaneando...</span>
+            <span id="scan-global-pct" style="flex-shrink:0;">0%</span>
+        </div>
+        <div style="height:3px;background:var(--bg-card);border-radius:2px;overflow:hidden;margin-top:2px;">
+            <div id="scan-global-fill" style="height:100%;width:0%;background:var(--accent);transition:width 0.4s;"></div>
+        </div>
+    </div>
 
     <!-- Sidebar Overlay Background -->
     <div id="side-menu-overlay" class="side-menu-overlay"></div>
@@ -864,7 +874,7 @@
     <script src="js/inputHelper.js?v=20260903q"></script>
     <script src="js/catalog.js?v=20260935m"></script>
     <script src="js/player.js?v=20260801"></script>
-    <script src="js/ui.js?v=20260903s"></script>
-    <script src="js/app.js?v=20260903z"></script>
+    <script src="js/ui.js?v=20260904b"></script>
+    <script src="js/app.js?v=20260904b"></script>
 </body>
 </html>

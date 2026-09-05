@@ -244,6 +244,233 @@ def sync():
     return items_copied, eps_copied
 
 
+def reconcile_availability(ordered_tags):
+    """2026-09-04: orquestación en el PLUGIN (el core solo pone primitivas):
+    wipe total de tgindex en central y copia solo de los tags habilitados, en orden.
+    Sin diffs parciales: imposible dejar restos. Sin registry (ruta directa)."""
+    from services.catalog_service import wipe_plugin_central, sync_plugin_db_copy
+    w = wipe_plugin_central("tvcat_tgindex")
+    if not w.get("success"):
+        return w
+    total_items, total_eps = 0, 0
+    for tag in (ordered_tags or []):
+        refresh_export_source(tag)
+        try:
+            conn = _get_plugin_conn()
+            rows = conn.execute("SELECT item_id FROM unified_catalog WHERE source = ?", (tag,)).fetchall()
+            conn.close()
+        except Exception:
+            continue
+        ids = [r["item_id"] for r in rows if r["item_id"]]
+        if not ids:
+            continue
+        res = sync_plugin_db_copy(PLUGIN_DB, "tvcat_tgindex", ids, True)
+        total_items += res.get("items", 0)
+        total_eps += res.get("episodes", 0)
+    print(f" [TGIndex] Reconcile: {total_items} items, {total_eps} episodios ({len(ordered_tags or [])} sources)")
+    return {"success": True, "items": total_items, "episodes": total_eps}
+
+
+def has_parsed_rows(source_tag):
+    """2026-09-04: True si el source tiene generados en plugin (evita saltar el
+    parse tras un wipe: sin filas hay que parsear aunque no haya mensajes nuevos)."""
+    try:
+        conn = _get_plugin_conn()
+        n = conn.execute("SELECT COUNT(*) FROM unified_catalog WHERE source = ?", (source_tag,)).fetchone()[0]
+        conn.close()
+        return n > 0
+    except Exception:
+        return True
+
+
+def refresh_export_source(source_tag):
+    """2026-09-04: reconstruye las filas de export de un source desde
+    unified/episodes (el export quedaba rancio tras wipes/regens y la copia a
+    central insertaba 0). Mismo mapeo de columnas que sync()."""
+    conn = _get_plugin_conn()
+    c = conn.cursor()
+    try:
+        urows = [dict(r) for r in c.execute("SELECT * FROM unified_catalog WHERE source = ?", (source_tag,)).fetchall()]
+        user_ids = [d["item_id"] for d in urows if d.get("item_id")]
+        int_ids = [str(d["id"]) for d in urows]
+        if user_ids:
+            ph = ",".join("?" * len(user_ids))
+            c.execute(f"DELETE FROM plugin_catalog_export WHERE item_id IN ({ph})", user_ids)
+        if int_ids:
+            phi = ",".join("?" * len(int_ids))
+            c.execute(f"DELETE FROM plugin_episodes_export WHERE item_id IN ({phi})", int_ids)
+        if user_ids:
+            c.execute(f"DELETE FROM plugin_episodes_export WHERE item_id IN ({ph})", user_ids)
+        for d in urows:
+            st = d.get("sync_status") or "active"
+            c.execute("""
+                INSERT INTO plugin_catalog_export
+                (item_id, title, category, subcategory, description, year, rating,
+                 alt_titles, cover_url, telegram_link, telegram_msg_id,
+                 group_title, group_title_flat, season_display,
+                 source, source_channel_id, tg_user_id, client_type,
+                 sync_status, sync_timestamp, extra_json, info_messages)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                d.get("item_id"), d.get("title"), d.get("category", ""), d.get("subcategory", ""),
+                d.get("description", ""), "", d.get("rating", 0),
+                d.get("alt_titles", "[]"), "", d.get("telegram_link"), d.get("telegram_msg_id"),
+                d.get("group_title"), d.get("group_title_flat"), d.get("season_display"),
+                "tvcat_tgindex", d.get("source_channel_id", ""), d.get("tg_user_id"),
+                d.get("client_type", "telethon"), st, 0, "{}",
+                d.get("info_messages", "")
+            ))
+        if int_ids:
+            phi = ",".join("?" * len(int_ids))
+            for erow in c.execute(f"""
+                SELECT e.*, u.sync_status AS _pst FROM item_episodes e
+                JOIN unified_catalog u ON (e.item_id = u.id OR e.item_id = u.item_id)
+                WHERE u.source = ?""", (source_tag,)).fetchall():
+                ed = dict(erow)
+                c.execute("""
+                    INSERT INTO plugin_episodes_export
+                    (id, item_id, episode_number, season_number, title, duration,
+                     telegram_msg_id, telegram_link, file_size, file_name, caption,
+                     tg_user_id, client_type, sync_status, sync_timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    ed.get("id"), ed.get("item_id"), ed.get("episode_number"),
+                    ed.get("season_number", 1), ed.get("title"), ed.get("duration"),
+                    ed.get("telegram_msg_id"), ed.get("telegram_link"),
+                    ed.get("file_size"), ed.get("file_name"), ed.get("caption"),
+                    ed.get("tg_user_id"), ed.get("client_type", "telethon"),
+                    ed.get("_pst") or "active", 0
+                ))
+        conn.commit()
+        return len(urows)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _central_matches(item_ids, active):
+    """Comprueba en central lo que el flag dice: todos presentes (active) o
+    ninguno (deleted). Solo lectura."""
+    try:
+        from services.catalog_service import get_conn as _cc
+        if not item_ids:
+            return True
+        cc = _cc()
+        ph = ",".join("?" * len(item_ids))
+        n = cc.execute(f"SELECT COUNT(*) FROM unified_catalog WHERE item_id IN ({ph})", list(item_ids)).fetchone()[0]
+        cc.close()
+        return (n >= len(item_ids)) if active else (n == 0)
+    except Exception:
+        return False
+
+
+def apply_toggles_incremental(toggles):
+    """Aplica toggles {cid: enabled} sin reconstrucción total (2026-09-04 F1):
+    flags + export acotado por source + alta/baja incremental en central.
+    toggles: dict {str(cid): 0/1}. Devuelve resumen por scan. Sin registry."""
+    from services.catalog_service import sync_plugin_db_copy
+    conn = _get_plugin_conn()
+    c = conn.cursor()
+    _ensure_export_tables(conn)
+    out = {}
+    for cid, enabled in (toggles or {}).items():
+        try:
+            cid = int(cid)
+        except Exception:
+            continue
+        # 2026-09-04: un scan problemático no tumba el lote (antes 500 global).
+        try:
+            active = bool(enabled)
+            status = "active" if active else "deleted"
+            source_tag = f"scan_{cid}"
+            # IDs del source (2026-09-04: el export guarda source='tvcat_tgindex'
+            # siempre, así que se resuelve por unified; episodes usa ids enteros,
+            # export usa item_ids USER-).
+            _urows = c.execute("SELECT id, item_id FROM unified_catalog WHERE source = ?", (source_tag,)).fetchall()
+            _int_ids = [str(r["id"]) for r in _urows]
+            _user_ids = [r["item_id"] for r in _urows if r["item_id"]]
+            # Skip solo si plugin Y central ya reflejan el estado (2026-09-04:
+            # el flag en plugin no garantiza nada en central tras fallos parciales).
+            try:
+                _cur = c.execute("SELECT sync_status FROM unified_catalog WHERE source = ? LIMIT 1", (source_tag,)).fetchone()
+                if _cur and _cur["sync_status"] == status:
+                    _uids = [r["item_id"] for r in c.execute("SELECT item_id FROM unified_catalog WHERE source = ?", (source_tag,)).fetchall() if r["item_id"]]
+                    if _central_matches(_uids, active):
+                        out[cid] = {"enabled": active, "items": 0, "episodes": 0, "success": True, "skipped": True}
+                        continue
+            except Exception:
+                pass
+            try:
+                sys_conn = _get_system_conn()
+                sys_conn.execute("UPDATE tvcat_scanned_channels SET enabled = ? WHERE id = ?", (1 if active else 0, cid))
+                sys_conn.commit()
+                sys_conn.close()
+            except Exception:
+                pass
+            c.execute("UPDATE unified_catalog SET sync_status = ? WHERE source = ?", (status, source_tag))
+            _all_ids = _int_ids + _user_ids
+            if _all_ids:
+                _ph = ",".join("?" * len(_all_ids))
+                c.execute(f"UPDATE item_episodes SET sync_status = ? WHERE item_id IN ({_ph})", [status] + _all_ids)
+            if _user_ids:
+                _ph2 = ",".join("?" * len(_user_ids))
+                c.execute(f"UPDATE plugin_catalog_export SET sync_status = ? WHERE item_id IN ({_ph2})", [status] + _user_ids)
+            if _int_ids:
+                _ph3 = ",".join("?" * len(_int_ids))
+                c.execute(f"UPDATE plugin_episodes_export SET sync_status = ? WHERE item_id IN ({_ph3})", [status] + _int_ids)
+            conn.commit()
+            refresh_export_source(source_tag)
+            res = sync_plugin_db_copy(PLUGIN_DB, "tvcat_tgindex", _user_ids, active)
+            if not res.get("success"):
+                print(f" [TGIndex] toggle scan #{cid} central: {res.get('error')}")
+            out[cid] = {"enabled": active, "items": res.get("items", 0), "episodes": res.get("episodes", 0),
+                        "success": bool(res.get("success")), "error": res.get("error", "")}
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f" [TGIndex] toggle scan #{cid} error: {e}")
+            out[cid] = {"enabled": bool(enabled), "items": 0, "episodes": 0, "success": False, "error": str(e)}
+    conn.commit()
+    conn.close()
+    return out
+
+
+def regenerate_source_items(source_tag):
+    """2026-09-04: Regenerar = borra los GENERADOS de un source (plugin + export +
+    central) para re-parsear desde caché. No toca raws ni Telegram. Devuelve nº items.
+    Por listas explícitas (el export guarda source='tvcat_tgindex', nunca scan_N)."""
+    from services.catalog_service import get_conn as _central_conn
+    conn = _get_plugin_conn()
+    c = conn.cursor()
+    urows = c.execute("SELECT id, item_id FROM unified_catalog WHERE source = ?", (source_tag,)).fetchall()
+    int_ids = [str(r["id"]) for r in urows]
+    user_ids = [r["item_id"] for r in urows if r["item_id"]]
+    if int_ids:
+        phi = ",".join("?" * len(int_ids))
+        c.execute(f"DELETE FROM item_episodes WHERE item_id IN ({phi})", int_ids)
+        c.execute(f"DELETE FROM plugin_episodes_export WHERE item_id IN ({phi})", int_ids)
+    if user_ids:
+        phu = ",".join("?" * len(user_ids))
+        c.execute(f"DELETE FROM plugin_episodes_export WHERE item_id IN ({phu})", user_ids)
+        c.execute(f"DELETE FROM plugin_catalog_export WHERE item_id IN ({phu})", user_ids)
+    c.execute("DELETE FROM unified_catalog WHERE source = ?", (source_tag,))
+    conn.commit()
+    conn.close()
+    if user_ids:
+        try:
+            cc = _central_conn()
+            ph = ",".join("?" * len(user_ids))
+            cc.execute(f"DELETE FROM item_episodes WHERE item_id IN ({ph})", list(user_ids))
+            cc.execute(f"DELETE FROM unified_catalog WHERE item_id IN ({ph})", list(user_ids))
+            cc.commit()
+            cc.close()
+        except Exception as e:
+            print(f" [TGIndex] regenerate central {source_tag}: {e}")
+    return len(user_ids)
+
+
 def refresh_central_cache(context: str = "refresh"):
     """Regenera las tablas de exportación del plugin y avisa al catálogo central
     para que copie los registros activos. El plugin NUNCA escribe en la central:

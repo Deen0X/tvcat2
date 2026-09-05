@@ -2210,7 +2210,7 @@ window.showTgindexConfig = function() {
         '<button class="btn-secondary" onclick="cacheRelayDownloadFull()" style="padding:5px 12px;font-size:0.8rem;">\u2B07 Obtener backup completo</button></div>' +
         '<span id="cache-relay-status" style="font-size:0.8rem;color:var(--text-secondary);"></span></div>' +
 
-        // Secci\u00f3n: Escaneo + Logs
+        // Secci\u00f3n: Escaneo + Logs (2026-09-04 F3: Aplicar unificado, sin Escanear suelto)
         '<div class="settings-section" style="margin-bottom:12px;padding:10px;background:var(--bg-surface);border-radius:8px;border:1px solid var(--border-color);">' +
         '<h4 style="margin:0 0 8px;font-size:0.9rem;">\uD83D\uDEE0\ufe0f Escaneo</h4>' +
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
@@ -2218,7 +2218,7 @@ window.showTgindexConfig = function() {
         '<option value="normal">Normal (solo nuevos)</option>' +
         '<option value="clean">Clean (re-escanear todo)</option>' +
         '<option value="incremental">Incremental</option></select>' +
-        '<button class="btn-primary" onclick="startTgindexScan()" style="padding:6px 14px;font-size:0.85rem;">\u25B6 Escanear ahora</button>' +
+        '<button class="btn-primary" id="tgindex-apply-btn" onclick="applyTgindexFlow(false)" style="padding:6px 14px;font-size:0.85rem;">\u25B6 Aplicar</button>' +
         '<span id="scan-status" style="font-size:0.8rem;color:var(--text-secondary);"></span></div>' +
         '<div id="scan-progress" style="margin-top:6px;height:4px;background:var(--bg-card);border-radius:2px;overflow:hidden;"><div id="scan-progress-bar" style="width:0%;height:100%;background:var(--accent);"></div></div>' +
 
@@ -2230,7 +2230,7 @@ window.showTgindexConfig = function() {
 
         // Bot\u00f3n Guardar cambios
         '<div style="display:flex;gap:8px;align-items:center;padding:8px;border-top:1px solid var(--border-color);margin-top:8px;">' +
-        '<button class="btn-primary" onclick="saveTgindexAll()" style="padding:8px 20px;">\uD83D\uDCBE Guardar cambios</button>' +
+        '<button class="btn-primary" id="save-tgindex-btn" onclick="saveTgindexAll()" style="padding:8px 20px;">\uD83D\uDCBE Guardar cambios</button>' +
         '<span id="save-tgindex-status" style="font-size:0.8rem;color:var(--text-secondary);"></span></div>';
 
     container.innerHTML = html;
@@ -2298,7 +2298,37 @@ function refreshTgindexAfterSync() {
 }
 
 window.saveTgindexAll = function() {
+    // 2026-09-04: Guardar cambios = Aplicar + cierra el modal sin esperar
+    // (el scan sigue en fondo con la barra del catálogo).
+    applyTgindexFlow(true);
+};
+function saveTgindexAllToggles() {
     var status = document.getElementById('save-tgindex-status');
+    // 2026-09-04 F1: si hay toggles pendientes, vía incremental (rápida).
+    var pending = {};
+    try {
+        for (var k in window._tgindexPendingToggles) {
+            if (window._tgindexPendingToggles.hasOwnProperty(k)) pending[k] = window._tgindexPendingToggles[k] ? 1 : 0;
+        }
+    } catch (e0) {}
+    if (Object.keys(pending).length > 0) {
+        if (status) { status.textContent = 'Aplicando disponibilidad...'; status.style.color = ''; }
+        window.API.ajax({
+            method: 'POST',
+            url: '/api/user/channels/toggles',
+            data: { toggles: pending },
+            success: function(res) {
+                window._tgindexPendingToggles = {};
+                if (status) status.textContent = res && res.success ? '✅ Disponibilidad aplicada' : '⚠️ Error al aplicar';
+                loadTgindexChannels();
+                refreshTgindexAfterSync();
+            },
+            error: function() {
+                if (status) status.textContent = '❌ Error de red al aplicar';
+            }
+        });
+        return;
+    }
     if (status) status.textContent = 'Sincronizando datos del plugin...';
     window.API.ajax({
         method: 'POST',
@@ -2343,6 +2373,7 @@ function loadTgindexChannels() {
                 list.innerHTML = '<div style="color:var(--text-secondary);padding:6px 0;">Sin scan items. Pulsa "+ Nuevo scan item".</div>';
                 return;
             }
+            try { window._tgindexChannelsCache = channels; } catch (e0) {}
             var html = '';
             for (var i = 0; i < channels.length; i++) {
                 var ch = channels[i];
@@ -2363,15 +2394,47 @@ function loadTgindexChannels() {
 
                 // Botones compactos del mismo tamaño (paquete con flecha superpuesta)
                 var btnStyle = 'padding:4px 8px;font-size:0.75rem;line-height:1;white-space:nowrap;flex-shrink:0;';
+                // 2026-09-04 F4: LED de estado (completo/provisional/desactualizado).
+                var _last = ch.last_scanned_msg_id || 0;
+                var _chLast = ch.channel_last_msg_id || 0;
+                // 2026-09-04: last = último PROCESADO; channel_last puede ir uno por
+                // delante (el +1 es el hueco incremental, no un pendiente real).
+                var _ledC = '#71717a', _ledT = 'Sin datos';
+                if (ch.test_only) { _ledC = '#facc15'; _ledT = 'Provisional (solo test)'; }
+                else if (_chLast && _last >= _chLast - 1) { _ledC = '#22c55e'; _ledT = 'Completo ' + _last + '/' + _chLast; }
+                else if (_last > 0) { _ledC = '#fb923c'; _ledT = 'Desactualizado ' + _last + '/' + (_chLast || '?'); }
+                var _led = '<span data-ch-led="' + id + '" title="' + _ledT + '" style="width:9px;height:9px;border-radius:50%;background:' + _ledC + ';flex-shrink:0;box-shadow:0 0 4px ' + _ledC + ';"></span>';
+                // 2026-09-04 F4: combo de topología provisional + conteo.
+                var _topo = String(ch.topology_type !== undefined && ch.topology_type !== null ? ch.topology_type : 4);
+                try {
+                    if (window._tgindexPendingTopo && window._tgindexPendingTopo[id] !== undefined) _topo = String(window._tgindexPendingTopo[id]);
+                } catch (e3) {}
+                var _topoSel = '<select data-ch-topo="' + id + '" onchange="previewChannelTopo(' + id + ', this.value)" title="Topología (provisional hasta aplicar)" style="background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.7rem;flex-shrink:0;width:52px;">' +
+                    '<option value="1"' + (_topo === '1' ? ' selected' : '') + '>T1</option>' +
+                    '<option value="2"' + (_topo === '2' ? ' selected' : '') + '>T2</option>' +
+                    '<option value="3"' + (_topo === '3' ? ' selected' : '') + '>T3</option>' +
+                    '<option value="4"' + (_topo === '4' ? ' selected' : '') + '>T4</option></select>';
+                // 2026-09-04 F1: el toggle pendiente (sin aplicar) manda sobre el servidor.
+                var effEnabled = ch.enabled ? true : false;
+                try {
+                    if (window._tgindexPendingToggles && window._tgindexPendingToggles[id] !== undefined) {
+                        effEnabled = !!window._tgindexPendingToggles[id];
+                    } else if (window._tgindexPendingToggles) {
+                        window._tgindexPendingToggles[id] = effEnabled ? 1 : 0;
+                    }
+                } catch (e2) {}
                 html += '<div data-cache-channel="' + (ch.channel_id || '') + '" style="border:1px solid var(--border-color);border-radius:6px;margin-bottom:6px;background:var(--bg-card);overflow:hidden;">' +
                     '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;">' +
-                    '<label class="ch-toggle" style="cursor:pointer;display:inline-block;position:relative;width:34px;height:18px;margin:0;flex-shrink:0;" onclick="event.stopPropagation();toggleChannelEnabled(' + id + ',' + (ch.enabled ? 'false' : 'true') + ')">' +
-                    '<input type="checkbox"' + (ch.enabled ? ' checked' : '') + ' style="opacity:0;width:0;height:0;position:absolute;"><span class="ch-toggle-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:' + (ch.enabled ? '#22c55e' : '#3f3f46') + ';border-radius:18px;transition:0.3s;"></span></label>' +
+                    '<label class="ch-toggle" style="cursor:pointer;display:inline-block;position:relative;width:34px;height:18px;margin:0;flex-shrink:0;" onclick="event.preventDefault();event.stopPropagation();toggleChannelEnabled(' + id + ',' + (effEnabled ? 'false' : 'true') + ')">' +
+                    '<input type="checkbox" data-ch-toggle="' + id + '"' + (effEnabled ? ' checked' : '') + ' style="opacity:0;width:0;height:0;position:absolute;"><span class="ch-toggle-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:' + (effEnabled ? '#22c55e' : '#3f3f46') + ';border-radius:18px;transition:0.3s;"></span></label>' +
+                    _led +
                     '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;">' +
                     nameHtml +
                     '<span style="font-size:0.7rem;color:var(--text-secondary);white-space:nowrap;">' + chip + '</span>' +
+                    '<span data-ch-topo-count="' + id + '" style="font-size:0.65rem;color:var(--text-secondary);white-space:nowrap;"></span>' +
                     '</div>' +
-                    '<button class="btn-secondary cache-upload-btn" data-upload-btn="' + (ch.channel_id || '') + '" onclick="cacheRelayUpload(\'' + (ch.channel_id || '') + '\', this)" title="Subir cache de este canal" style="' + btnStyle + 'display:none;">\uD83D\uDCE6\u2B06</button>' +
+                    _topoSel +
+                    '<button class="btn-secondary cache-upload-btn" data-upload-btn="' + (ch.channel_id || '') + '" onclick="cacheRelayUpload(\'' + (ch.channel_id || '') + '\', this)" title="Subir cache de este canal" style="' + btnStyle + 'visibility:hidden;">\uD83D\uDCE6\u2B06</button>' +
                     '<button class="btn-secondary" onclick="cacheRelayDownload(\'' + (ch.channel_id || '') + '\', this)" title="Recuperar cache de este canal" style="' + btnStyle + '">\uD83D\uDCE6\u2B07</button>' +
                     '<button class="btn-secondary" onclick="openTgindexEditModal(' + id + ')" title="Editar" style="' + btnStyle + '">\u270f\ufe0f</button>' +
                     '</div>' +
@@ -2379,6 +2442,7 @@ function loadTgindexChannels() {
                     '</div>';
             }
             list.innerHTML = html;
+            try { window._autoCheckChannels(); } catch (eAC) {}
             // Mostrar el botón de subir SOLO en canales donde se puede escribir (can_post=true).
             // Oculto por defecto; se muestra cuando el backend confirma permisos (con caché en DB).
             window.API.ajax({
@@ -2388,7 +2452,7 @@ function loadTgindexChannels() {
                     for (var k = 0; k < rl.length; k++) {
                         if (rl[k].can_post) {
                             var btns = list.querySelectorAll('[data-upload-btn="' + rl[k].channel_id + '"]');
-                            for (var b = 0; b < btns.length; b++) btns[b].style.display = '';
+                            for (var b = 0; b < btns.length; b++) btns[b].style.visibility = 'visible';
                         }
                     }
                 }
@@ -2726,10 +2790,10 @@ window.openTgindexEditModal = function(id) {
         '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;border-top:1px solid var(--border-color,#3f3f46);padding-top:10px;">' +
         '<button class="btn-primary" onclick="saveTgindexChannel()" style="padding:6px 14px;font-size:0.8rem;">\ud83d\udcbe Guardar</button>' +
         '<button class="btn-secondary" onclick="closeTgindexEditModal()" style="padding:6px 14px;font-size:0.8rem;">\u2190 Volver</button>' +
-        '<button class="btn-secondary" onclick="updateScanChannel(modalTgindexId)" style="padding:6px 12px;font-size:0.8rem;">\u21bb Actualizar</button>' +
-        '<button class="btn-secondary" onclick="rescanChannel(modalTgindexId)" style="padding:6px 12px;font-size:0.8rem;">\u267b\ufe0f Reescanear</button>' +
-        '<button class="btn-secondary" onclick="cleanRecordsChannel(modalTgindexId)" style="padding:6px 12px;font-size:0.8rem;">\ud83d\uddd1\ufe0f Limpiar</button>' +
-        '<button class="btn-danger" onclick="deleteTgindexChannel(modalTgindexId)" style="padding:6px 12px;font-size:0.8rem;background:#d32f2f;color:#fff;border:none;border-radius:6px;cursor:pointer;">\u274c Eliminar</button></div>' +
+        '<button class="btn-secondary" onclick="testTgindexChannel()" title="Trae 100 mensajes y previsualiza títulos sin guardar" style="padding:6px 12px;font-size:0.8rem;">\U0001f9ea Test</button>' +
+        (isNew ? '' :
+        '<button class="btn-secondary" onclick="cleanRecordsChannel(modalTgindexId)" title="Borra raws cacheados para refetchear" style="padding:6px 12px;font-size:0.8rem;">\ud83d\uddd1\ufe0f Limpiar</button>' +
+        '<button class="btn-danger" onclick="deleteTgindexChannel(modalTgindexId)" style="padding:6px 12px;font-size:0.8rem;background:#d32f2f;color:#fff;border:none;border-radius:6px;cursor:pointer;">\u274c Eliminar</button>') + '</div>' +
         '<div id="tgindex-modal-status" style="font-size:0.75rem;color:var(--text-secondary);margin-top:8px;"></div></div>';
 
     document.body.appendChild(overlay);
@@ -2901,17 +2965,164 @@ window.saveTgindexChannel = function() {
     });
 };
 
-window.toggleChannelEnabled = function(id, enableNow) {
-    var enabled = (enableNow === 'true' || enableNow === true) ? 1 : 0;
+window._tgindexPendingToggles = {};
+window._tgindexPendingTopo = {};
+window._tgindexChannelsCache = [];
+window.previewChannelTopo = function(id, topoVal) {
+    // 2026-09-04 F4: conteo provisional con caché (cero Telegram).
+    window._tgindexPendingTopo[id] = parseInt(topoVal, 10) || 4;
+    var cnt = document.querySelector('[data-ch-topo-count="' + id + '"]');
+    var ch = null;
+    try {
+        for (var i = 0; i < window._tgindexChannelsCache.length; i++) {
+            if (window._tgindexChannelsCache[i].id === id) { ch = window._tgindexChannelsCache[i]; break; }
+        }
+    } catch (e) {}
+    if (!ch) return;
+    if (cnt) cnt.textContent = '...';
     window.API.ajax({
-        method: 'POST',
-        url: '/api/user/channels/' + id + '/toggle',
-        data: { enabled: enabled },
-        success: function() {
-            loadTgindexChannels();
-            refreshTgindexAfterSync();
+        method: 'POST', url: '/api/user/channels/preview-topo',
+        data: {
+            channel_id: ch.channel_id || '',
+            start_msg_id: ch.start_msg_id || 1,
+            end_msg_id: ch.end_msg_id || 0,
+            topic_id: ch.topic_id,
+            topology_type: window._tgindexPendingTopo[id]
         },
-        error: function() { loadTgindexChannels(); }
+        success: function(res) {
+            if (cnt) {
+                cnt.textContent = (res && res.success) ? (res.groups + ' títulos (sin aplicar)') : 'error';
+            }
+        },
+        error: function() { if (cnt) cnt.textContent = 'error'; }
+    });
+};
+window.checkChannelLast = function(id) {
+    // 2026-09-04 F4: Comprobar último mensaje (actualiza LED in situ, sin recargar).
+    window.API.ajax({
+        method: 'POST', url: '/api/user/channels/' + id + '/check',
+        data: {},
+        success: function(res) { _paintChannelLed(id, res); },
+        error: function() {}
+    });
+};
+window._paintChannelLed = function(id, st) {
+    try {
+        var el = document.querySelector('[data-ch-led="' + id + '"]');
+        if (!el) return;
+        var last = (st && st.last_scanned) || 0;
+        var chLast = (st && st.channel_last) || 0;
+        var testOnly = st && st.test_only ? true : false;
+        var c = '#71717a', t = 'Sin datos';
+        if (testOnly) { c = '#facc15'; t = 'Provisional (solo test)'; }
+        else if (chLast && last >= chLast - 1) { c = '#22c55e'; t = 'Completo ' + last + '/' + chLast; }
+        else if (last > 0) { c = '#fb923c'; t = 'Desactualizado ' + last + '/' + (chLast || '?'); }
+        el.style.background = c;
+        el.style.boxShadow = '0 0 4px ' + c;
+        el.title = t;
+    } catch (e) {}
+};
+window._autoCheckRunning = false;
+window._autoCheckChannels = function() {
+    // 2026-09-04: al cargar la lista, comprobar último mensaje de cada item en
+    // secuencia (1 llamada por item, el servicio dosifica + el servidor cachea
+    // 10 min). Una sola cadena a la vez; se aborta si se cierra el modal.
+    if (window._autoCheckRunning) return;
+    window._autoCheckRunning = true;
+    var ids = [];
+    try {
+        for (var i = 0; i < window._tgindexChannelsCache.length; i++) {
+            if (window._tgindexChannelsCache[i].id !== undefined) ids.push(window._tgindexChannelsCache[i].id);
+        }
+    } catch (e) { window._autoCheckRunning = false; return; }
+    var i = 0;
+    var step = function() {
+        if (!document.getElementById('channels-list')) { window._autoCheckRunning = false; return; }
+        if (i >= ids.length) { window._autoCheckRunning = false; return; }
+        var cid = ids[i++];
+        window.API.ajax({
+            method: 'POST', url: '/api/user/channels/' + cid + '/check',
+            data: {},
+            success: function(res) { window._paintChannelLed(cid, res); step(); },
+            error: function() { step(); }
+        });
+    };
+    step();
+};
+window._flushPendingTopo = function(cb) {
+    // Persiste topologías provisionales (una llamada por item). cb siempre se invoca.
+    var ids = [];
+    try {
+        for (var k in window._tgindexPendingTopo) {
+            if (window._tgindexPendingTopo.hasOwnProperty(k)) ids.push(k);
+        }
+    } catch (e) {}
+    if (!ids.length) { if (cb) cb(); return; }
+    var i = 0;
+    var step = function() {
+        if (i >= ids.length) { window._tgindexPendingTopo = {}; if (cb) cb(); return; }
+        var cid = ids[i++];
+        window.API.ajax({
+            method: 'POST', url: '/api/user/channels/' + cid + '/topology',
+            data: { topology_type: window._tgindexPendingTopo[cid] },
+            success: step, error: step
+        });
+    };
+    step();
+};
+window.toggleChannelEnabled = function(id, enableNow) {
+    // 2026-09-04 F1: toggle diferido, solo visual + flag en memoria.
+    // Nada se aplica hasta Guardar/Aplicar (POST /toggles en lote).
+    var enabled = (enableNow === 'true' || enableNow === true) ? 1 : 0;
+    window._tgindexPendingToggles[id] = enabled;
+    try {
+        var list = document.getElementById('channels-list');
+        if (list) {
+            var boxes = list.querySelectorAll('input[data-ch-toggle="' + id + '"]');
+            for (var i = 0; i < boxes.length; i++) {
+                boxes[i].checked = !!enabled;
+                var slider = boxes[i].parentNode ? boxes[i].parentNode.querySelector('.ch-toggle-slider') : null;
+                if (slider) slider.style.background = enabled ? '#22c55e' : '#3f3f46';
+                var label = boxes[i].closest ? boxes[i].closest('label') : null;
+                if (label) label.setAttribute('onclick', 'event.preventDefault();event.stopPropagation();toggleChannelEnabled(' + id + ',' + (!enabled) + ')');
+            }
+        }
+        var st = document.getElementById('save-tgindex-status');
+        if (st) { st.textContent = 'Cambios sin aplicar'; st.style.color = '#facc15'; }
+    } catch (e) {}
+};
+
+window.testTgindexChannel = function() {
+    // 2026-09-04 F2: Test sin guardar. Trae 100 mensajes (se cachean) y previsualiza.
+    var status = document.getElementById('tgindex-modal-status');
+    var built = _tgindexModalPayload();
+    if (!built.cid) { alert('Introduce el ID del canal.'); return; }
+    var mStart = parseInt((document.getElementById('tgindex-start').value || '').trim(), 10);
+    var mEnd = parseInt((document.getElementById('tgindex-end').value || '').trim(), 10);
+    var topicOnlyEl = document.getElementById('tgindex-topic-only');
+    var topicIdEl = document.getElementById('tgindex-topic-id');
+    var data = {
+        channel_id: built.cid,
+        start_msg_id: isNaN(mStart) ? 1 : mStart,
+        end_msg_id: isNaN(mEnd) ? 0 : mEnd,
+        topology_type: built.payload.topology_type,
+        telegram_account_id: built.payload.telegram_account_id
+    };
+    if (topicIdEl && topicIdEl.value.trim()) data.topic_id = parseInt(topicIdEl.value.trim(), 10) || null;
+    if (status) status.textContent = 'Probando (100 mensajes)...';
+    window.API.ajax({
+        method: 'POST', url: '/api/user/channels/test-parse', data: data,
+        success: function(res) {
+            if (!status) return;
+            if (res && res.success) {
+                var s = 'Test: ' + res.messages + ' msgs (' + res.photos + ' fotos, ' + res.files + ' ficheros) → ' + res.groups + ' títulos';
+                if (res.sample && res.sample.length) s += ' · ej: ' + res.sample.slice(0, 3).join(' / ');
+                status.textContent = s;
+            } else {
+                status.textContent = '❌ ' + (res && res.error ? res.error : 'Error');
+            }
+        },
+        error: function() { if (status) status.textContent = '❌ Error de red'; }
     });
 };
 
@@ -2969,22 +3180,80 @@ window.cleanRecordsChannel = function(id) {
 };
 
 window.startTgindexScan = function() {
-    var mode = document.getElementById('scan-mode').value;
-    var status = document.getElementById('scan-status');
-    var bar = document.getElementById('scan-progress-bar');
-    if (status) status.textContent = 'Escaneando...';
-    if (bar) bar.style.width = '0%';
+    applyTgindexFlow(false);
+};
 
-    window.API.ajax({
-        method: 'POST',
-        url: '/api/user/scan/start',
-        data: { mode: mode },
-        success: function(res) {
-            if (status) status.textContent = res && res.success ? '\u2705 Escaneo iniciado' : '\u274c ' + (res ? res.error : 'Error');
-            pollScanStatus();
-        },
-        error: function() { if (status) status.textContent = '\u274c Error de red'; }
-    });
+function _setTgindexFlowButtons(disabled) {
+    var ids = ['tgindex-apply-btn', 'save-tgindex-btn'];
+    for (var i = 0; i < ids.length; i++) {
+        var b = document.getElementById(ids[i]);
+        if (b) b.disabled = !!disabled;
+    }
+}
+
+// 2026-09-04: Aplicar = flags + topos + scan (fondo) SIN cerrar (ves el log).
+// Guardar cambios = Aplicar + cierra ajustes al lanzar. Botones bloqueados en scan.
+window.applyTgindexFlow = function(closeAfter) {
+    var status = document.getElementById('scan-status');
+    var modeEl = document.getElementById('scan-mode');
+    var mode = modeEl ? modeEl.value : 'normal';
+    var pending = {};
+    try {
+        for (var k in window._tgindexPendingToggles) {
+            if (window._tgindexPendingToggles.hasOwnProperty(k)) pending[k] = window._tgindexPendingToggles[k] ? 1 : 0;
+        }
+    } catch (e0) {}
+    _setTgindexFlowButtons(true);
+    if (status) status.textContent = 'Aplicando disponibilidad...';
+    // Regen: ids con topologia provisional (el ciclo regenera antes de parsear).
+    var regenIds = [];
+    try {
+        for (var rk in window._tgindexPendingTopo) {
+            if (window._tgindexPendingTopo.hasOwnProperty(rk)) regenIds.push(parseInt(rk, 10));
+        }
+    } catch (eR) {}
+    var startScan = function() {
+        if (status) status.textContent = 'Escaneando...';
+        var bar = document.getElementById('scan-progress-bar');
+        if (bar) bar.style.width = '0%';
+        window.API.ajax({
+            method: 'POST',
+            url: '/api/user/scan/start',
+            data: { mode: mode, regen: regenIds },
+            success: function(res) {
+                if (res && res.success) {
+                    if (status) status.textContent = '\u2705 Escaneo iniciado';
+                    pollScanStatus();
+                    pollGlobalScanBar();
+                    if (closeAfter && typeof toggleSettingsModal === 'function') toggleSettingsModal();
+                } else {
+                    if (status) status.textContent = '\u274c ' + (res ? res.error : 'Error');
+                    _setTgindexFlowButtons(false);
+                }
+            },
+            error: function() {
+                if (status) status.textContent = '\u274c Error de red';
+                _setTgindexFlowButtons(false);
+            }
+        });
+    };
+    // 2026-09-04 F4: topologías provisionales primero, luego toggles y scan.
+    var afterTopo = function() {
+        loadTgindexChannels();
+        if (Object.keys(pending).length > 0) {
+            window.API.ajax({
+                method: 'POST', url: '/api/user/channels/flags', data: { toggles: pending },
+                success: function() { window._tgindexPendingToggles = {}; loadTgindexChannels(); startScan(); },
+                error: function() {
+                    if (status) status.textContent = '\u274c Error guardando toggles';
+                    _setTgindexFlowButtons(false);
+                }
+            });
+        } else {
+            startScan();
+        }
+    };
+    window._flushPendingTopo(afterTopo);
 };
 
 function pollScanStatus() {
@@ -2995,7 +3264,11 @@ function pollScanStatus() {
         url: '/api/user/scan/status',
         success: function(res) {
             if (res.status === 'scanning') {
-                if (status) status.textContent = 'Escaneando... ' + (res.progress_percent || 0) + '%';
+                if (status) {
+                    var cur = res.current_item || 'Escaneando...';
+                    var pct = (res.progress_percent || 0);
+                    status.textContent = cur + ' ' + pct + '%';
+                }
                 if (bar) bar.style.width = (res.progress_percent || 0) + '%';
                 if (res.logs && log) { log.innerHTML = res.logs.slice(-30).join('\n'); log.scrollTop = log.scrollHeight; }
                 setTimeout(pollScanStatus, 2000);
@@ -3003,11 +3276,51 @@ function pollScanStatus() {
                 if (status) status.textContent = '\u2705 Escaneo completado';
                 if (bar) bar.style.width = '100%';
                 if (res.logs && log) { log.innerHTML = res.logs.slice(-30).join('\n'); log.scrollTop = log.scrollHeight; }
+                _setTgindexFlowButtons(false);
+                loadTgindexChannels();
+                refreshTgindexAfterSync();
             }
         },
         error: function() {
-            if (status) status.textContent = '\u274c Error consultando estado';
+            // 2026-09-04: reintentar (el loop bloqueado puede tumbar un poll suelto).
+            setTimeout(pollScanStatus, 3000);
         }
+    });
+}
+
+// Barra global bajo la búsqueda: visible durante scans (vengan de donde vengan).
+// 2026-09-04: solo progreso; el árbol/grid se recargan UNA vez al terminar.
+window._globalScanLastDone = -1;
+function pollGlobalScanBar() {
+    var wrap = document.getElementById('scan-global-bar');
+    if (!wrap) return;
+    window.API.ajax({
+        url: '/api/user/scan/status',
+        success: function(res) {
+            var fill = document.getElementById('scan-global-fill');
+            var txt = document.getElementById('scan-global-text');
+            var pct = document.getElementById('scan-global-pct');
+            if (res && res.status === 'scanning') {
+                var items = res.plan_items || [];
+                var dn = 0, tt = 0;
+                for (var i = 0; i < items.length; i++) { dn += (items[i].done || 0); tt += (items[i].count || 0); }
+                var p = tt > 0 ? Math.min(99, Math.round(dn * 100 / tt)) : (res.progress_percent || 0);
+                var cur = res.current_item || 'Escaneando...';
+                wrap.classList.remove('hidden');
+                if (fill) fill.style.width = p + '%';
+                if (txt) txt.textContent = cur;
+                if (pct) pct.textContent = p + '%';
+                window._globalScanLastDone = dn;
+                setTimeout(pollGlobalScanBar, 2000);
+            } else {
+                wrap.classList.add('hidden');
+                window._globalScanLastDone = -1;
+                // 2026-09-04: único refresh (árbol + grid) al terminar el ciclo.
+                try { if (typeof buildCategoryTree === 'function') buildCategoryTree(); } catch (e2) {}
+                try { if (window.Catalog && window.Catalog.load) window.Catalog.load(window.Catalog.currentCategory || 'home'); } catch (e3) {}
+            }
+        },
+        error: function() { setTimeout(pollGlobalScanBar, 5000); }
     });
 }
 

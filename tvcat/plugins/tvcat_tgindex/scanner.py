@@ -303,6 +303,83 @@ def _msg_has_file(m):
         return False
 
 
+def _rows_to_msgs(raw_rows, scan_channel_id):
+    """2026-09-04: reconstrucción pura de _Msg desde filas de caché (extraída de
+    parse_topology para reutilizar en el Test sin escribir nada)."""
+    import json
+    msgs = []
+    for r in raw_rows:
+        try:
+            d = json.loads(r["message"])
+            media_d = d.get("media") or {}
+            media_type = media_d.get("_", "")
+
+            class _Msg:
+                pass
+            m = _Msg()
+            m.id = d.get("id", 0)
+            m.text = d.get("message") or ""
+            _is_photo = media_type == "MessageMediaPhoto"
+            if not _is_photo and media_type == "MessageMediaWebPage":
+                _wp = media_d.get("webpage") or {}
+                if _wp.get("photo") and not _wp.get("document"):
+                    _is_photo = True
+            if not _is_photo and media_type == "MessageMediaDocument":
+                _doc = media_d.get("document") or {}
+                _mime = str(_doc.get("mime_type") or "").lower()
+                if _mime.startswith("image/"):
+                    _is_photo = True
+            m.photo = media_d if _is_photo else None
+            m.document = media_d if media_type == "MessageMediaDocument" else None
+            m.video = None
+            m.audio = None
+            m._raw_media = media_d
+            m._topic_id = r["topic_id"]
+            m._msg_id = r["msg_id"]
+            norm = scan_channel_id.replace("-100", "").lstrip("-") if scan_channel_id else "0"
+            m.chat_id = int(norm) if norm.isdigit() else 0
+            msgs.append(m)
+        except Exception:
+            pass
+    return msgs
+
+
+def _group_messages_topo4(tmsgs_sorted):
+    """2026-09-04: agrupación topo4 pura (extraída del parse para el Test).
+    Devuelve (title_groups, pending_final_id). Sin logs ni escritura."""
+    pending_cover = None
+    current_group = None
+    title_groups = []
+    for m in tmsgs_sorted:
+        is_image = _msg_has_image(m)
+        is_file = _msg_has_file(m)
+        if is_image:
+            if current_group and current_group["files"]:
+                title_groups.append(current_group)
+                current_group = None
+            pending_cover = m
+            continue
+        if is_file:
+            fname = _get_file_name_topo0(m)
+            norm = _normalize_fname_for_topo0(fname)
+            if current_group is None:
+                cover_id = pending_cover.id if pending_cover else -1000
+                current_group = {"cover_msg": pending_cover, "cover_id": cover_id, "files": [m], "pattern_norm": norm, "fname": fname}
+                pending_cover = None
+            else:
+                if _similar_topo0(current_group["pattern_norm"], norm, 0.75):
+                    current_group["files"].append(m)
+                else:
+                    title_groups.append(current_group)
+                    cover_id = pending_cover.id if pending_cover else -1000
+                    current_group = {"cover_msg": pending_cover, "cover_id": cover_id, "files": [m], "pattern_norm": norm, "fname": fname}
+                    pending_cover = None
+            continue
+    if current_group and current_group["files"]:
+        title_groups.append(current_group)
+    return title_groups, (pending_cover.id if pending_cover else None)
+
+
 def _segment_blocks(msgs):
     """Heurística file->image: segmenta mensajes en bloques {images, texts, files}.
     Frontera entre títulos = imagen (foto o documento-imagen) tras ficheros, o texto
@@ -847,47 +924,17 @@ async def parse_topology(scan_id, stop_event=None):
 
         add_log(f"  🔄 Parseando {len(raw_rows)} mensajes para '{name}' (topo {topo})...")
 
-        msgs = []
-        for r in raw_rows:
+        # 2026-09-04: progreso visible durante el parse (32k mensajes tardan
+        # minutos; sin esto la UI se quedaba congelada en el % del fetch).
+        def _parse_prog(_done, _total, _label):
             try:
-                d = json.loads(r["message"])
-                media_d = d.get("media") or {}
-                media_type = media_d.get("_", "")
-
-                # Envoltura simple con atributos planos (sin dependencia de Telethon)
-                class _Msg:
-                    pass
-                m = _Msg()
-                m.id = d.get("id", 0)
-                m.text = d.get("message") or ""
-                # Detectar imagen (2026-09-04): vale foto directa, preview de enlace
-                # con foto, o documento-imagen (foto enviada como fichero). El orden
-                # texto/imagen dentro del mensaje es irrelevante: Telegram lo manda
-                # como una unidad (media + caption). Si el webpage trae document
-                # (link a un fichero), NO es cover → se trata como contenido.
-                _is_photo = media_type == "MessageMediaPhoto"
-                if not _is_photo and media_type == "MessageMediaWebPage":
-                    _wp = media_d.get("webpage") or {}
-                    if _wp.get("photo") and not _wp.get("document"):
-                        _is_photo = True
-                if not _is_photo and media_type == "MessageMediaDocument":
-                    _doc = media_d.get("document") or {}
-                    _mime = str(_doc.get("mime_type") or "").lower()
-                    if _mime.startswith("image/"):
-                        _is_photo = True
-                m.photo = media_d if _is_photo else None
-                m.document = media_d if media_type == "MessageMediaDocument" else None
-                m.video = None
-                m.audio = None
-                m._raw_media = media_d  # guardamos el dict original
-                m._topic_id = r["topic_id"]
-                m._msg_id = r["msg_id"]
-                # Normalizar: quitar -100 para obtener el ID limpio usado en enlaces
-                norm = scan_channel_id.replace("-100", "").lstrip("-") if scan_channel_id else "0"
-                m.chat_id = int(norm) if norm.isdigit() else 0
-                msgs.append(m)
+                _p = 60 + int(35 * _done / max(1, _total))
+                scanner_status.update({"progress_percent": min(95, _p),
+                                       "current_item": f"Parseando '{name}': {_label} {_done}/{_total}"})
             except Exception:
                 pass
+
+        msgs = _rows_to_msgs(raw_rows, scan_channel_id)
 
         if not msgs:
             return (0, 0)
@@ -964,42 +1011,11 @@ async def parse_topology(scan_id, stop_event=None):
                     tmsgs_sorted = sorted(tmsgs, key=lambda x: x.id)
                     # subcategoría por topic si hay topics
                     current_subcat = subcat if not has_topics or tid == 0 else f"{subcat} — Tema #{tid}"
-                    pending_cover = None
-                    current_group = None
-                    title_groups = []
-                    for m in tmsgs_sorted:
-                        # 2026-09-04: imágenes (foto/preview/documento-imagen) solo
-                        # pueden ser cover, nunca fichero de título.
-                        is_image = _msg_has_image(m)
-                        is_file = _msg_has_file(m)
-                        if is_image:
-                            if current_group and current_group["files"]:
-                                title_groups.append(current_group)
-                                current_group = None
-                            pending_cover = m
-                            continue
-                        if is_file:
-                            fname = _get_file_name_topo0(m)
-                            norm = _normalize_fname_for_topo0(fname)
-                            if current_group is None:
-                                cover_id = pending_cover.id if pending_cover else -1000
-                                current_group = {"cover_msg": pending_cover, "cover_id": cover_id, "files": [m], "pattern_norm": norm, "fname": fname}
-                                pending_cover = None
-                            else:
-                                # si hay pending cover, forzar cierre previo (imagen intercala títulos)
-                                # ya manejado arriba, aquí solo comparar patrón
-                                if _similar_topo0(current_group["pattern_norm"], norm, 0.75):
-                                    current_group["files"].append(m)
-                                else:
-                                    title_groups.append(current_group)
-                                    cover_id = pending_cover.id if pending_cover else -1000
-                                    current_group = {"cover_msg": pending_cover, "cover_id": cover_id, "files": [m], "pattern_norm": norm, "fname": fname}
-                                    pending_cover = None
-                            continue
-                    if current_group and current_group["files"]:
-                        title_groups.append(current_group)
-                    add_log(f"  📦 Topo4 topic {tid}: {len(title_groups)} grupos (msgs {len(tmsgs_sorted)}, pending_final={pending_cover.id if pending_cover else None})")
-                    for g in title_groups:
+                    title_groups, pending_final = _group_messages_topo4(tmsgs_sorted)
+                    add_log(f"  📦 Topo4 topic {tid}: {len(title_groups)} grupos (msgs {len(tmsgs_sorted)}, pending_final={pending_final})")
+                    for _gi, g in enumerate(title_groups):
+                        if _gi % 25 == 0:
+                            _parse_prog(_gi, len(title_groups), "grupos")
                         files = g["files"]
                         cover_msg = g["cover_msg"]
                         cover_id = g["cover_id"]
@@ -1054,7 +1070,10 @@ async def parse_topology(scan_id, stop_event=None):
                     tid = m._topic_id or 0
                     topic_groups.setdefault(tid, []).append(m)
 
-                for tid, tmsgs in topic_groups.items():
+                _t3t = list(topic_groups.items())
+                for _ti, (tid, tmsgs) in enumerate(_t3t):
+                    if _ti % 10 == 0:
+                        _parse_prog(_ti, len(_t3t), "topics")
                     blocks = _segment_blocks(tmsgs)
                     if not blocks:
                         continue
@@ -1148,6 +1167,60 @@ async def parse_topology(scan_id, stop_event=None):
 
 
 # ---------------------------------------------------------------------------
+
+
+def _saneo_null_topics(raw_ch_id, start_msg_id, end_id):
+    """2026-09-04: borra filas con topic NULL EN RANGO solo si su raw trae reply_to
+    con topic (wipe real). Los mensajes del General (sin reply) son legítimos y se
+    conservan: antes se re-descubrían en cada ciclo y re-disparaban fetch+parse."""
+    try:
+        import json as _json
+        from services.cache_keys import canon_channel as _cc
+        from tvcat.gateway import get_db_connection as _gdb
+        _canon = _cc(raw_ch_id)
+        _end0 = end_id if end_id and end_id > 0 else 999999999
+        _rows = _gdb().execute(
+            "SELECT msg_id, message FROM telegram_message_cache WHERE channel_id=? AND topic_id IS NULL AND msg_id>=? AND msg_id<=?",
+            (_canon, start_msg_id, _end0)).fetchall()
+        _bad = []
+        for _mid, _msg in _rows:
+            try:
+                _d = _json.loads(_msg)
+                _inner = _d.get("raw") if isinstance(_d.get("raw"), dict) else _d
+                _rp = (_inner or {}).get("reply_to") or {}
+                if _rp.get("reply_to_msg_id"):
+                    _bad.append(int(_mid))
+            except Exception:
+                pass
+        if not _bad:
+            return []
+        _c0 = _gdb()
+        _ph = ",".join("?" * len(_bad))
+        _c0.execute(f"DELETE FROM telegram_message_cache WHERE channel_id=? AND msg_id IN ({_ph})",
+                    [_canon] + _bad)
+        _c0.commit()
+        _c0.close()
+        return _bad
+    except Exception:
+        return []
+
+
+def _cluster_ids(ids):
+    """Agrupa ids ordenados en rangos contiguos (hueco<=50) para re-fetch."""
+    ids = sorted(set(int(x) for x in ids))
+    if not ids:
+        return []
+    out, _a, _p = [], ids[0], ids[0]
+    for _m in ids[1:]:
+        if _m - _p <= 50:
+            _p = _m
+        else:
+            out.append((_a, _p))
+            _a, _p = _m, _m
+    out.append((_a, _p))
+    return out
+
+
 # SCAN: fetch puro de Telegram → telegram_scan
 # ---------------------------------------------------------------------------
 
@@ -1168,21 +1241,12 @@ async def _scan_channel(account_id, ch, idx, total):
 
     # Último msg_id escaneado desde el caché central (fuente de verdad)
     start_msg_id = ch.get("start_msg_id") or 1
-    # 2026-09-04: sanear filas con topic NULL en el rango (wipe histórico por
-    # guardados sin topic: covers/thumbs/refresh). Se refetchean con topic
-    # correcto en este scan; UPSERT ya impide nuevos wipes.
-    try:
-        from services.cache_keys import canon_channel as _cc
-        _canon = _cc(raw_ch_id)
-        _c0 = get_db_connection()
-        _end0 = end_id if end_id and end_id > 0 else 999999999
-        _del = _c0.execute("DELETE FROM telegram_message_cache WHERE channel_id=? AND topic_id IS NULL AND msg_id>=? AND msg_id<=?", (_canon, start_msg_id, _end0))
-        _c0.commit()
-        if _del.rowcount:
-            add_log(f"  🧹 Saneo topics: {_del.rowcount} filas NULL re-fetch en rango.")
-        _c0.close()
-    except Exception as _e:
-        add_log(f"  (saneo topics omitido: {_e})")
+    # 2026-09-04: sanear filas con topic NULL en el rango (wipe histórico).
+    # Devuelve los ids borrados para re-fetch explícito (el incremental
+    # [last..hasta] no los cubriría al estar por debajo del max).
+    _saned_ids = _saneo_null_topics(raw_ch_id, start_msg_id, end_id if end_id and end_id > 0 else 0)
+    if _saned_ids:
+        add_log(f"  🧹 Saneo topics: {len(_saned_ids)} filas NULL re-fetch en rango.")
     last_id = _get_last_cached_id(raw_ch_id)
     # En escaneo limpio el caché se vacía (last_id=0): respetar el mensaje de inicio configurado.
     if last_id < start_msg_id - 1:
@@ -1193,7 +1257,7 @@ async def _scan_channel(account_id, ch, idx, total):
 
     if end_id > 0 and last_id >= end_id:
         add_log(f"  ℹ️ '{name}' ya escaneado hasta el límite ({end_id}).")
-        return last_id
+        return last_id, 0
 
     add_log(f"  📊 Incremental desde msg_id={last_id}")
 
@@ -1208,7 +1272,44 @@ async def _scan_channel(account_id, ch, idx, total):
     api_id, api_hash, session_string, _uname = _resolve_account_creds(account_id)
     if not api_id or not api_hash or not session_string:
         add_log(f"❌ Credenciales no válidas para la cuenta #{account_id}.")
-        return last_id
+        return last_id, -1
+
+    # 2026-09-04: resolver `hasta` con 1 sola llamada (fin cfg o último del canal).
+    # Si hasta<=last y no hay saneados que re-traer: nada que hacer (ni fetch).
+    # El `hasta` se publica en el plan ANTES de resolver para que la barra no
+    # muestre el % rancio del ciclo anterior mientras dura la llamada.
+    try:
+        for _pi0 in scanner_status.get("plan_items", []):
+            if int(_pi0.get("id", -1)) == int(ch.get("id", -2)):
+                _pi0["from"] = max(start_msg_id, last_id + 1)
+                _pi0["to"] = 0
+                _pi0["count"] = 0
+                break
+    except Exception:
+        pass
+    _hasta = 0
+    if end_id and end_id > 0:
+        _hasta = int(end_id)
+    else:
+        try:
+            _live = await get_telegram_service().get_channel_last(
+                raw_ch_id, session_string=session_string, api_id=api_id, api_hash=api_hash)
+            _hasta = int(_live) if _live else last_id
+        except Exception:
+            _hasta = 0
+    # Actualizar bounds del plan (progreso granular real).
+    try:
+        for _pi in scanner_status.get("plan_items", []):
+            if int(_pi.get("id", -1)) == int(ch.get("id", -2)):
+                _pi["from"] = max(start_msg_id, last_id + 1)
+                _pi["to"] = _hasta
+                _pi["count"] = max(0, _hasta - max(start_msg_id, last_id + 1) + 1) + len(_saned_ids)
+                scanner_status["plan_total"] = sum(int(_x.get("count", 0)) for _x in scanner_status.get("plan_items", []))
+                break
+    except Exception:
+        pass
+    if _hasta and _hasta <= last_id and not _saned_ids:
+        return last_id, 0
 
     def _progress(saved):
         scanner_status["progress_percent"] = min(99, int((saved / 200) * 50) + 10)
@@ -1232,14 +1333,41 @@ async def _scan_channel(account_id, ch, idx, total):
         )
     except asyncio.TimeoutError:
         add_log(f"  ❌ Timeout escaneando '{name}' (180s).")
-        return last_id
+        return last_id, -1
     except Exception as e:
         add_log(f"  ❌ Error escaneando '{name}': {e}")
-        return last_id
+        return last_id, -1
+
+    # Re-traer saneados (ids sueltos bajo el max): por rangos contiguos.
+    _resaved = 0
+    if _saned_ids:
+        try:
+            for _a, _b in _cluster_ids(sorted(_saned_ids)):
+                try:
+                    _r = await asyncio.wait_for(
+                        service.scan_messages(
+                            channel_id=raw_ch_id,
+                            from_id=_a, to_id=_b,
+                            topic_id=effective_topic,
+                            session_string=session_string,
+                            api_id=api_id,
+                            api_hash=api_hash,
+                            on_batch=None,
+                        ),
+                        timeout=120,
+                    )
+                    _resaved += int(_r or 0)
+                except Exception as _e:
+                    add_log(f"  (re-fetch {_a}-{_b} omitido: {_e})")
+            if _resaved:
+                add_log(f"  ✅ Saneados re-traídos: {_resaved}.")
+        except Exception as _e:
+            add_log(f"  (re-fetch saneados omitido: {_e})")
 
     max_id = _get_last_cached_id(raw_ch_id)
-    add_log(f"  ✅ Canal '{name}': {saved} mensajes nuevos guardados (último msg #{max_id}).")
-    return max_id
+    _total_new = int(saved or 0) + _resaved
+    add_log(f"  ✅ Canal '{name}': {_total_new} mensajes nuevos guardados (último msg #{max_id}).")
+    return max_id, _total_new
 
 
 def _get_last_cached_id(channel_id: str) -> int:
@@ -1788,12 +1916,22 @@ async def _process_manual_task(task):
         elif mode == "incremental":
             _clear_channel_telegram_scan_cache(channel_id)
 
-        await _scan_channel(account_id, ch_dict, 0, 1)
+        _, _msaved = await _scan_channel(account_id, ch_dict, 0, 1)
 
-        n, _ = await parse_topology(channel_id)
-        if n > 0:
-            scanner_status["refresh_signal"] = scanner_status.get("refresh_signal", 0) + n
-            add_log(f"✅ Catálogo actualizado para '{name}': +{n} títulos nuevos.")
+        # 2026-09-04: igual que el ciclo — sin filas parseadas no se salta.
+        _mhas = True
+        try:
+            from .sync import has_parsed_rows as _mhpr
+            _mhas = await asyncio.to_thread(_mhpr, f"scan_{channel_id}")
+        except Exception:
+            pass
+        if _msaved == 0 and mode != "clean" and _mhas:
+            add_log(f"  ⏩ '{name}': sin mensajes nuevos, nada que parsear.")
+        else:
+            n, _ = await parse_topology(channel_id)
+            if n > 0:
+                scanner_status["refresh_signal"] = scanner_status.get("refresh_signal", 0) + n
+                add_log(f"✅ Catálogo actualizado para '{name}': +{n} títulos nuevos.")
 
         add_log(f"🎉 Escaneo manual de '{name}' completado.")
         await _update_channel_status(channel_id, "idle")
@@ -1831,11 +1969,26 @@ async def _process_periodic_cycle():
         print(f" [PERIODIC CYCLE ERROR] Al leer canales: {e}")
         return
 
-    if not channels:
-        return
+    # 2026-09-04: sin habilitados NO se sale en silencio (dejaba la UI en
+    # "scanning" y la central sin limpiar). Se aplica disponibilidad y a idle.
+    _empty_run = not channels
+    if _empty_run:
+        add_log(f"📡 Ciclo #{_cycle_counter}: sin scan items habilitados, solo disponibilidad.")
 
     add_log(f"📡 Iniciando Ciclo Periódico de Escaneo #{_cycle_counter}...")
     total = len(channels)
+
+    # 2026-09-04: plan ligero (sin Telegram: los bounds se resuelven por item en
+    # _scan_channel con 1 sola llamada; contar de más aquí costaba 15 llamadas).
+    _plan_items = []
+    for _ch in channels:
+        try:
+            _plan_items.append({"id": _ch["id"], "name": _ch.get("display_name") or "",
+                                "from": 0, "to": 0, "count": 0, "done": 0})
+        except Exception:
+            pass
+    scanner_status.update({"status": "scanning", "progress_percent": 0, "current_item": "Iniciando...",
+                           "plan_items": _plan_items, "plan_total": 0, "plan_done": 0})
 
     for idx, ch in enumerate(channels):
         channel_id = ch["id"]
@@ -1861,12 +2014,61 @@ async def _process_periodic_cycle():
                 await _update_channel_status(channel_id, "idle")
                 continue
 
-            await _scan_channel(account_id, ch, idx, total)
+            # 2026-09-04: regenerar si cambió su topología (borra generados, re-parsea).
+            try:
+                _regen = [int(x) for x in (scanner_status.get("regen_ids") or [])]
+            except Exception:
+                _regen = []
+            if int(channel_id) in _regen:
+                try:
+                    from .sync import regenerate_source_items
+                    _nreg = await asyncio.to_thread(regenerate_source_items, f"scan_{channel_id}")
+                    add_log(f"  ♻️ '{name}': {_nreg} generados previos limpiados (nueva topología).")
+                except Exception as _e:
+                    add_log(f"  (regenerar omitido para '{name}': {_e})")
+            _maxid, _saved = await _scan_channel(account_id, ch, idx, total)
+            # 2026-09-04: sin filas parseadas no se puede saltar (tras un wipe hay
+            # que regenerar aunque no haya mensajes nuevos).
+            _has_parsed = True
+            try:
+                from .sync import has_parsed_rows as _hpr
+                _has_parsed = await asyncio.to_thread(_hpr, f"scan_{channel_id}")
+            except Exception:
+                pass
+            _needs_parse = (_saved != 0) or (int(channel_id) in _regen) or (not _has_parsed)
+            if not _needs_parse:
+                add_log(f"  ⏩ '{name}': sin mensajes nuevos, nada que parsear.")
+                try:
+                    for _pi in scanner_status.get("plan_items", []):
+                        if int(_pi.get("id", -1)) == int(channel_id):
+                            _pi["done"] = int(_pi.get("count", 0))
+                            break
+                except Exception:
+                    pass
+                await _update_channel_status(channel_id, "idle")
+                await asyncio.sleep(4.0)
+                continue
 
             n, _ = await parse_topology(channel_id)
             if n > 0:
                 scanner_status["refresh_signal"] = scanner_status.get("refresh_signal", 0) + n
                 add_log(f"✅ Catálogo actualizado para '{name}': +{n} títulos nuevos.")
+
+            # 2026-09-04: SIN streaming (decisión de diseño: un solo refresh al
+            # final). La central se reconcilia entera al terminar el ciclo.
+            # Avance del plan granular
+            try:
+                for _pi in scanner_status.get("plan_items", []):
+                    if int(_pi.get("id", -1)) == int(channel_id):
+                        _pi["done"] = int(_pi.get("count", 0))
+                        break
+                _pd = sum(int(_x.get("done", 0)) for _x in scanner_status.get("plan_items", []))
+                _pt = int(scanner_status.get("plan_total", 0) or 0)
+                scanner_status["plan_done"] = _pd
+                if _pt > 0:
+                    scanner_status["progress_percent"] = min(99, int(_pd * 100 / _pt))
+            except Exception:
+                pass
 
             await _update_channel_status(channel_id, "idle")
         except Exception as e:
@@ -1875,13 +2077,55 @@ async def _process_periodic_cycle():
 
         await asyncio.sleep(4.0)
 
+    try:
+        scanner_status["regen_ids"] = []
+    except Exception:
+        pass
     scanner_status.update({"status": "idle", "progress_percent": 100, "current_item": "Completado."})
     add_log(f"✅ Ciclo Periódico de Escaneo #{_cycle_counter} finalizado.")
+    # 2026-09-04 F4: sellar estado por item (channel_last + test_only=0).
+    # 2026-09-04b: el plan puede venir vacío (skip sin novedades); en ese caso se
+    # sella con el max cacheado real para que el LED no se quede colgado.
     try:
-        from .sync import refresh_central_cache
-        refresh_central_cache("ciclo periódico")
+        _sconn2 = get_db_connection(system=True)
+        _sconn2.row_factory = sqlite3.Row
+        _allitems = _sconn2.execute("SELECT id, channel_id, start_msg_id, end_msg_id FROM tvcat_scanned_channels").fetchall()
+        _planmap = {}
+        try:
+            for _pi in scanner_status.get("plan_items", []):
+                _planmap[int(_pi.get("id"))] = int(_pi.get("to", 0) or 0)
+        except Exception:
+            pass
+        for _ar in _allitems:
+            try:
+                _to = _planmap.get(int(_ar["id"]), 0)
+                if not _to:
+                    _to = _get_last_cached_id(str(_ar["channel_id"] or ""))
+                if _to:
+                    _sconn2.execute("UPDATE tvcat_scanned_channels SET channel_last_msg_id = ?, test_only = 0 WHERE id = ?",
+                                    (int(_to), int(_ar["id"])))
+            except Exception:
+                pass
+        _sconn2.commit()
+        _sconn2.close()
+    except Exception:
+        pass
+    # 2026-09-04: reconciliación total en el PLUGIN (wipe + solo habilitados en
+    # orden visual id DESC). Lee el estado FINAL (toggles de mitad entran aquí).
+    try:
+        from .sync import reconcile_availability
+        from tvcat.gateway import get_db_connection as _gdbc
+        _sconn = _gdbc(system=True)
+        _sconn.row_factory = sqlite3.Row
+        _tags = [f"scan_{int(r['id'])}" for r in _sconn.execute(
+            "SELECT id FROM tvcat_scanned_channels WHERE enabled = 1 ORDER BY id DESC").fetchall()]
+        _sconn.close()
+        _rrec = await asyncio.to_thread(reconcile_availability, _tags)
+        add_log(f"  ✅ Central reconciliada ({(_rrec or {}).get('items', 0)} títulos).")
+        if not (_rrec or {}).get("success"):
+            add_log(f"  ⚠️ reconcile: {(_rrec or {}).get('error', '')}")
     except Exception as e:
-        print(f" [TGIndex] Aviso: refresh central tras ciclo periódico: {e}")
+        print(f" [TGIndex] Aviso: reconcile final tras ciclo periódico: {e}")
 
 
 async def _sequential_worker_loop():
@@ -1929,6 +2173,11 @@ def _get_tgindex_refresh_status():
 
 
 async def _run_tgindex_refresh(trigger: str = "manual"):
+    # 2026-09-04: sin ciclos concurrentes (dos ciclos a la vez corrompían el
+    # progreso y bloqueaban SQLite en bucle).
+    if scanner_status.get("status") == "scanning":
+        add_log("⏳ Refresco omitido: ya hay un escaneo en curso.")
+        return
     add_log("📡 Refresco gatillado desde el motor de catálogo central.")
     await _process_periodic_cycle()
 

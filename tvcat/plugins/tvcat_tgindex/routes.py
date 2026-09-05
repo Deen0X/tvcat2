@@ -87,6 +87,7 @@ class ScanRequest(BaseModel):
     id: Optional[int] = None
     rescan: Optional[bool] = False
     mode: Optional[str] = "normal"  # "normal" | "clean" | "incremental"
+    regen: Optional[list] = None  # 2026-09-04: scan_ids a regenerar antes de parsear
 
 class TopologyRequest(BaseModel):
     topology_type: int
@@ -456,10 +457,28 @@ def _ensure_channel_category_column():
         pass
 
 
+def _ensure_scanstate_columns():
+    """2026-09-04 F4: columnas de estado por scan item (tolerante, sin migración dura)."""
+    try:
+        conn = get_db_connection(system=True)
+        for ddl in ("ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_msg_id INTEGER DEFAULT 0",
+                    "ALTER TABLE tvcat_scanned_channels ADD COLUMN test_only INTEGER DEFAULT 0",
+                    "ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_checked_at INTEGER DEFAULT 0"):
+            try:
+                conn.execute(ddl)
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 @router.get("/api/user/channels")
 async def list_channels():
     try:
         _ensure_channel_category_column()
+        _ensure_scanstate_columns()
         conn = get_db_connection(system=True)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -695,6 +714,279 @@ async def toggle_channel(cid: int, payload: ToggleRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class TopoRequest(BaseModel):
+    topology_type: int = 4
+
+
+@router.post("/api/user/channels/{cid}/topology")
+async def set_channel_topology(cid: int, body: TopoRequest):
+    """2026-09-04 F4: cambia solo la topología (los generados se regeneran en el próximo Aplicar)."""
+    try:
+        t = int(body.topology_type)
+        if t not in (0, 1, 2, 3, 4):
+            raise HTTPException(status_code=400, detail="Topología no válida")
+        conn = get_db_connection(system=True)
+        conn.execute("UPDATE tvcat_scanned_channels SET topology_type = ? WHERE id = ?", (t, cid))
+        conn.commit()
+        conn.close()
+        return {"success": True, "topology_type": t}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class FlagsRequest(BaseModel):
+    toggles: dict = {}
+
+
+@router.post("/api/user/channels/flags")
+async def set_channels_flags(body: FlagsRequest):
+    """2026-09-04: persiste SOLO los flags enabled (ms). La disponibilidad se aplica
+    al final del scan (pasada en orden de prioridad)."""
+    try:
+        conn = get_db_connection(system=True)
+        n = 0
+        for k, v in (body.toggles or {}).items():
+            try:
+                conn.execute("UPDATE tvcat_scanned_channels SET enabled = ? WHERE id = ?",
+                             (1 if v else 0, int(k)))
+                n += 1
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+        return {"success": True, "updated": n}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TogglesRequest(BaseModel):
+    toggles: dict = {}
+
+
+@router.post("/api/user/channels/toggles")
+async def toggle_channels_bulk(body: TogglesRequest):
+    """2026-09-04 F1: toggles diferidos en lote. Persiste flags y aplica alta/baja
+    incremental SIN reconstrucción total (ms en vez de segundos)."""
+    try:
+        from .sync import apply_toggles_incremental
+        toggles = {}
+        for k, v in (body.toggles or {}).items():
+            try:
+                toggles[int(k)] = 1 if v else 0
+            except Exception:
+                pass
+        if not toggles:
+            return {"success": True, "applied": {}}
+        applied = await asyncio.to_thread(apply_toggles_incremental, toggles)
+        return {"success": True, "applied": applied}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f" [TGIndex] toggle bulk error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TestParseRequest(BaseModel):
+    channel_id: str = ""
+    start_msg_id: int = 1
+    end_msg_id: int = 0
+    topic_id: Optional[int] = None
+    topology_type: int = 4
+    telegram_account_id: Optional[int] = None
+    scan_id: Optional[int] = None
+
+
+@router.post("/api/user/channels/test-parse")
+async def test_parse_channel(body: TestParseRequest):
+    """2026-09-04 F2: Test de scan item. Trae 100 mensajes desde el inicio (se cachean
+    normal, no se desperdician), parsea en memoria con la topología indicada y devuelve
+    conteo + muestra de títulos. NO guarda items ni toca la central."""
+    try:
+        from .scanner import _resolve_account_creds, _rows_to_msgs, _group_messages_topo4, _segment_blocks, _parse_block_title_desc, _get_file_name_topo0
+        from services.telegram_service import get_telegram_service
+        from services.cache_keys import canon_channel
+        from tvcat.gateway import get_db_connection
+        import json as _json
+
+        channel = (body.channel_id or "").strip()
+        if not channel:
+            raise HTTPException(status_code=400, detail="Falta channel_id")
+        start = max(1, int(body.start_msg_id or 1))
+        Ulm = start + 99
+        if body.end_msg_id and int(body.end_msg_id) > 0:
+            Ulm = min(Ulm, int(body.end_msg_id))
+        api_id, api_hash, session_string, _uname = _resolve_account_creds(body.telegram_account_id)
+        if not api_id or not api_hash or not session_string:
+            raise HTTPException(status_code=400, detail="Cuenta de Telegram no válida")
+        svc = get_telegram_service()
+        try:
+            await asyncio.wait_for(svc.scan_messages(
+                channel_id=channel, from_id=start, to_id=Ulm,
+                topic_id=body.topic_id, session_string=session_string,
+                api_id=api_id, api_hash=api_hash), timeout=120)
+        except asyncio.TimeoutError:
+            pass
+        canon = canon_channel(channel)
+        conn = get_db_connection()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM telegram_message_cache WHERE channel_id = ? AND msg_id >= ? AND msg_id <= ? ORDER BY msg_id ASC",
+            (canon, start, Ulm)).fetchall()
+        conn.close()
+        msgs = _rows_to_msgs(rows, canon)
+        if body.topic_id is not None:
+            msgs = [m for m in msgs if (m._topic_id or 0) == int(body.topic_id)]
+        n_photo = sum(1 for m in msgs if m.photo is not None)
+        n_file = sum(1 for m in msgs if m.document is not None)
+        n_text = sum(1 for m in msgs if (m.text or "") and m.photo is None and m.document is None)
+        groups = 0
+        sample = []
+        try:
+            topo = int(body.topology_type or 4)
+            if topo in (0, 4):
+                tsorted = sorted(msgs, key=lambda x: x.id)
+                tgroups, _pend = _group_messages_topo4(tsorted)
+                groups = len(tgroups)
+                for g in tgroups[:5]:
+                    try:
+                        cv = g.get("cover_msg")
+                        fl = g.get("files") or []
+                        if cv is not None and getattr(cv, "text", None):
+                            t, _d, _a, _g2, _s, _sd, _m = _parse_block_title_desc(
+                                {"images": [cv], "texts": [], "files": fl}, fallback_title="?", _extra_files=fl)
+                            sample.append(t or "?")
+                        elif fl:
+                            import os as _os, re as _re
+                            sample.append(_re.sub(r"[._]", " ", _os.path.splitext(_get_file_name_topo0(fl[0]))[0][:60]).strip())
+                    except Exception:
+                        sample.append("?")
+            else:
+                blocks = _segment_blocks(sorted(msgs, key=lambda x: x.id))
+                groups = len(blocks)
+                for b in blocks[:5]:
+                    try:
+                        t, _d, _a, _g2, _s, _sd, _m = _parse_block_title_desc(b, fallback_title="?")
+                        sample.append(t or "?")
+                    except Exception:
+                        sample.append("?")
+        except Exception:
+            pass
+        # 2026-09-04 F4: el Test deja marca provisional (la quita el primer scan completo).
+        try:
+            if body.scan_id:
+                _ensure_scanstate_columns()
+                _tc = get_db_connection(system=True)
+                _tc.execute("UPDATE tvcat_scanned_channels SET test_only = 1 WHERE id = ?", (int(body.scan_id),))
+                _tc.commit()
+                _tc.close()
+        except Exception:
+            pass
+        return {"success": True, "messages": len(msgs), "photos": n_photo,
+                "files": n_file, "texts": n_text, "groups": groups, "sample": sample}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class PreviewTopoRequest(BaseModel):
+    channel_id: str = ""
+    start_msg_id: int = 1
+    end_msg_id: int = 0
+    topic_id: Optional[int] = None
+    topology_type: int = 4
+
+
+@router.post("/api/user/channels/preview-topo")
+async def preview_topo(body: PreviewTopoRequest):
+    """2026-09-04 F4: conteo por topología SOLO con caché (cero llamadas a Telegram)."""
+    try:
+        from .scanner import _rows_to_msgs, _group_messages_topo4, _segment_blocks
+        from services.cache_keys import canon_channel
+        from tvcat.gateway import get_db_connection
+        import sqlite3 as _sq
+        canon = canon_channel((body.channel_id or "").strip())
+        start = max(1, int(body.start_msg_id or 1))
+        end = int(body.end_msg_id or 0)
+        conn = get_db_connection()
+        conn.row_factory = _sq.Row
+        q = "SELECT * FROM telegram_message_cache WHERE channel_id = ? AND msg_id >= ?"
+        args = [canon, start]
+        if end and end > 0:
+            q += " AND msg_id <= ?"
+            args.append(end)
+        q += " ORDER BY msg_id ASC"
+        rows = conn.execute(q, args).fetchall()
+        conn.close()
+        msgs = _rows_to_msgs(rows, canon)
+        if body.topic_id is not None:
+            msgs = [m for m in msgs if (m._topic_id or 0) == int(body.topic_id)]
+        topo = int(body.topology_type or 4)
+        if topo in (0, 4):
+            groups, _p = _group_messages_topo4(sorted(msgs, key=lambda x: x.id))
+            n = len(groups)
+        else:
+            n = len(_segment_blocks(sorted(msgs, key=lambda x: x.id)))
+        return {"success": True, "messages": len(msgs), "groups": n}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/user/channels/{cid}/check")
+async def check_channel_last(cid: int):
+    """2026-09-04 F4: Comprobar — resuelve el último del canal y actualiza channel_last.
+    2026-09-04b: frescura — si se comprobó hace <10 min y hay valor, se devuelve
+    sin tocar Telegram (evita tormentas de checks al abrir la config)."""
+    import time as _time
+    try:
+        from .scanner import _resolve_account_creds
+        from services.telegram_service import get_telegram_service
+        conn = get_db_connection(system=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_checked_at INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        row = conn.execute("SELECT channel_id, telegram_account_id, last_scanned_msg_id, channel_last_msg_id, test_only, channel_last_checked_at FROM tvcat_scanned_channels WHERE id = ?", (cid,)).fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Scan item no encontrado")
+        d = dict(row)
+        now = int(_time.time())
+        try:
+            fresh = (now - int(d.get("channel_last_checked_at") or 0)) < 600 and int(d.get("channel_last_msg_id") or 0) > 0
+        except Exception:
+            fresh = False
+        if fresh:
+            conn.close()
+            return {"success": True, "last_scanned": d.get("last_scanned_msg_id") or 0,
+                    "channel_last": d.get("channel_last_msg_id") or 0, "test_only": d.get("test_only") or 0,
+                    "cached": True}
+        ch_id = d["channel_id"]
+        api_id, api_hash, session_string, _u = _resolve_account_creds(d["telegram_account_id"])
+        last = 0
+        if api_id and api_hash and session_string:
+            try:
+                svc = get_telegram_service()
+                last = await asyncio.wait_for(svc.get_channel_last(
+                    ch_id, session_string=session_string, api_id=api_id, api_hash=api_hash), timeout=60)
+            except Exception:
+                last = 0
+        conn.execute("UPDATE tvcat_scanned_channels SET channel_last_msg_id = ?, channel_last_checked_at = ? WHERE id = ?", (int(last or 0), now, cid))
+        conn.commit()
+        cur = conn.execute("SELECT last_scanned_msg_id, channel_last_msg_id, test_only FROM tvcat_scanned_channels WHERE id = ?", (cid,)).fetchone()
+        conn.close()
+        d2 = dict(cur) if cur else {}
+        return {"success": True, "last_scanned": d2.get("last_scanned_msg_id") or 0,
+                "channel_last": d2.get("channel_last_msg_id") or 0, "test_only": d2.get("test_only") or 0}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/api/user/channels/test")
 async def test_channel_connection(payload: ChannelTestRequest):
     try:
@@ -885,6 +1177,10 @@ async def start_scan(payload: ScanRequest = ScanRequest()):
     prev_task = scanner_status.get("_scan_task")
     if prev_task and not prev_task.done():
         prev_task.cancel()
+    try:
+        scanner_status["regen_ids"] = [int(x) for x in (payload.regen or [])]
+    except Exception:
+        scanner_status["regen_ids"] = []
     scan_task = asyncio.create_task(run_background_scan(target_id=payload.id, mode=mode))
     scanner_status["_scan_task"] = scan_task
     return {"success": True}

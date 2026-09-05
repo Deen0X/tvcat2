@@ -649,6 +649,8 @@ class TelegramService:
             await self._do_fetch_cover(task)
         elif action == "fetch_thumb":
             await self._do_fetch_thumb(task)
+        elif action == "channel_last":
+            await self._do_channel_last(task)
 
     async def _do_fetch_messages(self, task: Dict):
         channel_id = task["channel_id"]
@@ -1185,8 +1187,28 @@ class TelegramService:
         }, priority=PRIORITY_NORMAL)
         return await fut
 
+    async def get_channel_last(self, chat, tg_user_id=None, client_type="telethon",
+                                 session_string=None, api_id=None, api_hash=None) -> int:
+        """2026-09-04 F3: último msg_id del canal/topic (1 llamada, sin escribir en caché).
+        Para planificar progreso granular de scans."""
+        fut = asyncio.get_event_loop().create_future()
+
+        async def callback(result):
+            if not fut.done():
+                fut.set_result(result)
+        await self.queue.put({
+            "action": "channel_last", "chat": chat,
+            "tg_user_id": tg_user_id, "client_type": client_type,
+            "session_string": session_string, "api_id": api_id, "api_hash": api_hash,
+            "callback": callback
+        }, priority=PRIORITY_NORMAL)
+        try:
+            return int(await fut) or 0
+        except Exception:
+            return 0
+
     async def get_pinned_messages(self, chat, tg_user_id=None, client_type="telethon",
-                                  session_string=None, api_id=None, api_hash=None) -> List[Dict]:
+                                        session_string=None, api_id=None, api_hash=None) -> List[Dict]:
         fut = asyncio.get_event_loop().create_future()
         async def callback(result):
             if not fut.done():
@@ -1542,6 +1564,41 @@ class TelegramService:
             "callback": callback
         }, priority=PRIORITY_HIGH)
         return await fut
+
+    async def _do_channel_last(self, task: Dict):
+        """Último msg_id del chat/topic sin escribir en caché."""
+        chat = task.get("chat")
+        callback = task.get("callback")
+        client, need_disc = await self._get_temp_or_pool_client(task)
+        _uid = self._user_key(task)
+
+        async def _done(v):
+            if callback:
+                try:
+                    await callback(v)
+                except Exception:
+                    pass
+
+        try:
+            await self._throttle(_uid)
+            entity = await client.get_entity(self._to_entity_id(chat))
+            last = 0
+            try:
+                msgs = await client.get_messages(entity, limit=1)
+                if msgs:
+                    m0 = msgs[0] if isinstance(msgs, list) else msgs
+                    last = int(getattr(m0, "id", 0) or 0)
+            except Exception:
+                last = 0
+            await _done(last)
+        except Exception:
+            await _done(0)
+        finally:
+            if need_disc:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
     async def _do_edit_message(self, task: Dict):
         channel_id = task["channel_id"]

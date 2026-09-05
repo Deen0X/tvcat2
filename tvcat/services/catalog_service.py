@@ -791,6 +791,161 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
         return {"success": False, "error": str(e)}
 
 
+def wipe_plugin_central(plugin_name: str):
+    """2026-09-04: borra TODOS los items/episodios de un plugin en central.
+    Assets (covers) intactos: se reutilizan al re-habilitar."""
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        c.execute("""
+            DELETE FROM item_episodes WHERE item_id IN (
+                SELECT item_id FROM unified_catalog WHERE source = ?
+            )
+        """, (plugin_name,))
+        eps = c.rowcount
+        c.execute("DELETE FROM unified_catalog WHERE source = ?", (plugin_name,))
+        items = c.rowcount
+        conn.commit()
+        return {"success": True, "items": items, "episodes": eps}
+    except Exception as e:
+        print(f" [CATALOG] Error wipe {plugin_name}: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def sync_plugin_source_items(plugin_loader, plugin_name: str, item_ids, active: bool):
+    """Compat: resuelve la DB vía registry y delega en sync_plugin_db_copy."""
+    try:
+        data = (plugin_loader.registry or {}).get(plugin_name) or {}
+    except Exception:
+        data = {}
+    if not data:
+        return {"success": False, "error": "Plugin no encontrado"}
+    if not data.get("enabled"):
+        return {"success": False, "error": "Plugin deshabilitado"}
+    return sync_plugin_db_copy(os.path.join(data.get("_dir", ""), "data", "tvcat.db"),
+                               plugin_name, item_ids, active)
+
+
+def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool):
+    """2026-09-04: alta/baja incremental en central desde la DB del plugin POR RUTA,
+    sin registry (los paths del scan/sync del plugin no dependen del loader).
+    - disable: DELETE episodios + catálogo de esos items.
+    - enable: copia esas filas desde plugin_catalog_export (+ episodios, géneros y
+      has_mkv igual que el sync completo). Assets intactos (se reutilizan)."""
+    item_ids = [i for i in (item_ids or []) if i]
+    if not item_ids:
+        return {"success": True, "items": 0, "episodes": 0}
+    if not plugin_db or not os.path.exists(plugin_db):
+        return {"success": False, "error": "Base de datos del plugin no encontrada"}
+
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        ph = ",".join("?" * len(item_ids))
+        if not active:
+            c.execute(f"DELETE FROM item_episodes WHERE item_id IN ({ph})", list(item_ids))
+            eps = c.rowcount
+            c.execute(f"DELETE FROM unified_catalog WHERE item_id IN ({ph}) AND source = ?", list(item_ids) + [plugin_name])
+            items = c.rowcount
+            conn.commit()
+            conn.close()
+            return {"success": True, "items": items, "episodes": eps}
+
+        pconn = sqlite3.connect(plugin_db, timeout=30)
+        pconn.execute("PRAGMA busy_timeout=30000")
+        pconn.row_factory = sqlite3.Row
+        pc = pconn.cursor()
+        id_to_item = {}
+        for r in pc.execute("SELECT id, item_id FROM unified_catalog"):
+            id_to_item[str(r["id"])] = r["item_id"]
+            if r["item_id"]:
+                id_to_item[r["item_id"]] = r["item_id"]
+
+        def resolve_item_id(raw):
+            return id_to_item.get(str(raw), raw)
+
+        items_inserted = 0
+        active_set = set()
+        for row in pc.execute(f"SELECT * FROM plugin_catalog_export WHERE item_id IN ({ph})", list(item_ids)):
+            d = dict(row)
+            item_id = d.get("item_id", "")
+            if not item_id:
+                continue
+            active_set.add(item_id)
+            info = d.get("info_messages") or ""
+            genres = _extract_genres(info, d.get("metadata_json"))
+            c.execute("""
+                INSERT OR REPLACE INTO unified_catalog
+                (item_id, title, category, subcategory, source, origin_depth,
+                 description, year, rating, alt_titles, metadata_json, cover_url,
+                 telegram_msg_id, group_title, group_title_flat, telegram_link,
+                 season_display, info_messages, genres)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                item_id, d.get("title"), d.get("category", ""), d.get("subcategory", ""),
+                plugin_name, 0, d.get("description", ""), d.get("year", ""), d.get("rating", 0),
+                d.get("alt_titles", "[]"), "{}", f"/api/cover/{item_id}",
+                d.get("telegram_msg_id"), d.get("group_title"), d.get("group_title_flat"),
+                d.get("telegram_link"), d.get("season_display"), info, genres
+            ))
+            items_inserted += 1
+
+        eps_inserted = 0
+        for row in pc.execute(f"SELECT * FROM plugin_episodes_export WHERE item_id IN ({ph})", list(item_ids)):
+            ed = dict(row)
+            resolved_item = resolve_item_id(ed.get("item_id", ""))
+            if not resolved_item or resolved_item not in active_set:
+                continue
+            ep_key = ed.get("episode_key") or _derive_episode_key(ed.get("telegram_link"))
+            c.execute("""
+                INSERT OR REPLACE INTO item_episodes
+                (item_id, episode_key, episode_number, season_number, title, duration,
+                 telegram_msg_id, telegram_link, file_size, file_name, is_mkv)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                resolved_item, ep_key, ed.get("episode_number"), ed.get("season_number", 1),
+                ed.get("title"), ed.get("duration"), ed.get("telegram_msg_id"), ed.get("telegram_link"),
+                ed.get("file_size"), ed.get("file_name"),
+                1 if (ed.get("file_name") or "").lower().endswith(".mkv") else 0
+            ))
+            eps_inserted += 1
+
+        if active_set:
+            placeholders = ",".join("?" * len(active_set))
+            c.execute(f"""
+                UPDATE unified_catalog SET has_mkv = 1
+                WHERE item_id IN (
+                    SELECT DISTINCT item_id FROM item_episodes
+                    WHERE is_mkv = 1 AND item_id IN ({placeholders})
+                )
+            """, list(active_set))
+            c.execute(f"""
+                UPDATE unified_catalog SET has_mkv = 0
+                WHERE item_id IN ({placeholders})
+                  AND item_id NOT IN (
+                    SELECT DISTINCT item_id FROM item_episodes WHERE is_mkv = 1
+                )
+            """, list(active_set))
+
+        pconn.close()
+        conn.commit()
+        conn.close()
+        print(f" [CATALOG] Sync incremental {plugin_name}: {items_inserted} items, {eps_inserted} episodios")
+        return {"success": True, "items": items_inserted, "episodes": eps_inserted}
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        print(f" [CATALOG] Error sync incremental {plugin_name}: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # Labels que cortan el valor de géneros: cualquier campo conocido tras los géneros
 _GENRE_CUT_RE = re.compile(
     r"(?i)\s+(?:synopsis|sinopsis|descripci[oó]n|rating|votes|votos|episodes?|episodios?"
