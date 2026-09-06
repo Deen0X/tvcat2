@@ -321,6 +321,9 @@ class TelegramService:
         self._learned_users = {}
         self._cfg_cache = {}
         self._cfg_ts = 0.0
+        # Uso real por cuenta (2026-09-04 F2): timestamps de llamadas a métodos
+        # (no bulk). Ventana 120s para niveles con decaimiento.
+        self._usage = {}
 
     async def start(self):
         self.cache.init_table()
@@ -438,6 +441,16 @@ class TelegramService:
             st["last_refill"] = now
         st["tokens"] -= cost
         st["last_call"] = now
+        # 2026-09-04 F2: registrar uso real (podar ventana 120s).
+        try:
+            _uk = str(uid or "default")
+            _ul = self._usage.setdefault(_uk, [])
+            _ul.append(now)
+            _cut = now - 120.0
+            while _ul and _ul[0] < _cut:
+                _ul.pop(0)
+        except Exception:
+            pass
         # AIMD: relajar ante éxito sostenido
         try:
             st["clean"] = int(st.get("clean", 0)) + 1
@@ -571,6 +584,66 @@ class TelegramService:
             return wait
         except Exception:
             return 0.0
+
+    def usage_snapshot(self) -> Dict[str, Any]:
+        """2026-09-04 F2: uso por cuenta con decaimiento. level 2 = llamadas en
+        últimos 30s (rojo), 1 = solo 30-60s (atenuado), 0 = nada (gris)."""
+        out = {}
+        try:
+            now = time.time()
+            for uid, lst in list(self._usage.items()):
+                try:
+                    c30 = sum(1 for t in lst if now - t <= 30.0)
+                    c60 = sum(1 for t in lst if now - t <= 60.0)
+                    out[str(uid)] = {"calls_30s": c30, "calls_60s": c60,
+                                     "level": 2 if c30 else (1 if c60 else 0)}
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return out
+
+    def bucket_snapshot(self) -> Dict[str, Any]:
+        """2026-09-04: estado de buckets por cuenta para UI y otros plugins.
+        state: gray (0 llamadas/60s), green (dentro de ráfaga: tokens>0),
+        yellow (entre ráfaga y límite: dosificando), red (en cooldown/delay)."""
+        out = {}
+        try:
+            now = time.time()
+            burst = float(self._burst())
+            for uid in list(self._throttle_state.keys()):
+                try:
+                    st = self._tstate(uid)
+                    cd = max(0.0, float(st.get("cooldown_until", 0.0)) - now)
+                    tok = float(st.get("tokens", 0.0))
+                    iv = float(st.get("interval", 3.0))
+                    calls = sum(1 for t in self._usage.get(str(uid), []) if now - t <= 60.0)
+                    if calls == 0:
+                        state = "gray"
+                    elif cd > 0:
+                        state = "red"
+                    elif tok > 0:
+                        state = "green"
+                    else:
+                        state = "yellow"
+                    out[str(uid)] = {
+                        "tokens": round(tok, 2),
+                        "burst": burst,
+                        "interval": round(iv, 2),
+                        "per_minute": int(round(60.0 / max(0.5, iv))),
+                        "cooldown_s": round(cd, 1),
+                        "calls_60s": calls,
+                        "state": state,
+                    }
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return out
+
+    def throttle_snapshot(self) -> Dict[str, Any]:
+        """2026-09-04 F3: estado de buckets por cuenta (tokens, intervalo, cooldown)."""
+        return self.bucket_snapshot()
 
     def quiet_remaining(self) -> float:
         """Segundos de cooldown máximo entre usuarios (0 = vía libre). Para gating externo."""

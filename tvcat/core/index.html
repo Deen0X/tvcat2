@@ -36,6 +36,12 @@
             <button id="filter-btn" class="filter-btn" onclick="toggleFilterModal()" title="Filtros de búsqueda">
                 <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
             </button>
+            <!-- Progreso de refresco de fuentes: solo la línea, sin textos -->
+            <div id="srcprog" class="hidden" style="margin-top:3px;">
+                <div id="srcprog-segs" style="display:flex;gap:2px;height:2px;background:rgba(255,255,255,0.10);border-radius:2px;overflow:hidden;">
+                    <div id="srcprog-fill" style="height:100%;width:0%;background:var(--accent);transition:width 0.4s;flex:none;"></div>
+                </div>
+            </div>
         </div>
         <div class="nav-right" id="nav-right">
             <div class="logo" id="main-logo">
@@ -44,16 +50,6 @@
             </div>
         </div>
     </header>
-    <!-- Barra de progreso de scans (visible solo durante escaneos) -->
-    <div id="scan-global-bar" class="hidden" style="padding:4px 12px 0 12px;">
-        <div style="display:flex;align-items:center;gap:8px;font-size:0.72rem;color:var(--text-secondary);">
-            <span id="scan-global-text" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">Escaneando...</span>
-            <span id="scan-global-pct" style="flex-shrink:0;">0%</span>
-        </div>
-        <div style="height:3px;background:var(--bg-card);border-radius:2px;overflow:hidden;margin-top:2px;">
-            <div id="scan-global-fill" style="height:100%;width:0%;background:var(--accent);transition:width 0.4s;"></div>
-        </div>
-    </div>
 
     <!-- Sidebar Overlay Background -->
     <div id="side-menu-overlay" class="side-menu-overlay"></div>
@@ -69,7 +65,7 @@
                 <button class="side-icon-btn" onclick="toggleSettingsModal()" title="Configuración">
                     <svg viewBox="0 0 24 24" style="width:18px; height:18px; fill:currentColor;"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
                 </button>
-                <button class="side-icon-btn" onclick="refreshCatalog()" title="Sincronizar">
+                <button class="side-icon-btn" onclick="refreshSources()" title="Actualizar fuentes">
                     <svg viewBox="0 0 24 24" style="width:18px; height:18px; fill:currentColor;"><path d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z"/></svg>
                 </button>
                 <button class="side-icon-btn" onclick="toggleSideMenu()" title="Cerrar">
@@ -129,7 +125,7 @@
         <div class="modal-content settings-content">
             <div class="settings-header">
                 <h2><span id="settings-title-icon">⚙️</span> <span id="settings-title-text">Configuración</span></h2>
-                <span class="close-btn-mini" onclick="toggleSettingsModal()">&times;</span>
+                <span class="close-btn" onclick="toggleSettingsModal()" style="position:static;flex-shrink:0;">&times;</span>
             </div>
             <div class="settings-tabs" id="settings-tabs-container">
                 <button class="tab-btn active" id="tab-btn-profile" onclick="switchSettingsTab('profile')">
@@ -388,7 +384,6 @@
                 <div class="tab-pane hidden" id="pane-plugins">
                     <h3 style="margin-bottom:8px;">Plugins instalados</h3>
                     <div id="plugins-list-container"></div>
-
                 </div>
                 <div class="tab-pane hidden" id="pane-admin">
                     <h3 style="margin-bottom:8px;">Gestión de usuarios</h3>
@@ -462,14 +457,6 @@
                                     <option value="pyrogram" style="background:var(--bg);color:var(--text);">Pyrogram (Pyrofork)</option>
                                 </select>
                             </div>
-                            <div style="display:flex;align-items:center;gap:8px;">
-                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Throttle msgs/min:</label>
-                                <input type="number" id="setting-tg-throttle-per-minute" min="5" max="120" step="1" value="20" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
-                            </div>
-                            <div style="display:flex;align-items:center;gap:8px;">
-                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Throttle ráfaga:</label>
-                                <input type="number" id="setting-tg-throttle-burst" min="1" max="30" step="1" value="5" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
-                            </div>
                             <div>
                                 <button class="btn-secondary" onclick="saveTelegramSettings()" style="padding:4px 10px;font-size:0.7rem;">Guardar</button>
                                 <span id="telegram-behavior-status" style="font-size:0.7rem;color:var(--text-secondary);margin-left:8px;"></span>
@@ -477,7 +464,28 @@
                         </div>
                     </div>
 
-
+                    <!-- 4. Buckets (colapsable) -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden;">
+                        <div onclick="toggleUserbotCollap('buckets')" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;background:var(--bg-card);user-select:none;">
+                            <h4 style="margin:0;font-size:0.85rem;">🪣 Buckets</h4>
+                            <span id="collap-buckets-ind" style="font-size:0.7rem;transition:transform 0.2s;display:inline-block;">▼</span>
+                        </div>
+                        <div id="collap-buckets-body" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Conexiones/min:</label>
+                                <input type="number" id="setting-tg-throttle-per-minute" min="5" max="120" step="1" value="20" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Ráfaga inicial:</label>
+                                <input type="number" id="setting-tg-throttle-burst" min="1" max="30" step="1" value="5" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div>
+                                <button class="btn-secondary" onclick="saveTelegramSettings()" style="padding:4px 10px;font-size:0.7rem;">Guardar</button>
+                                <span id="buckets-status" style="font-size:0.7rem;color:var(--text-secondary);margin-left:8px;"></span>
+                            </div>
+                            <div id="buckets-live" style="display:flex;flex-direction:column;gap:6px;"></div>
+                        </div>
+                    </div>
 
                     <!-- 5. Login con Google (colapsable, oculto por defecto) -->
                     <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden;">
@@ -875,6 +883,6 @@
     <script src="js/catalog.js?v=20260935m"></script>
     <script src="js/player.js?v=20260801"></script>
     <script src="js/ui.js?v=20260904b"></script>
-    <script src="js/app.js?v=20260904b"></script>
+    <script src="js/app.js?v=20260906d"></script>
 </body>
 </html>

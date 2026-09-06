@@ -371,7 +371,117 @@ _PLUGIN_REFRESHERS = {}
 _rebuild_state = {"running": False, "done": False, "error": None}
 
 def register_plugin_refresher(name, func=None, status_func=None, **kwargs):
-    _PLUGIN_REFRESHERS[name] = func or kwargs.get("func")
+    """2026-09-04: contrato refresh de fuentes. Guarda refresh + status
+    (antes el status_func se descartaba). status() -> {running, pct, label}."""
+    _PLUGIN_REFRESHERS[name] = {
+        "refresh": func or kwargs.get("func"),
+        "status": status_func or kwargs.get("status_func"),
+    }
+
+
+# --- Orquestador de refresco de fuentes (2026-09-04) ---
+# Secuencial por plugin activo con refresher; progreso por segmentos para la barra.
+_SOURCES_REFRESH = {"running": False, "segments": [], "current": "", "trigger": ""}
+
+
+def _plugin_refresher(name):
+    """Refresher de un plugin: contrato push (register_plugin_refresher) o
+    convención pull (atributos plugin_refresh/plugin_refresh_status en el
+    módulo tvcat.plugins.<name>.scanner/.routes/.sync ya cargado en
+    sys.modules). Lo segundo evita importar gateway desde plugins
+    (doble instancia __main__ vs tvcat.gateway que tragaba el registro)."""
+    ref = _PLUGIN_REFRESHERS.get(name) or {}
+    if ref.get("refresh"):
+        return {"refresh": ref.get("refresh"), "status": ref.get("status")}
+    try:
+        import sys as _sys
+        for _mod in (f"tvcat.plugins.{name}.scanner",
+                     f"tvcat.plugins.{name}.routes",
+                     f"tvcat.plugins.{name}.sync"):
+            _m = _sys.modules.get(_mod)
+            if _m is not None and callable(getattr(_m, "plugin_refresh", None)):
+                return {"refresh": getattr(_m, "plugin_refresh"),
+                        "status": getattr(_m, "plugin_refresh_status", None)}
+    except Exception:
+        pass
+    return {}
+
+
+def _sources_snapshot():
+    """Plugins de orígen activos con refresher registrado."""
+    out = []
+    try:
+        for name, data in _plugin_loader.registry.items():
+            if not data.get("enabled"):
+                continue
+            if str(data.get("type") or "") not in ("source",):
+                continue
+            if not _plugin_refresher(name).get("refresh"):
+                continue
+            out.append({"name": name,
+                        "label": data.get("displayName") or name})
+    except Exception:
+        pass
+    return out
+
+
+async def _run_sources_refresh(trigger="manual", token=None):
+    """Ejecuta refresh secuencial; actualiza _SOURCES_REFRESH por segmento."""
+    # 2026-09-06: el endpoint marca running=True antes del spawn; el guard
+    # antiguo se auto-rechazaba y dejaba running colgado para siempre.
+    # Propiedad por token: solo la tarea vigente ejecuta.
+    if token is not None and _SOURCES_REFRESH.get("owner") != token:
+        return {"success": False, "error": "Refresco superado por otro"}
+    # Estado inicial ya marcado por el endpoint (anti-carrera); si viene vacío
+    # (llamada directa/ciclo), se inicializa aquí.
+    if not _SOURCES_REFRESH.get("segments"):
+        snap = _sources_snapshot()
+        _SOURCES_REFRESH.update({"running": True, "trigger": trigger, "current": "",
+                                 "segments": [{"name": s["name"], "label": s["label"],
+                                               "pct": 0, "state": "pending"} for s in snap]})
+    else:
+        _SOURCES_REFRESH["running"] = True
+    try:
+        for seg in _SOURCES_REFRESH["segments"]:
+            seg["state"] = "running"
+            _SOURCES_REFRESH["current"] = seg["name"]
+            ref = _plugin_refresher(seg["name"])
+            fn, stfn = ref.get("refresh"), ref.get("status")
+            if not fn:
+                seg.update({"pct": 100, "state": "skipped"})
+                continue
+            try:
+                task = asyncio.create_task(fn(trigger))
+            except Exception as e:
+                seg.update({"pct": 100, "state": "error", "error": str(e)[:200]})
+                continue
+            try:
+                while not task.done():
+                    try:
+                        st = stfn() if stfn else {}
+                        if isinstance(st, dict):
+                            if st.get("status") == "scanning":
+                                seg["pct"] = max(0, min(99, int(st.get("progress", st.get("progress_percent", 0)) or 0)))
+                            label = st.get("current") or st.get("current_item") or ""
+                            if label:
+                                seg["label"] = label
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.0)
+                try:
+                    task.result()
+                except Exception as e:
+                    seg.update({"state": "error", "error": str(e)[:200]})
+                    continue
+                seg.update({"pct": 100, "state": "done"})
+            except Exception as e:
+                seg.update({"pct": 100, "state": "error", "error": str(e)[:200]})
+    finally:
+        if token is None or _SOURCES_REFRESH.get("owner") == token:
+            _SOURCES_REFRESH["running"] = False
+            _SOURCES_REFRESH["current"] = ""
+            _SOURCES_REFRESH["owner"] = None
+    return {"success": True}
 def get_db_connection(item_id=None, system=False):
     conn = sqlite3.connect(os.path.join(BASE_DIR, "data", "tvcat.db"), timeout=30)
     conn.row_factory = sqlite3.Row
@@ -437,6 +547,35 @@ async def lifespan(app_instance):
         finally:
             _rebuild_state["running"] = False
     asyncio.create_task(_background_rebuild())
+    # Ciclos automáticos de refresco de fuentes (2026-09-04): mismo efecto que ⟳
+    # pero por temporizador. Usa la config General de TGIndex (Escaneo automático +
+    # Intervalo entre ciclos, por defecto 30 min). Revisa cada minuto.
+    async def _sources_cycle():
+        await asyncio.sleep(120)
+        _last_run = 0.0
+        while True:
+            try:
+                import time as _t
+                enabled, mins, last = False, 0, 0.0
+                try:
+                    from tvcat.plugins.tvcat_tgindex.config import load_user_config as _luc
+                    _cfg = _luc() or {}
+                    enabled = bool(_cfg.get("scan_enabled", True))
+                    mins = int(_cfg.get("cycle_minutes", 30) or 0)
+                except Exception:
+                    enabled, mins = False, 0
+                now = _t.time()
+                if enabled and mins > 0 and (now - _last_run) >= mins * 60:
+                    if not _SOURCES_REFRESH.get("running"):
+                        _last_run = now
+                        print(f" [SOURCES] Ciclo automático ({mins} min): refrescando fuentes")
+                        await _run_sources_refresh("cycle")
+                    else:
+                        _last_run = now
+            except Exception as e:
+                print(f" [SOURCES] Error en ciclo: {e}")
+            await asyncio.sleep(60)
+    _spawn(_sources_cycle())
     # Iniciar servicio de Telegram
     from services.telegram_service import get_telegram_service
     asyncio.create_task(get_telegram_service().start())
@@ -463,11 +602,83 @@ def api_url(path):
     return f"{base_path}{path}"
 
 
+# --- Actividad de usuarios (2026-09-04, F1 LEDs) ---
+# Solo memoria en caliente + flush a DB cada 60s. Los polls de alta frecuencia
+# NO cuentan (si no, todo el mundo saldría siempre verde).
+_ACTIVITY = {}
+_ACTIVITY_LAST_FLUSH = 0.0
+_ACTIVITY_SKIP = ("/api/user/scan/status", "/api/sources/refresh/status",
+                  "/api/telegram/throttle", "/api/telegram/usage",
+                  "/api/cache/rebuild-status", "/api/admin/activity",
+                  "/api/network/", "/3ds", "/api/installer/3ds",
+                  "/api/userbot/", "/static/", "/login")
+_ACTIVITY_PLAY = ("/api/stream", "/api/watch/progress", "/api/log_video")
+
+
+def _activity_mark(user_id, is_play=False):
+    try:
+        import time as _t
+        now = _t.time()
+        uid = str(user_id)
+        st = _ACTIVITY.get(uid) or {}
+        st["seen"] = now
+        if is_play:
+            st["play"] = now
+        _ACTIVITY[uid] = st
+    except Exception:
+        pass
+
+
+def _activity_flush():
+    global _ACTIVITY_LAST_FLUSH
+    try:
+        import time as _t
+        if _t.time() - _ACTIVITY_LAST_FLUSH < 60 or not _ACTIVITY:
+            return
+        _ACTIVITY_LAST_FLUSH = _t.time()
+        from services.catalog_service import get_conn
+        conn = get_conn()
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS tvcat_activity
+                (user_id TEXT PRIMARY KEY, last_seen REAL DEFAULT 0, last_play REAL DEFAULT 0)""")
+        except Exception:
+            pass
+        for uid, st in list(_ACTIVITY.items()):
+            try:
+                conn.execute("""INSERT INTO tvcat_activity (user_id, last_seen, last_play)
+                    VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET
+                    last_seen=max(last_seen, excluded.last_seen),
+                    last_play=max(last_play, excluded.last_play)""",
+                    (uid, float(st.get("seen", 0)), float(st.get("play", 0))))
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 @app.middleware("http")
 async def no_cache_middleware(request: Request, call_next):
     """Evita que navegadores antiguos (Smart TVs) congelen CSS/JS/HTML con caché caducado."""
     path = request.url.path
     try:
+        if path.startswith("/api/") and not path.startswith(_ACTIVITY_SKIP):
+            try:
+                tok = request.cookies.get("tvcat_session", "")
+                if not tok:
+                    _ah = request.headers.get("Authorization", "")
+                    if _ah.startswith("Bearer "):
+                        tok = _ah[7:]
+                if tok:
+                    from services.auth_service import get_session as _gs
+                    _sess = _gs(tok)
+                    if _sess and _sess.get("user_id"):
+                        _activity_mark(_sess.get("user_id"),
+                                       any(k in path for k in _ACTIVITY_PLAY))
+                        _activity_flush()
+            except Exception:
+                pass
         response = await call_next(request)
     except Exception as _e:
         # 2026-09-04b: SOLO abortos del cliente (-> 499 silencioso). Cualquier otro
@@ -567,6 +778,45 @@ async def cache_refresh(request: Request):
     from services.catalog_service import sync_plugin_cache
     result = sync_plugin_cache(_plugin_loader, plugin_name)
     return result
+
+
+@app.post(api_url("/api/sources/refresh"))
+async def sources_refresh(request: Request):
+    """2026-09-04: lanza refresco secuencial de fuentes en fondo (ver _run_sources_refresh)."""
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s:
+        raise HTTPException(403)
+    if _SOURCES_REFRESH.get("running"):
+        return {"success": False, "error": "Ya hay un refresco en curso"}
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    # 2026-09-04: estado síncrono ANTES del spawn (el primer poll ganaba la
+    # carrera y veía running=False → la barra no aparecía nunca).
+    snap = _sources_snapshot()
+    if not snap:
+        return {"success": False, "error": "Sin fuentes con refresco (¿tgindex deshabilitado?)"}
+    import uuid as _uuid
+    _tok = _uuid.uuid4().hex[:8]
+    _SOURCES_REFRESH.update({"running": True, "owner": _tok,
+                             "trigger": str((body or {}).get("trigger") or "manual"),
+                             "current": snap[0]["name"],
+                             "segments": [{"name": s["name"], "label": s["label"],
+                                           "pct": 0, "state": "pending"} for s in snap]})
+    _spawn(_run_sources_refresh(str((body or {}).get("trigger") or "manual"), _tok))
+    return {"success": True, "segments": [s["name"] for s in snap]}
+
+
+@app.get(api_url("/api/sources/refresh/status"))
+async def sources_refresh_status():
+    """Estado para la barra segmentada (1-2s): {running, segments:[{name,label,pct,state}]}."""
+    return {"running": bool(_SOURCES_REFRESH.get("running")),
+            "trigger": _SOURCES_REFRESH.get("trigger", ""),
+            "current": _SOURCES_REFRESH.get("current", ""),
+            "segments": [dict(s) for s in _SOURCES_REFRESH.get("segments", [])]}
 
 
 # --- API: Auth ---
@@ -6116,6 +6366,72 @@ async def admin_users(request: Request):
     conn.close()
     return {"users": users}
 
+@app.get(api_url("/api/admin/activity"))
+async def admin_activity(request: Request):
+    """2026-09-04 F1: actividad por usuario (LED gris/azul/amarillo/verde).
+    Prioridad: verde (<=60s o play) > amarillo (<=10min) > azul (<=15min) > gris."""
+    from services.auth_service import get_session
+    session = get_session(request.cookies.get("tvcat_session", ""))
+    if not session or session.get("role") != "admin":
+        raise HTTPException(403)
+    import time as _t
+    now = _t.time()
+    _activity_flush()
+    acts = {}
+    try:
+        from services.catalog_service import get_conn
+        conn = get_conn()
+        try:
+            rows = conn.execute("SELECT user_id, last_seen, last_play FROM tvcat_activity").fetchall()
+        except Exception:
+            rows = []
+        conn.close()
+        for r in rows:
+            try:
+                acts[str(r["user_id"])] = {"seen": float(r["last_seen"] or 0), "play": float(r["last_play"] or 0)}
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for uid, st in list(_ACTIVITY.items()):
+        try:
+            a = acts.get(str(uid), {"seen": 0, "play": 0})
+            a["seen"] = max(a["seen"], float(st.get("seen", 0)))
+            a["play"] = max(a["play"], float(st.get("play", 0)))
+            acts[str(uid)] = a
+        except Exception:
+            pass
+    out = []
+    for uid, a in acts.items():
+        ds, dp = now - a["seen"], now - a["play"]
+        if ds <= 60 or dp <= 60:
+            state = "green"
+        elif ds <= 600:
+            state = "yellow"
+        elif ds <= 900:
+            state = "blue"
+        else:
+            state = "gray"
+        out.append({"user_id": uid, "state": state,
+                    "seen_ago": int(ds) if ds < 1e9 else -1,
+                    "play_ago": int(dp) if dp < 1e9 else -1})
+    return {"users": out}
+
+
+@app.get(api_url("/api/telegram/usage"))
+async def telegram_usage(request: Request):
+    """2026-09-04 F2: uso real de Telegram por cuenta (admin)."""
+    from services.auth_service import get_session
+    session = get_session(request.cookies.get("tvcat_session", ""))
+    if not session or session.get("role") != "admin":
+        raise HTTPException(403)
+    try:
+        from services.telegram_service import get_telegram_service
+        return {"accounts": get_telegram_service().usage_snapshot()}
+    except Exception as e:
+        return {"accounts": {}, "error": str(e)[:200]}
+
+
 @app.post(api_url("/api/admin/users/create"))
 async def admin_create_user(request: Request):
     from services.auth_service import get_session
@@ -6558,7 +6874,32 @@ async def telegram_throttle_status(request: Request):
     s = get_session(request.cookies.get("tvcat_session",""))
     if not s or s.get("role") != "admin": raise HTTPException(403)
     from services.telegram_service import get_telegram_service
-    return get_telegram_service().throttle_status()
+    svc = get_telegram_service()
+    out = svc.throttle_status()
+    try:
+        out["buckets"] = svc.bucket_snapshot()
+    except Exception:
+        pass
+    return out
+
+
+@app.get(api_url("/api/plugins/buckets"))
+async def plugins_buckets(request: Request):
+    """2026-09-04: estado de buckets para otros plugins (autenticado, sin admin).
+    Sin secretos: solo contadores y estados por cuenta."""
+    from services.auth_service import get_session
+    token = request.cookies.get("tvcat_session", "")
+    if not token:
+        _ah = request.headers.get("Authorization", "")
+        if _ah.startswith("Bearer "):
+            token = _ah[7:]
+    if not get_session(token):
+        raise HTTPException(403)
+    try:
+        from services.telegram_service import get_telegram_service
+        return {"buckets": get_telegram_service().bucket_snapshot()}
+    except Exception as e:
+        return {"buckets": {}, "error": str(e)[:200]}
 
 # --- Telegram Users API ---
 @app.get(api_url("/api/telegram/users"))

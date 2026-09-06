@@ -106,7 +106,20 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
     cursor.execute("SELECT id, title, info_messages FROM unified_catalog WHERE item_id = ?", (item_id,))
     row = cursor.fetchone()
     if not row and int(telegram_msg_id) not in (-999, -1000):
-        cursor.execute("SELECT id, title, info_messages FROM unified_catalog WHERE telegram_msg_id = ?", (telegram_msg_id,))
+        # 2026-09-04: dedup por msg_id SOLO dentro del mismo canal (los ids se
+        # reinician por chat; sin filtro mezclaba títulos de otros canales).
+        _chb = ""
+        try:
+            import re as _re4
+            _mb = _re4.search(r"/c/(\d+)/", telegram_link or "")
+            if _mb:
+                _chb = _mb.group(1)
+        except Exception:
+            pass
+        if _chb:
+            cursor.execute("SELECT id, title, info_messages FROM unified_catalog WHERE telegram_msg_id = ? AND telegram_link LIKE ?", (telegram_msg_id, "%/c/" + _chb + "/%"))
+        else:
+            cursor.execute("SELECT id, title, info_messages FROM unified_catalog WHERE telegram_msg_id = ? AND source = ?", (telegram_msg_id, source))
         row = cursor.fetchone()
 
     if row:
@@ -857,8 +870,9 @@ async def parse_topology(scan_id, stop_event=None):
         content_type = ch.get("content_type") or "media"
         custom_sub = ch.get("custom_subcategory")
         subcat = custom_sub.strip() if custom_sub and custom_sub.strip() else name
-        # Si topic_only y hay nombre de topic, la subcategoría es el nombre del topic
-        if topic_only:
+        # 2026-09-04: el nombre del topic solo se usa si NO hay subcategoría
+        # configurada (antes la pisaba siempre y el árbol mostraba otro valor).
+        if topic_only and not (custom_sub and custom_sub.strip()):
             topic_name = (ch.get("topic_name") or "").strip()
             if topic_name:
                 subcat = topic_name
@@ -1009,8 +1023,10 @@ async def parse_topology(scan_id, stop_event=None):
                     groups_to_process = [(0, msgs)]
                 for tid, tmsgs in groups_to_process:
                     tmsgs_sorted = sorted(tmsgs, key=lambda x: x.id)
-                    # subcategoría por topic si hay topics
-                    current_subcat = subcat if not has_topics or tid == 0 else f"{subcat} — Tema #{tid}"
+                    # 2026-09-04: sufijo por topic solo si el scan abarca VARIOS
+                    # topics (con topic_only a un topic concreto es ruido).
+                    _multi = len(groups_to_process) > 1
+                    current_subcat = subcat if (not has_topics or tid == 0 or not _multi) else f"{subcat} — Tema #{tid}"
                     title_groups, pending_final = _group_messages_topo4(tmsgs_sorted)
                     add_log(f"  📦 Topo4 topic {tid}: {len(title_groups)} grupos (msgs {len(tmsgs_sorted)}, pending_final={pending_final})")
                     for _gi, g in enumerate(title_groups):
@@ -1123,29 +1139,51 @@ async def parse_topology(scan_id, stop_event=None):
                             cat_id = insert_scanned_item(title, current_subcat, category, desc, cover_id, link, b["files"], source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
                             new_count += 1
             
-            # 3. Purgar duplicados viejos con cover genérico absorbidos por otro
-            # título con cover real (restos de scans con topics rotos). Acotado a
-            # este scan (source_tag): episodios del genérico TODOS en otro item.
-            try:
+            # 3. Purga de duplicados DESACTIVADA (2026-09-04): comía títulos buenos
+            # por colisión de msg_id entre canales. Se reactivará con claves
+            # channelid_msgid cuando el diseño esté cerrado. NO BORRAR este bloque.
+            if False:  # DESACTIVADA
                 _stale = conn_central.execute("SELECT item_id FROM unified_catalog WHERE source=? AND telegram_msg_id IN (-999,-1000)", (source_tag,)).fetchall()
                 for _sr in _stale:
                     _sid = _sr[0]
                     _eps = [e[0] for e in conn_central.execute("SELECT telegram_msg_id FROM item_episodes WHERE item_id=?", (_sid,)).fetchall() if e[0]]
                     if not _eps:
                         continue
+                    _slink = conn_central.execute("SELECT telegram_link FROM unified_catalog WHERE item_id=?", (_sid,)).fetchone()
+                    _schan = ""
+                    try:
+                        import re as _re2
+                        _mm = _re2.search(r"/c/(\d+)/", (_slink[0] if _slink else "") or "")
+                        if _mm:
+                            _schan = _mm.group(1)
+                    except Exception:
+                        pass
                     _ph = ",".join("?" for _ in _eps)
-                    _others = conn_central.execute("SELECT DISTINCT item_id FROM item_episodes WHERE item_id!=? AND telegram_msg_id IN (%s)" % _ph, tuple([_sid] + _eps)).fetchall()
+                    _others = conn_central.execute(
+                        """SELECT DISTINCT e.item_id FROM item_episodes e
+                           JOIN unified_catalog u ON u.item_id = e.item_id
+                           WHERE e.item_id != ? AND e.telegram_msg_id IN (%s) AND u.source = ?""" % _ph,
+                        tuple([_sid] + _eps + [source_tag])).fetchall()
                     for _or in _others:
                         _oid = _or[0]
                         _cnt = conn_central.execute("SELECT COUNT(*) FROM item_episodes WHERE item_id=? AND telegram_msg_id IN (%s)" % _ph, tuple([_oid] + _eps)).fetchone()[0]
-                        _oc = conn_central.execute("SELECT telegram_msg_id FROM unified_catalog WHERE item_id=?", (_oid,)).fetchone()
+                        _oc = conn_central.execute("SELECT telegram_msg_id, telegram_link FROM unified_catalog WHERE item_id=?", (_oid,)).fetchone()
+                        _ochan = ""
+                        try:
+                            import re as _re3
+                            _mo = _re3.search(r"/c/(\d+)/", (_oc[1] if _oc else "") or "")
+                            if _mo:
+                                _ochan = _mo.group(1)
+                        except Exception:
+                            pass
+                        if _schan and _ochan and _schan != _ochan:
+                            continue
                         if _cnt == len(_eps) and _oc and int(_oc[0]) not in (-999, -1000):
                             conn_central.execute("DELETE FROM item_episodes WHERE item_id=?", (_sid,))
                             conn_central.execute("DELETE FROM unified_catalog WHERE item_id=?", (_sid,))
                             add_log(f"  🧹 Duplicado genérico purgado: {_sid} (absorbido por {_oid})")
                             break
-            except Exception as _e:
-                add_log(f"  (purga duplicados omitida: {_e})")
+            # FIN bloque purga (desactivada).
 
             # 4. Guardar el progreso en el canal del sistema
             if max_scan_msg_id > 0:
@@ -1311,9 +1349,25 @@ async def _scan_channel(account_id, ch, idx, total):
     if _hasta and _hasta <= last_id and not _saned_ids:
         return last_id, 0
 
+    # 2026-09-04: avance granular real — cada lote de 100 actualiza el done del
+    # item en el plan y el % global sale de done/total (nada de fórmulas fijas).
+    def _plan_bump(_saved_now):
+        try:
+            for _pi in scanner_status.get("plan_items", []):
+                if int(_pi.get("id", -1)) == int(ch.get("id", -2)):
+                    _pi["done"] = int(_saved_now)
+                    break
+            _pd = sum(int(_x.get("done", 0)) for _x in scanner_status.get("plan_items", []))
+            _pt = int(scanner_status.get("plan_total", 0) or 0)
+            scanner_status["plan_done"] = _pd
+            if _pt > 0:
+                scanner_status["progress_percent"] = min(99, int(_pd * 100 / _pt))
+            scanner_status["current_item"] = f"Escaneando '{name}': {_saved_now} mensajes..."
+        except Exception:
+            pass
+
     def _progress(saved):
-        scanner_status["progress_percent"] = min(99, int((saved / 200) * 50) + 10)
-        scanner_status["current_item"] = f"Escaneando '{name}': {saved} mensajes guardados..."
+        _plan_bump(saved)
 
     service = get_telegram_service()
     try:
@@ -1339,7 +1393,9 @@ async def _scan_channel(account_id, ch, idx, total):
         return last_id, -1
 
     # Re-traer saneados (ids sueltos bajo el max): por rangos contiguos.
+    # Suma al done del plan para que la barra no retroceda.
     _resaved = 0
+    _base_saved = int(saved or 0)
     if _saned_ids:
         try:
             for _a, _b in _cluster_ids(sorted(_saned_ids)):
@@ -1352,7 +1408,7 @@ async def _scan_channel(account_id, ch, idx, total):
                             session_string=session_string,
                             api_id=api_id,
                             api_hash=api_hash,
-                            on_batch=None,
+                            on_batch=lambda _t: _plan_bump(_base_saved + int(_t or 0)),
                         ),
                         timeout=120,
                     )
@@ -2027,15 +2083,49 @@ async def _process_periodic_cycle():
                 except Exception as _e:
                     add_log(f"  (regenerar omitido para '{name}': {_e})")
             _maxid, _saved = await _scan_channel(account_id, ch, idx, total)
-            # 2026-09-04: sin filas parseadas no se puede saltar (tras un wipe hay
-            # que regenerar aunque no haya mensajes nuevos).
+            # 2026-09-04: firma de config (topo+cat+sub+topic+rango). Si cambió,
+            # hay que parsear (con regen si cambió la topología); si no hay filas
+            # parseadas tampoco se puede saltar.
+            _sig_now = "|".join(str(ch.get(k) or "") for k in ("topology_type", "category", "custom_subcategory", "topic_id", "topic_only", "start_msg_id", "end_msg_id"))
+            _sig_old = ""
+            try:
+                from tvcat.gateway import get_db_connection as _gdb2
+                _sc = _gdb2(system=True)
+                _sr = _sc.execute("SELECT parse_sig FROM tvcat_scanned_channels WHERE id = ?", (channel_id,)).fetchone()
+                _sig_old = (_sr[0] if _sr else "") or ""
+                _sc.close()
+            except Exception:
+                pass
+            _topo_changed = False
+            try:
+                _topo_changed = (_sig_old.split("|")[0] if _sig_old else None) != str(ch.get("topology_type") or "")
+                if not _sig_old:
+                    _topo_changed = False
+            except Exception:
+                pass
+            if _topo_changed:
+                try:
+                    from .sync import regenerate_source_items
+                    _nreg = await asyncio.to_thread(regenerate_source_items, f"scan_{channel_id}")
+                    add_log(f"  ♻️ '{name}': {_nreg} generados previos limpiados (cambió topología).")
+                except Exception as _e:
+                    add_log(f"  (regenerar omitido para '{name}': {_e})")
             _has_parsed = True
             try:
                 from .sync import has_parsed_rows as _hpr
                 _has_parsed = await asyncio.to_thread(_hpr, f"scan_{channel_id}")
             except Exception:
                 pass
-            _needs_parse = (_saved != 0) or (int(channel_id) in _regen) or (not _has_parsed)
+            _needs_parse = (_saved != 0) or (int(channel_id) in _regen) or (not _has_parsed) or (_sig_old != _sig_now)
+            try:
+                if _needs_parse:
+                    from tvcat.gateway import get_db_connection as _gdb3
+                    _sc3 = _gdb3(system=True)
+                    _sc3.execute("UPDATE tvcat_scanned_channels SET parse_sig = ? WHERE id = ?", (_sig_now, channel_id))
+                    _sc3.commit()
+                    _sc3.close()
+            except Exception:
+                pass
             if not _needs_parse:
                 add_log(f"  ⏩ '{name}': sin mensajes nuevos, nada que parsear.")
                 try:
@@ -2182,12 +2272,12 @@ async def _run_tgindex_refresh(trigger: str = "manual"):
     await _process_periodic_cycle()
 
 
-# Registrar en el motor de catálogo del gateway
-try:
-    from tvcat.gateway import register_plugin_refresher
-    register_plugin_refresher("tvcat_tgindex", _run_tgindex_refresh, _get_tgindex_refresh_status, start_delay=10)
-except Exception:
-    pass
+# Convención de refresco (2026-09-06): el gateway resuelve plugin_refresh /
+# plugin_refresh_status desde este módulo vía sys.modules. NO importar
+# tvcat.gateway aquí: gateway.py corre como __main__ y el import crearía
+# una segunda instancia (el registro caía en el módulo duplicado).
+plugin_refresh = _run_tgindex_refresh
+plugin_refresh_status = _get_tgindex_refresh_status
 
 # Iniciar worker secuencial
 try:

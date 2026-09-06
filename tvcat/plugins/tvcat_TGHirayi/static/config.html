@@ -96,7 +96,7 @@
 
 <div class="card">
     <div style="margin-bottom:8px;"><b>Copia del contenido (firewall de baneo)</b></div>
-    <div class="muted" style="margin-bottom:6px;">Si el origen <b>NO</b> es de tu propiedad, siempre se generar&aacute; una copia real (descarga y subida) al canal destino, para no propagar un posible baneo de Telegram al contenido original.</div>
+    <div class="muted" id="firewall-warning" style="margin-bottom:6px;cursor:default;">Si el origen <b>NO</b> es de tu propiedad, siempre se generar&aacute; una copia real (descarga y subida) al canal destino, para no propagar un posible baneo de Telegram al contenido original.</div>
     <label style="display:block;margin:6px 0;">
         <input type="checkbox" id="real-copy-owner">
         <span>Si el origen es del usuario, generar copia REAL en el primer destino</span>
@@ -292,6 +292,10 @@ function loadConfig() {
             rcr.checked = cfg.real_copy_rest || false;
             updateRealCopyGating();
         }
+        // Opción oculta: forward directo de terceros (5 clics en el aviso). Sin checkbox visible.
+        window._forwardThirdParty = !!cfg.forward_third_party;
+        updateForwardWarningUI(window._forwardThirdParty);
+        _fwClicks = 0;
         // Normalizador MP4
         var nm = document.getElementById('normalize-mp4');
         if (nm) nm.checked = cfg.normalize_mp4 || false;
@@ -326,6 +330,55 @@ function updateRealCopyGating() {
     if (rcr) rcr.disabled = false;
 }
 
+// ─── Opción oculta: forward directo de terceros (5 clics en el aviso) ───
+// Sin checkbox visible. Activo = texto del aviso en rojo + cursiva.
+window._forwardThirdParty = false;
+var _fwClicks = 0;
+var _fwTimer = null;
+function updateForwardWarningUI(active) {
+    var el = document.getElementById('firewall-warning');
+    if (!el) return;
+    if (active) {
+        el.style.color = '#ef4444';
+        el.style.fontStyle = 'italic';
+    } else {
+        el.style.color = '';
+        el.style.fontStyle = '';
+    }
+}
+function _fwResetCounter() {
+    _fwClicks = 0;
+    if (_fwTimer) { clearTimeout(_fwTimer); _fwTimer = null; }
+}
+document.addEventListener('click', function(e) {
+    var el = document.getElementById('firewall-warning');
+    if (!el) return;
+    if (e.target !== el && !el.contains(e.target)) return;
+    _fwClicks++;
+    if (_fwTimer) clearTimeout(_fwTimer);
+    _fwTimer = setTimeout(_fwResetCounter, 2500);
+    if (_fwClicks >= 5) {
+        _fwResetCounter();
+        var rco = document.getElementById('real-copy-owner');
+        var rcr = document.getElementById('real-copy-rest');
+        var next = !window._forwardThirdParty;
+        if (next) {
+            // Condición de activación: ambos CBs deshabilitados (unchecked).
+            // Sin ningún feedback visible (ni toast ni error): solo rojo + cursiva.
+            if ((rco && rco.checked) || (rcr && rcr.checked)) {
+                return;
+            }
+            window._forwardThirdParty = true;
+            updateForwardWarningUI(true);
+            saveConfig(true);
+        } else {
+            window._forwardThirdParty = false;
+            updateForwardWarningUI(false);
+            saveConfig(true);
+        }
+    }
+});
+
 function loadDestinations() {
     api(API + '/destinations', {}, function(res) {
         var list = document.getElementById('destinations-list');
@@ -350,7 +403,7 @@ function loadDestinations() {
     });
 }
 
-function saveConfig() {
+function saveConfig(silent) {
     var sel = document.getElementById('credential-select');
     var dSel = document.getElementById('delay-select');
     var cb = document.getElementById('resume-startup');
@@ -381,6 +434,7 @@ function saveConfig() {
         download_chunk_size_kb: dc ? parseInt(dc.value) : 1024,
         real_copy_if_owner: rco ? rco.checked : false,
         real_copy_rest: rcr ? (rcr.checked && !rcr.disabled) : false,
+        forward_third_party: !!window._forwardThirdParty,
         normalize_mp4: nm ? nm.checked : false,
         streaming_mkv: sm ? sm.checked : false,
         default_audio_lang: da ? da.value.trim() : '',
@@ -392,6 +446,7 @@ function saveConfig() {
         seven_zip_path: szp ? szp.value.trim() : '',
         unrar_path: urp ? urp.value.trim() : '',
     }}, function(r) {
+        if (silent) return;
         if (r && r.ok) showToast('Configuraci\u00f3n guardada');
         else showToast('Error al guardar configuraci\u00f3n');
     });
@@ -612,6 +667,11 @@ document.addEventListener('change', function(e) {
         e.target.id === 'real-copy-owner' || e.target.id === 'real-copy-rest' || e.target.id === 'normalize-mp4' || e.target.id === 'streaming-mkv' ||
         e.target.id === 'extract-archives' || e.target.id === 'archive-parallel' || e.target.id === 'max-pending-archives') {
         if (e.target.id === 'real-copy-owner') updateRealCopyGating();
+        // Marcar cualquier checkbox de la sección copia desactiva el forward oculto
+        if ((e.target.id === 'real-copy-owner' || e.target.id === 'real-copy-rest') && e.target.checked && window._forwardThirdParty) {
+            window._forwardThirdParty = false;
+            updateForwardWarningUI(false);
+        }
         saveConfig();
     }
 });

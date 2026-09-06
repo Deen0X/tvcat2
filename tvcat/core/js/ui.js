@@ -329,6 +329,9 @@ var UI = {
 
         try { localStorage.setItem(this._settingsLastTabKey(), tabName); } catch(e) {}
         try { localStorage.setItem('tvcat_settings_last_tab', tabName); } catch(e) {}
+        // Reset de scroll: el contenedor es compartido entre pestañas; sin esto
+        // la lista de plugins aparece abajo si venías de una pestaña larga.
+        try { var _sc2 = document.querySelector('.settings-tab-container'); if (_sc2) _sc2.scrollTop = 0; } catch(e) {}
 
         // Actualizar dinámicamente el título del modal en la cabecera
         var friendlyNames = {
@@ -363,7 +366,7 @@ var UI = {
         if (tabName === 'plugins') {
             this.loadPluginsList();
             this.loadGlobalPluginsConfig();
-
+            try { if (typeof loadTgindexGeneralConfig === 'function') loadTgindexGeneralConfig(); } catch (e) {}
         }
 
         // Si entramos en la pestaña version, cargamos la información de versión
@@ -1435,12 +1438,12 @@ var UI = {
                         }
                     }
 
-                    card.innerHTML = 
+                    card.innerHTML =
                         '<div style="display:flex; align-items:center; justify-content:space-between; width:100%;">' +
                             '<div class="admin-user-info">' +
                                 '<div class="admin-user-avatar" style="background-color:' + avatarBg + '; padding: 0;">' + avatarHTML + '</div>' +
                                 '<div class="admin-user-details">' +
-                                    '<span class="admin-user-name">' + u.display_name + ' (@' + u.username + ')</span>' +
+                                    '<span class="admin-user-name"><span data-activity-led="' + u.id + '" title="Sin datos" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#71717a;margin-right:6px;vertical-align:baseline;"></span>' + u.display_name + ' (@' + u.username + ')</span>' +
                                     '<span class="admin-user-role">' + (isSelfAdmin ? 'Administrador Principal (Propietario)' : 'Usuario del Servidor') + '</span>' +
                                     '<span style="font-size:0.75rem; color:var(--text-secondary); margin-top:2px;">Telegram: ' + (u.can_send_telegram === 1 ? 'Permitido' : 'No permitido') + '</span>' +
                                     (isSelfAdmin ? '' : 
@@ -1461,8 +1464,40 @@ var UI = {
 
                     container.appendChild(card);
                 }
+                try { window.UI.refreshActivityLeds(); } catch (e) {}
             });
         });
+    },
+
+    refreshActivityLeds: function() {
+        // 2026-09-04 F1: pinta LEDs de actividad y reprograma polling 45s.
+        try {
+            if (window._activityTimer) clearTimeout(window._activityTimer);
+            window._activityTimer = null;
+        } catch (e) {}
+        var paint = function(users) {
+            var map = {};
+            for (var i = 0; i < (users || []).length; i++) map[String(users[i].user_id)] = users[i];
+            var els = document.querySelectorAll('[data-activity-led]');
+            var colors = { green: '#22c55e', yellow: '#facc15', blue: '#3b82f6', gray: '#71717a' };
+            var tips = { green: 'Activo ahora', yellow: 'Activo hace <10 min', blue: 'Activo hace <15 min', gray: 'Inactivo +1h' };
+            for (var j = 0; j < els.length; j++) {
+                var st = map[els[j].getAttribute('data-activity-led')] || { state: 'gray' };
+                els[j].style.background = colors[st.state] || colors.gray;
+                els[j].style.boxShadow = '0 0 4px ' + (colors[st.state] || colors.gray);
+                els[j].title = tips[st.state] || tips.gray;
+            }
+        };
+        var tick = function() {
+            var pane = document.getElementById('pane-admin');
+            if (!pane || pane.classList.contains('hidden')) return;
+            window.API.ajax({
+                url: '/api/admin/activity',
+                success: function(res) { paint(res && res.users); window._activityTimer = setTimeout(tick, 45000); },
+                error: function() { window._activityTimer = setTimeout(tick, 45000); }
+            });
+        };
+        tick();
     },
 
     loadGlobalPluginsConfig: function() {
@@ -1534,6 +1569,10 @@ var UI = {
     },
 
     loadPluginsList: function() {
+        // LEGACY desactivado: la única lista válida es la actual de app.js
+        // (imagen 2: secciones + drag + iconos + toggles rojos). Se delega.
+        try { var _sc = document.querySelector('.settings-tab-container'); if (_sc) _sc.scrollTop = 0; } catch(e) {}
+        if (typeof window.loadPluginsList === 'function') { window.loadPluginsList(); return; }
         var container = document.getElementById('plugins-list-container');
         if (!container) return;
         

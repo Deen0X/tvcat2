@@ -463,7 +463,8 @@ def _ensure_scanstate_columns():
         conn = get_db_connection(system=True)
         for ddl in ("ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_msg_id INTEGER DEFAULT 0",
                     "ALTER TABLE tvcat_scanned_channels ADD COLUMN test_only INTEGER DEFAULT 0",
-                    "ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_checked_at INTEGER DEFAULT 0"):
+                    "ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_checked_at INTEGER DEFAULT 0",
+                    "ALTER TABLE tvcat_scanned_channels ADD COLUMN parse_sig TEXT DEFAULT ''"):
             try:
                 conn.execute(ddl)
             except Exception:

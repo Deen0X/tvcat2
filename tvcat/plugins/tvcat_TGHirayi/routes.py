@@ -162,6 +162,7 @@ class ConfigUpdate(BaseModel):
     download_chunk_size_kb: Optional[int] = None
     real_copy_if_owner: Optional[bool] = None   # CB1: si el origen es del usuario → copia real en destino 1
     real_copy_rest: Optional[bool] = None       # CB2: copia real en el resto (solo si hay primera copia real)
+    forward_third_party: Optional[bool] = None  # OCULTO: forward Telegram directo aunque el origen sea de terceros (bypass firewall de baneo)
     normalize_mp4: Optional[bool] = None        # Normalizador MP4 (activar/desactivar)
     streaming_mkv: Optional[bool] = None        # Subir MKV en modo streaming (sin re-encode; prioridad sobre normalize_mp4)
     extract_archives: Optional[bool] = None     # Extraer archives automáticamente
@@ -285,6 +286,7 @@ def _load_config():
         "download_chunk_size_kb": 1024,
         "real_copy_if_owner": False,
         "real_copy_rest": False,
+        "forward_third_party": False,
         "normalize_mp4": False,
         "streaming_mkv": False,
         "extract_archives": True,
@@ -504,6 +506,15 @@ async def update_config(body: ConfigUpdate, request: Request):
         cfg["real_copy_if_owner"] = body.real_copy_if_owner
     if body.real_copy_rest is not None:
         cfg["real_copy_rest"] = body.real_copy_rest
+    if body.forward_third_party is not None:
+        cfg["forward_third_party"] = bool(body.forward_third_party)
+        # Al activar el forward oculto se fuerzan ambos CBs a OFF (condición de activación)
+        if cfg["forward_third_party"]:
+            cfg["real_copy_if_owner"] = False
+            cfg["real_copy_rest"] = False
+    # Exclusión mutua: marcar cualquier CB desactiva el forward oculto
+    if cfg.get("real_copy_if_owner") or cfg.get("real_copy_rest"):
+        cfg["forward_third_party"] = False
     if body.normalize_mp4 is not None:
         cfg["normalize_mp4"] = body.normalize_mp4
     if body.streaming_mkv is not None:
@@ -1477,8 +1488,16 @@ async def _process_job(job: dict, db: dict):
         is_owner = await _channel_is_owner(client, source_channel_id)
         real_copy_if_owner = bool(cfg.get("real_copy_if_owner", False))   # CB1
         real_copy_rest = bool(cfg.get("real_copy_rest", False))           # CB2
-        # Primera copia real existe si: origen de terceros (firewall) o CB1=true con origen propio
+        # OPCIÓN OCULTA: forward Telegram directo aunque el origen sea de terceros.
+        # Solo aplica con ambos CBs OFF (la UI lo fuerza) y origen no propio. Con
+        # origen propio el path normal de copia Telegram ya es óptimo (sin atribución).
+        forward_hidden = bool(cfg.get("forward_third_party", False))
+        use_forward = bool(forward_hidden and (not is_owner))
+        # Primera copia real existe si: origen de terceros (firewall) o CB1=true con origen propio.
+        # El forward oculto la anula (todo método Telegram, sin descarga/subida).
         first_real = (not is_owner) or real_copy_if_owner
+        if use_forward:
+            first_real = False
         # CB2 solo aplica si hay primera copia real (sin ella no hay media que re-descargar)
         cb2_active = first_real and real_copy_rest
         # Normalización MP4: global (config) + audio/subs por job
@@ -1496,7 +1515,7 @@ async def _process_job(job: dict, db: dict):
         if streaming_mkv:
             print(f"[TGHirayi] Modo streaming MKV activo", flush=True)
         print(f"[TGHirayi] is_owner={is_owner} first_real={first_real} cb2_active={cb2_active} "
-              f"(CB1={real_copy_if_owner}, CB2={real_copy_rest})", flush=True)
+              f"(CB1={real_copy_if_owner}, CB2={real_copy_rest}, FWD={use_forward})", flush=True)
 
         # next_episode (override explícito del usuario) tiene prioridad sobre 'auto' (current_episode)
         override = job.get("next_episode")
@@ -1537,6 +1556,9 @@ async def _process_job(job: dict, db: dict):
         # Categoría multimedia + todos los ficheros son archives (no vídeo/audio directo).
         # El criterio de categoría excluye juegos/consolas (no se tocan, usan tvcat_installer_*).
         _is_archive_job = _detect_archive_job(job, episodes) and bool(cfg.get("extract_archives", True))
+        if use_forward:
+            # Forward oculto: reenviar tal cual, sin extraer ni normalizar archives.
+            _is_archive_job = False
         if _is_archive_job:
             job["is_archive"] = True
             print(f"[TGHirayi] Job {job['id']} detectado como ARCHIVE ({len(episodes)} ficheros) "
@@ -1689,6 +1711,22 @@ async def _process_job(job: dict, db: dict):
                         job["status_text"] = f"Subiendo ep.{ep_num}/{total} a {dest.get('name','?')}..."
                         _persist_job(job)
                         sent_ids = await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress)
+                    elif use_forward:
+                        # OPCIÓN OCULTA: forward directo aunque el origen sea de terceros.
+                        # Sin descarga ni subida. Si falla (NoForwards/sin acceso) → fallback
+                        # a copia real del episodio para no dejar el job a medias.
+                        job["status_text"] = f"Reenviando (telegram) ep.{ep_num}/{total} a {dest.get('name','?')}..."
+                        _persist_job(job)
+                        sent_ids = await _forward_episode_from_origin(client, source_channel_id, episode, dest, topic_id, delay)
+                        if not sent_ids:
+                            print(f"[TGHirayi] Forward falló en ep.{ep_num}, fallback a copia real", flush=True)
+                            job["status_text"] = f"Subiendo ep.{ep_num}/{total} a {dest.get('name','?')} (fallback)..."
+                            _persist_job(job)
+                            dl_ep["n"] = ep_num
+                            media_data = await _download_episode_media(client, episode, source_channel_id, _progress,
+                                                                        normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
+                                                                        streaming_mkv=streaming_mkv)
+                            sent_ids = await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress)
                     else:
                         job["status_text"] = f"Copiando (telegram) ep.{ep_num}/{total} a {dest.get('name','?')}..."
                         _persist_job(job)
@@ -5468,6 +5506,43 @@ async def _channel_is_owner(client, channel_id) -> bool:
     except Exception as e:
         print(f"[TGHirayi] Error detectando propietario del canal: {e}", flush=True)
         return False
+
+
+async def _forward_episode_from_origin(client, source_channel_id, episode: dict, target_dest: dict, topic_id, delay: float) -> List[int]:
+    """Forward Telegram directo desde el origen (sin descarga ni subida).
+    SOLO para la opción oculta `forward_third_party`: reenvía el mensaje original
+    aunque no sea del usuario. Si el origen restringe forwards (NoForwards),
+    falta acceso o cualquier error, devuelve [] para que el caller haga fallback
+    a copia real (descarga+subida). Nunca lanza excepción."""
+    sent_ids: List[int] = []
+    try:
+        src_chat = _extract_channel_id(episode.get("telegram_link", "")) or source_channel_id
+        msg_id = episode.get("telegram_msg_id") or episode.get("msg_id")
+        if not src_chat or not msg_id:
+            return sent_ids
+        src_entity = await client.get_entity(int(src_chat))
+        tgt_entity = await client.get_entity(int(target_dest["channel_id"]))
+        # forward_messages(entity_dest, msg_ids, from_peer=origen)
+        try:
+            kwargs = {}
+            if topic_id:
+                # Telethon >=1.28 acepta reply_to en forwards a forum topics; si la
+                # versión no lo soporta, el TypeError cae al reintento sin topic.
+                kwargs["reply_to"] = int(topic_id)
+            sent = await client.forward_messages(tgt_entity, int(msg_id), from_peer=src_entity, **kwargs)
+        except TypeError:
+            sent = await client.forward_messages(tgt_entity, int(msg_id), from_peer=src_entity)
+        if sent is not None:
+            msgs = sent if isinstance(sent, list) else [sent]
+            for m in msgs:
+                mid = int(getattr(m, 'id', 0) or 0)
+                if mid:
+                    sent_ids.append(mid)
+            await asyncio.sleep(delay)
+        return sent_ids
+    except Exception as e:
+        print(f"[TGHirayi] Forward directo falló (fallback a copia real): {e}", flush=True)
+        return []
 
 
 async def _copy_episode_from_origin(client, source_channel_id, episode: dict, target_dest: dict, topic_id, delay: float) -> List[int]:

@@ -955,6 +955,7 @@ function loadUserbotConfig() {
                 '<div style="flex:1;display:flex;align-items:center;gap:8px;min-width:0;">' +
                 '<span class="user-radio" onclick="toggleDefaultUser(' + user.tg_user_id + ')" ' +
                 'style="cursor:pointer;font-size:1.2rem;user-select:none;width:1.2rem;text-align:center;color:var(--accent);" title="Marcar como principal">' + checked + '</span>' +
+                '<span data-tg-usage="' + user.tg_user_id + '" title="Sin uso" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#71717a;flex-shrink:0;"></span>' +
                 '<span class="user-name" style="font-weight:600;">' + user.name + '</span>' +
                 '</div>' +
                 '<div style="display:flex;align-items:center;gap:6px;margin-left:auto;">' +
@@ -1021,6 +1022,35 @@ function loadUserbotConfig() {
     });
 }
 }
+
+window.refreshTgUsageLeds = function() {
+    // 2026-09-04 F2: pinta LEDs de uso real de Telegram y reprograma 30s.
+    try {
+        if (window._tgUsageTimer) clearTimeout(window._tgUsageTimer);
+        window._tgUsageTimer = null;
+    } catch (e) {}
+    var paint = function(accounts) {
+        var colors = ['#71717a', '#7f1d1d', '#ef4444'];
+        var tips = ['Sin uso reciente', 'Uso hace 30-60s', 'Llamando a Telegram ahora'];
+        var els = document.querySelectorAll('[data-tg-usage]');
+        for (var j = 0; j < els.length; j++) {
+            var a = (accounts || {})[els[j].getAttribute('data-tg-usage')] || { level: 0, calls_30s: 0 };
+            els[j].style.background = colors[a.level] || colors[0];
+            els[j].style.boxShadow = '0 0 4px ' + (colors[a.level] || colors[0]);
+            els[j].title = (tips[a.level] || tips[0]) + (a.calls_30s ? ' (' + a.calls_30s + '/30s)' : '');
+        }
+    };
+    var tick = function() {
+        var pane = document.getElementById('pane-userbot');
+        if (!pane || pane.classList.contains('hidden')) return;
+        window.API.ajax({
+            url: '/api/telegram/usage',
+            success: function(res) { paint(res && res.accounts); window._tgUsageTimer = setTimeout(tick, 30000); },
+            error: function() { window._tgUsageTimer = setTimeout(tick, 30000); }
+        });
+    };
+    tick();
+};
 
 window.setActiveClient = function(tgUserId, clientType) {
     window.API.ajax({
@@ -1089,8 +1119,8 @@ window._initUserbotCollaps = function(credsFilled) {
     } else {
         window._applyUserbotCollap('sessions', sessPref === '1');
     }
-    // behavior, enrich, enrich-behavior, google: colapsados por defecto (google siempre oculto)
-    ['behavior','enrich','enrich-behavior','google'].forEach(function(n){
+    // behavior, buckets, enrich, enrich-behavior, google: colapsados por defecto (google siempre oculto)
+    ['behavior','buckets','enrich','enrich-behavior','google'].forEach(function(n){
         var pref = null; try { pref = localStorage.getItem('tvcat_userbot_collap_' + n); } catch(e) {}
         if (pref === null) {
             window._applyUserbotCollap(n, true);
@@ -1098,6 +1128,45 @@ window._initUserbotCollaps = function(credsFilled) {
             window._applyUserbotCollap(n, pref === '1');
         }
     });
+};
+
+window.refreshBucketsLive = function() {
+    // 2026-09-04 F3: estado vivo de buckets por cuenta + reprograma 5s.
+    try {
+        if (window._bucketsTimer) clearTimeout(window._bucketsTimer);
+        window._bucketsTimer = null;
+    } catch (e) {}
+    var tick = function() {
+        var pane = document.getElementById('pane-userbot');
+        var box = document.getElementById('buckets-live');
+        if (!pane || pane.classList.contains('hidden') || !box) return;
+        window.API.ajax({
+            url: '/api/telegram/throttle',
+            success: function(res) {
+                var users = (res && (res.buckets || res.users)) || {};
+                var html = '';
+                for (var uid in users) {
+                    if (!users.hasOwnProperty(uid)) continue;
+                    var b = users[uid];
+                    var tok = parseFloat(b.tokens || 0), burst = parseFloat(b.burst || b.tokens || 1);
+                    var cd = parseFloat(b.cooldown_s || 0);
+                    var frac = burst > 0 ? Math.max(0, Math.min(1, tok / burst)) : 0;
+                    var stt = b.state || (cd > 0 ? 'red' : (frac < 1 ? 'yellow' : 'green'));
+                    var led = stt === 'red' ? '#ef4444' : (stt === 'yellow' ? '#facc15' : (stt === 'green' ? '#22c55e' : '#71717a'));
+                    var tip = stt + ' · ' + Math.round(tok) + '/' + Math.round(burst) + ' tokens · ' + (b.calls_60s || 0) + ' llamadas/60s' + (cd > 0 ? ' · cooldown ' + cd + 's' : '');
+                    html += '<div style="display:flex;align-items:center;gap:8px;font-size:0.75rem;">' +
+                        '<span title="' + tip + '" style="width:9px;height:9px;border-radius:50%;background:' + led + ';box-shadow:0 0 4px ' + led + ';flex-shrink:0;"></span>' +
+                        '<span style="color:var(--text-secondary);min-width:90px;">' + uid + '</span>' +
+                        '<div style="flex:1;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden;"><div style="height:100%;width:' + Math.round(frac * 100) + '%;background:' + led + ';transition:width 0.5s;"></div></div>' +
+                        '<span style="color:var(--text-secondary);font-family:monospace;">' + Math.round(tok) + '/' + Math.round(burst) + '</span></div>';
+                }
+                box.innerHTML = html || '<span style="font-size:0.75rem;color:var(--text-secondary);">Sin actividad de buckets.</span>';
+                window._bucketsTimer = setTimeout(tick, 5000);
+            },
+            error: function() { window._bucketsTimer = setTimeout(tick, 5000); }
+        });
+    };
+    tick();
 };
 
 window.saveTelegramSettings = function() {
@@ -1652,9 +1721,21 @@ window.openSessionGenerator = function() {
     };
 };
 
+window.toggleTgAutoCollap = function() {
+    var body = document.getElementById('tgauto-collap-body');
+    var ind = document.getElementById('tgauto-collap-ind');
+    if (!body) return;
+    var hidden = body.style.display === 'none';
+    body.style.display = hidden ? '' : 'none';
+    if (ind) ind.style.transform = hidden ? '' : 'rotate(-90deg)';
+    try { localStorage.setItem('tvcat_tgauto_collap', hidden ? '0' : '1'); } catch (e) {}
+};
+
 function loadSettings() {
     loadUserbotConfig();
     loadUserbotSessions();
+    try { window.refreshTgUsageLeds(); } catch (e) {}
+    try { window.refreshBucketsLive(); } catch (e2) {}
     window.loadEnrichConfig();
     window.API.ajax({
         url: '/api/auth/me',
@@ -1821,6 +1902,7 @@ function renderPluginList(container, plugins) {
         }
     }
     container.innerHTML = html;
+    try { var _sc = document.querySelector('.settings-tab-container'); if (_sc) _sc.scrollTop = 0; } catch(e) {}
 }
 
 function getPluginByName(name) {
@@ -2180,16 +2262,6 @@ window.showTgindexConfig = function() {
     var header = pluginConfigHeader(plugin);
     var html = header + '<div style="margin-bottom:10px;"></div>' +
 
-        // Secci\u00f3n: General
-        '<div class="settings-section" style="margin-bottom:12px;padding:10px;background:var(--bg-surface);border-radius:8px;border:1px solid var(--border-color);">' +
-        '<h4 style="margin:0 0 8px;font-size:0.9rem;">\u2699\ufe0f General</h4>' +
-        '<div style="margin-bottom:8px;"><label style="display:flex;align-items:center;gap:8px;font-size:0.8rem;cursor:pointer;">' +
-        '<input type="checkbox" id="cfg-scan-enabled" style="accent-color:var(--accent);"> Escaneo autom\u00e1tico activado</label></div>' +
-        '<div style="margin-bottom:8px;"><label style="font-size:0.8rem;">Intervalo entre ciclos (min):</label>' +
-        '<input type="number" id="cfg-cycle-minutes" min="1" style="width:110px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:0.8rem;margin-left:8px;box-sizing:border-box;"></div>' +
-        '<button class="btn-primary" onclick="saveTgindexGeneralConfig()" style="padding:5px 12px;font-size:0.8rem;">\uD83D\uDCBE Guardar</button>' +
-        '<span id="cfg-status" style="margin-left:8px;font-size:0.8rem;"></span></div>' +
-
         // Secci\u00f3n: Scan Items
         '<div class="settings-section" style="margin-bottom:12px;padding:10px;background:var(--bg-surface);border-radius:8px;border:1px solid var(--border-color);">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
@@ -2228,12 +2300,33 @@ window.showTgindexConfig = function() {
         '<button onclick="clearTgindexLogs()" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:0.75rem;margin-left:12px;font-family:Outfit,sans-serif;padding:4px 0;">Limpiar</button></div>' +
         '<div id="scan-log" style="margin-top:4px;max-height:180px;overflow-y:auto;font-size:0.72rem;color:var(--text-secondary);font-family:monospace;padding:6px;background:var(--bg-card);border-radius:4px;white-space:pre-wrap;border:1px solid var(--border-color);"></div></div>' +
 
+        // Actualizaciones automáticas (colapsable, encima de Guardar cambios)
+        '<div class="settings-section" style="margin-bottom:12px;padding:0;background:var(--bg-surface);border-radius:8px;border:1px solid var(--border-color);overflow:hidden;">' +
+        '<div onclick="toggleTgAutoCollap()" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;user-select:none;">' +
+        '<h4 style="margin:0;font-size:0.9rem;">\uD83D\uDD04 Actualizaciones autom\u00e1ticas</h4>' +
+        '<span id="tgauto-collap-ind" style="font-size:0.7rem;transition:transform 0.2s;display:inline-block;">\u25bc</span></div>' +
+        '<div id="tgauto-collap-body" style="padding:0 12px 10px;">' +
+        '<div style="margin-bottom:8px;"><label style="display:flex;align-items:center;gap:8px;font-size:0.8rem;cursor:pointer;">' +
+        '<input type="checkbox" id="cfg-scan-enabled" style="accent-color:var(--accent);"> Escaneo autom\u00e1tico activado</label></div>' +
+        '<div style="margin-bottom:8px;"><label style="font-size:0.8rem;">Intervalo entre ciclos (min):</label>' +
+        '<input type="number" id="cfg-cycle-minutes" min="1" style="width:110px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:0.8rem;margin-left:8px;box-sizing:border-box;"></div>' +
+        '<span id="cfg-status" style="font-size:0.75rem;color:var(--text-secondary);">Se guarda con Guardar cambios</span>' +
+        '</div></div>' +
+
         // Bot\u00f3n Guardar cambios
         '<div style="display:flex;gap:8px;align-items:center;padding:8px;border-top:1px solid var(--border-color);margin-top:8px;">' +
         '<button class="btn-primary" id="save-tgindex-btn" onclick="saveTgindexAll()" style="padding:8px 20px;">\uD83D\uDCBE Guardar cambios</button>' +
         '<span id="save-tgindex-status" style="font-size:0.8rem;color:var(--text-secondary);"></span></div>';
 
     container.innerHTML = html;
+    try {
+        if (localStorage.getItem('tvcat_tgauto_collap') === '1') {
+            var ab = document.getElementById('tgauto-collap-body');
+            var ai = document.getElementById('tgauto-collap-ind');
+            if (ab) ab.style.display = 'none';
+            if (ai) ai.style.transform = 'rotate(-90deg)';
+        }
+    } catch (eAC) {}
     loadTgindexGeneralConfig();
     loadTgindexChannels();
     loadCacheRelayConfig();
@@ -3205,6 +3298,21 @@ window.applyTgindexFlow = function(closeAfter) {
     } catch (e0) {}
     _setTgindexFlowButtons(true);
     if (status) status.textContent = 'Aplicando disponibilidad...';
+    // 2026-09-04: limpiar log en cada Aplicar (solo esta interacción).
+    try {
+        var _sl = document.getElementById('scan-log');
+        if (_sl) _sl.innerHTML = '';
+    } catch (eL) {}
+    // 2026-09-04: Guardar cambios incluye la config de Actualizaciones automáticas.
+    try {
+        var _cyc = parseInt((document.getElementById('cfg-cycle-minutes') || {}).value, 10) || 30;
+        var _cbox = document.getElementById('cfg-scan-enabled');
+        var _cen = _cbox ? _cbox.checked : true;
+        window.API.ajax({
+            method: 'POST', url: '/api/plugin/config',
+            data: { cycle_minutes: _cyc, scan_enabled: _cen }, success: function() {}, error: function() {}
+        });
+    } catch (eC) {}
     // Regen: ids con topologia provisional (el ciclo regenera antes de parsear).
     var regenIds = [];
     try {
@@ -3290,16 +3398,111 @@ function pollScanStatus() {
 
 // Barra global bajo la búsqueda: visible durante scans (vengan de donde vengan).
 // 2026-09-04: solo progreso; el árbol/grid se recargan UNA vez al terminar.
+// 2026-09-04b: también muestra refresco de fuentes con segmentos por plugin.
 window._globalScanLastDone = -1;
+window._sourcesBarActive = false;
+window._ensureScanBar = function() {
+    // 2026-09-06: la barra vive dentro de .search-container (solo la línea).
+    var wrap = document.getElementById('srcprog');
+    if (wrap) return wrap;
+    var box = document.querySelector('.search-container');
+    if (!box) return null;
+    wrap = document.createElement('div');
+    wrap.id = 'srcprog';
+    wrap.className = 'hidden';
+    wrap.style.cssText = 'margin-top:3px;';
+    wrap.innerHTML = '<div id="srcprog-segs" style="display:flex;gap:2px;height:2px;background:rgba(255,255,255,0.10);border-radius:2px;overflow:hidden;">' +
+        '<div id="srcprog-fill" style="height:100%;width:0%;background:var(--accent);transition:width 0.4s;flex:none;"></div></div>';
+    box.appendChild(wrap);
+    return wrap;
+};
+window.refreshSources = function() {
+    // Botón ⟳ del sidebar: refresco secuencial de fuentes (solo la línea).
+    var wrap = window._ensureScanBar();
+    if (wrap) wrap.classList.remove('hidden');
+    window._sourcesBarActive = true;
+    pollSourcesBar();
+    var showErr = function() {
+        // Sin textos: error = línea en rojo 4s.
+        window._sourcesBarActive = false;
+        var fill = document.getElementById('srcprog-fill');
+        if (wrap) wrap.classList.remove('hidden');
+        if (fill) { fill.style.width = '100%'; fill.style.background = '#e5484d'; }
+        setTimeout(function() {
+            if (wrap) wrap.classList.add('hidden');
+            if (fill) { fill.style.width = '0%'; fill.style.background = 'var(--accent)'; }
+        }, 4000);
+    };
+    window.API.ajax({
+        method: 'POST', url: '/api/sources/refresh', data: { trigger: 'manual' },
+        success: function(res) {
+            if (res && res.success) {
+                pollSourcesBar();
+            } else {
+                showErr();
+            }
+        },
+        error: function() {
+            showErr();
+        }
+    });
+};
+function pollSourcesBar() {
+    var wrap = window._ensureScanBar ? window._ensureScanBar() : document.getElementById('srcprog');
+    if (!wrap) return;
+    window.API.ajax({
+        url: '/api/sources/refresh/status',
+        success: function(res) {
+            var segsBox = document.getElementById('srcprog-segs');
+            var txt = document.getElementById('srcprog-text');
+            var pct = document.getElementById('srcprog-pct');
+            var segs = (res && res.segments) || [];
+            if (res && res.running && segs.length) {
+                wrap.classList.remove('hidden');
+                if (segsBox && !segsBox.getAttribute('data-multi')) {
+                    segsBox.setAttribute('data-multi', '1');
+                    segsBox.innerHTML = '';
+                    for (var i = 0; i < segs.length; i++) {
+                        var d = document.createElement('div');
+                        d.id = 'srcprog-seg-' + i;
+                        d.style.cssText = 'height:100%;width:0%;background:var(--accent);transition:width 0.5s;flex:none;border-radius:2px;';
+                        segsBox.appendChild(d);
+                    }
+                }
+                var done = 0;
+                for (var j = 0; j < segs.length; j++) {
+                    var el = document.getElementById('srcprog-seg-' + j);
+                    var p = Math.max(0, Math.min(100, segs[j].pct || 0));
+                    if (el) el.style.width = p + '%';
+                    done += p;
+                }
+                var cur = res.current || 'Actualizando fuentes...';
+                var pp = segs.length ? Math.round(done / segs.length) : 0;
+                if (txt) txt.textContent = cur;
+                if (pct) pct.textContent = pp + '%';
+                setTimeout(pollSourcesBar, 1500);
+            } else {
+                if (segsBox) { segsBox.removeAttribute('data-multi'); segsBox.innerHTML = '<div id="srcprog-fill" style="height:100%;width:0%;background:var(--accent);transition:width 0.4s;flex:none;"></div>'; }
+                wrap.classList.add('hidden');
+                if (window._sourcesBarActive) {
+                    window._sourcesBarActive = false;
+                    try { if (typeof buildCategoryTree === 'function') buildCategoryTree(); } catch (e) {}
+                    try { if (window.Catalog && window.Catalog.load) window.Catalog.load(window.Catalog.currentCategory || 'home'); } catch (e2) {}
+                }
+            }
+        },
+        error: function() { setTimeout(pollSourcesBar, 4000); }
+    });
+}
 function pollGlobalScanBar() {
-    var wrap = document.getElementById('scan-global-bar');
+    var wrap = window._ensureScanBar ? window._ensureScanBar() : document.getElementById('srcprog');
     if (!wrap) return;
     window.API.ajax({
         url: '/api/user/scan/status',
         success: function(res) {
-            var fill = document.getElementById('scan-global-fill');
-            var txt = document.getElementById('scan-global-text');
-            var pct = document.getElementById('scan-global-pct');
+            var fill = document.getElementById('srcprog-fill');
+            var txt = document.getElementById('srcprog-text');
+            var pct = document.getElementById('srcprog-pct');
             if (res && res.status === 'scanning') {
                 var items = res.plan_items || [];
                 var dn = 0, tt = 0;
@@ -3677,18 +3880,50 @@ function loadAdminUsers() {
                             else if (u.avatar) avHtml = '<span style="width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;background:' + (u.color || '#27272a') + ';border:1px solid var(--border-color);">' + u.avatar + '</span>';
                             else avHtml = '<span style="width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-size:12px;background:#27272a;color:#a1a1aa;border:1px solid var(--border-color);">' + (u.username || '?').charAt(0).toUpperCase() + '</span>';
                             html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:var(--bg-surface);border-radius:6px;border:1px solid var(--border-color);">' +
-                                '<div style="display:flex;align-items:center;gap:8px;min-width:0;">' + avHtml + '<span ' + roleBadge + '>' + u.username + '</span> <span style="font-size:0.75rem;color:var(--text-secondary);margin-left:2px;">(' + u.role + ')</span></div>' +
+                                '<div style="display:flex;align-items:center;gap:8px;min-width:0;">' + avHtml + '<span data-admin-activity="' + u.id + '" title="Sin datos" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#71717a;flex-shrink:0;"></span><span ' + roleBadge + '>' + u.username + '</span> <span style="font-size:0.75rem;color:var(--text-secondary);margin-left:2px;">(' + u.role + ')</span></div>' +
                                 '<div style="display:flex;align-items:center;gap:8px;">' + sel +
                                 (u.role !== 'admin' ? '<button onclick="deleteUser(' + u.id + ',\'' + u.username + '\')" style="padding:4px 10px;border-radius:4px;border:1px solid var(--accent);background:transparent;color:var(--accent);cursor:pointer;font-size:0.8rem;font-family:Outfit,sans-serif;">Eliminar</button>' : '') +
                                 '</div></div>';
                         }
                         html += '</div>';
                         container.innerHTML = html;
+                        try { refreshAdminActivityLeds(); } catch (e) {}
                     }
                 });
             }});
         }
     });
+}
+
+function refreshAdminActivityLeds() {
+    // 2026-09-04 F1: LEDs de actividad en Gestión de usuarios + polling 45s.
+    try {
+        if (window._adminActivityTimer) clearTimeout(window._adminActivityTimer);
+        window._adminActivityTimer = null;
+    } catch (e) {}
+    var paint = function(users) {
+        var map = {};
+        for (var i = 0; i < (users || []).length; i++) map[String(users[i].user_id)] = users[i];
+        var colors = { green: '#22c55e', yellow: '#facc15', blue: '#3b82f6', gray: '#71717a' };
+        var tips = { green: 'Activo ahora', yellow: 'Activo hace <10 min', blue: 'Activo hace <15 min', gray: 'Inactivo +1h' };
+        var els = document.querySelectorAll('[data-admin-activity]');
+        for (var j = 0; j < els.length; j++) {
+            var st = map[els[j].getAttribute('data-admin-activity')] || { state: 'gray' };
+            els[j].style.background = colors[st.state] || colors.gray;
+            els[j].style.boxShadow = '0 0 4px ' + (colors[st.state] || colors.gray);
+            els[j].title = tips[st.state] || tips.gray;
+        }
+    };
+    var tick = function() {
+        var pane = document.getElementById('pane-admin');
+        if (!pane || pane.classList.contains('hidden')) return;
+        window.API.ajax({
+            url: '/api/admin/activity',
+            success: function(res) { paint(res && res.users); window._adminActivityTimer = setTimeout(tick, 45000); },
+            error: function() { window._adminActivityTimer = setTimeout(tick, 45000); }
+        });
+    };
+    tick();
 }
 
 window.openProfilesManager = function() {
