@@ -4087,6 +4087,53 @@ var _visTree = [];
 var _visAvailable = { plugins: {}, categories: {}, subcategories: {} };
 var _treeBuildSeq = 0;
 
+// Iconos de categorías/subcategorías (2026-09-07, SystemImages): espeja el
+// matching del servidor (listas `;`, minúsculas, `*` comodín, lista vacía = todo).
+window._sysIconsCache = null;
+window._sysIconsTs = 0;
+function _sysNormList(v) {
+    var out = [];
+    var parts = String(v || '').replace(/,/g, ';').split(';');
+    for (var i = 0; i < parts.length; i++) {
+        var q = parts[i].replace(/^\s+|\s+$/g, '').toLowerCase();
+        if (q) out.push(q);
+    }
+    return out;
+}
+function _sysListOk(needles, hay) {
+    if (!hay || !hay.length) return true;
+    for (var i = 0; i < needles.length; i++) {
+        if (needles[i] && (hay.indexOf(needles[i]) >= 0 || hay.indexOf('*') >= 0)) return true;
+    }
+    return false;
+}
+function _sysIconFor(level, cat, sub) {
+    // level 'cat'|'sub'. Devuelve {img, emoji} o null.
+    var cache = window._sysIconsCache;
+    if (!cache || !cache.items) return null;
+    cat = String(cat || '').toLowerCase();
+    sub = String(sub || '').toLowerCase();
+    var items = cache.items, generic = null;
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        var scope = it.scope || 'any';
+        if (level === 'cat' && scope !== 'category' && scope !== 'any') continue;
+        if (level === 'sub' && scope !== 'subcategory' && scope !== 'any') continue;
+        var cats = _sysNormList(it.categories), subs = _sysNormList(it.subcategories);
+        var ok = (level === 'cat') ? _sysListOk([cat], cats) : _sysListOk([sub], subs);
+        if (ok) return { img: it.img || '', emoji: it.emoji || '' };
+    }
+    if (level === 'cat' && cache.generic_cat) return cache.generic_cat;
+    if (level === 'sub' && cache.generic_sub) return cache.generic_sub;
+    return null;
+}
+function _sysIconHtml(level, cat, sub) {
+    var ic = _sysIconFor(level, cat, sub);
+    if (!ic) return '';
+    if (ic.img) return '<img src="' + ic.img + '" style="width:14px;height:14px;object-fit:contain;vertical-align:middle;border-radius:3px;"> ';
+    if (ic.emoji) return '<span style="font-size:0.8rem;vertical-align:middle;">' + ic.emoji + '</span> ';
+    return '';
+}
 function buildCategoryTree() {
     var container = document.getElementById('categories-tree-container');
     if (!container) return;
@@ -4104,6 +4151,9 @@ function buildCategoryTree() {
                     _visAvailable.plugins = avail.plugins || {};
                     _visAvailable.categories = avail.categories || {};
                     _visAvailable.subcategories = avail.subcategories || {};
+                    // Iconos del sistema (cache 60s; si falla, árbol sin iconos).
+                    var _needIcons = !window._sysIconsCache || (Date.now() - window._sysIconsTs > 60000);
+                    var _goTree = function() {
                     window.API.ajax({
                         url: '/api/catalog/tree',
                         success: function(data) {
@@ -4134,7 +4184,7 @@ function buildCategoryTree() {
                                     html += '<div style="padding-left:16px;">' +
                                         '<label class="tree-item">' +
                                         '<input type="checkbox" ' + (catState.checked ? 'checked' : '') + (catState.indet ? ' data-indet="1"' : '') + ' onchange="toggleCategoryVis(\'' + cat.name + '\', this)"> ' +
-                                        cat.name + '</label></div>';
+                                        _sysIconHtml('cat', cat.name, '') + cat.name + '</label></div>';
                                     for (var u = 0; u < cat.subcategories.length; u++) {
                                         var sub = cat.subcategories[u];
                                         var subKey = cat.name + '||' + sub;
@@ -4143,7 +4193,7 @@ function buildCategoryTree() {
                                         html += '<div style="padding-left:32px;">' +
                                             '<label class="tree-item" style="font-size:0.75rem;">' +
                                             '<input type="checkbox" ' + (subChecked ? 'checked' : '') + ' onchange="toggleSubcategoryVis(\'' + subKey + '\', this)"> ' +
-                                            sub + '</label></div>';
+                                            _sysIconHtml('sub', cat.name, sub) + sub + '</label></div>';
                                     }
                                 }
                             }
@@ -4155,6 +4205,14 @@ function buildCategoryTree() {
                         },
                         error: function(s, b) { if (seq === _treeBuildSeq) { console.error('Error cargando /api/catalog/tree:', s, b); container.innerHTML = '<div style="padding:8px;font-size:0.8rem;color:var(--text-secondary);">Error cargando \u00E1rbol</div>'; } }
                     });
+                    }; // _goTree
+                    if (_needIcons) {
+                        window.API.ajax({
+                            url: '/api/sysimg-icons',
+                            success: function(ic) { try { window._sysIconsCache = ic; window._sysIconsTs = Date.now(); } catch (e) {} _goTree(); },
+                            error: function() { _goTree(); }
+                        });
+                    } else { _goTree(); }
                 },
                 error: function(s, b) { if (seq === _treeBuildSeq) console.error('Error /api/content/available:', s, b); }
             });

@@ -5776,6 +5776,17 @@ async def get_cover(item_id: str, request: Request = None):
                             return Response(content=_fb[0], media_type=_fb[1] or "image/jpeg")
         except Exception as _e:
             print(f" [COVER] Custom defaults error: {_e}")
+        # 1b) Imágenes del sistema kind=cover ( customs; los protegidos ya
+        # cubren media/games/books con el matching migrado).
+        try:
+            _sitems = _get_system_images().get("items", [])
+            _m = _sysimg_match(_sitems, "cover", cat, sub)
+            if _m is not None and _m.get("asset") is not None:
+                _sb, _sm = _sysimg_blob(_m["asset"])
+                if _sb:
+                    return Response(content=_sb, media_type=_sm or "image/png")
+        except Exception as _e2:
+            print(f" [COVER] Sysimg cover error: {_e2}")
         _games = ("juego", "juegos", "game", "games", "consola", "consolas", "ps3", "3ds")
         _books = ("comic", "comics", "kiosko", "book", "books", "ebook", "ebooks", "manga", "mangas")
         fb_id = -1 if (cat in _games or sub in _games) else (-2 if (cat in _books or sub in _books) else -3)
@@ -5954,6 +5965,395 @@ async def save_cover_defaults(request: Request):
     conn.commit()
     conn.close()
     return {"success": True, "items": clean}
+
+
+# --- Imágenes del sistema (2026-09-07): covers customs + iconos cat/sub ---
+# Metadatos en tvcat_settings:system_images (JSON, sin migración SQL); blobs en
+# catalog_assets con channel_id='sysimg' (asset<=-1001; los legacy -1/-2/-3 usan
+# channel_id=''). Ver SystemImages_Implementation_Plan.md.
+_SYSIMG_CHANNEL = "sysimg"
+_SYSIMG_KINDS = ("cover", "icon")
+_SYSIMG_SCOPES = ("category", "subcategory", "any")
+_SYSIMG_MAX_ITEMS = 40
+
+
+def _default_system_images():
+    return {"items": [
+        {"id": "cover-media", "name": "Cover default Media", "kind": "cover", "scope": "any",
+         "categories": "media;video", "subcategories": "movie;movies;peli;pelis;película;películas;tvshow;tv show;serie;series;anime",
+         "emoji": "🎬", "asset": -3, "protected": True},
+        {"id": "cover-games", "name": "Cover default Game", "kind": "cover", "scope": "any",
+         "categories": "juego;juegos;game;games", "subcategories": "3ds;ps3;ps4;ps5;switch;pc;game;juego",
+         "emoji": "🎮", "asset": -1, "protected": True},
+        {"id": "cover-books", "name": "Cover default eBook", "kind": "cover", "scope": "any",
+         "categories": "comic;comics;kiosko;book;books;ebook;ebooks;manga", "subcategories": "manga;comic;book;ebook",
+         "emoji": "📚", "asset": -2, "protected": True},
+        {"id": "icon-cat", "name": "Imagen default categoría", "kind": "icon", "scope": "category",
+         "categories": "*", "subcategories": "", "emoji": "📁", "asset": None, "protected": True},
+        {"id": "icon-sub", "name": "Imagen default subcategoría", "kind": "icon", "scope": "subcategory",
+         "categories": "", "subcategories": "*", "emoji": "📄", "asset": None, "protected": True},
+    ]}
+
+
+def _sysimg_norm_list(v):
+    parts = []
+    for p in str(v or "").replace(",", ";").split(";"):
+        q = p.strip().lower()
+        if q:
+            parts.append(q)
+    return parts
+
+
+def _sysimg_list_ok(needles, hay):
+    """needles (lista) encaja si hay vacía o contiene algún needle o '*'."""
+    if not hay:
+        return True
+    for n in needles:
+        if n and (n in hay or "*" in hay):
+            return True
+    return False
+
+
+def _sysimg_match(items, kind, cat, sub, level=None):
+    """Primer item kind=... cuyo matching encaje (protegidos van primero).
+    level: None (covers, manda el scope del item), 'cat'/'sub' (árbol)."""
+    cat = (cat or "").strip().lower()
+    sub = (sub or "").strip().lower()
+    for it in items or []:
+        if it.get("kind") != kind:
+            continue
+        scope = it.get("scope") or "any"
+        if level == "cat" and scope not in ("category", "any"):
+            continue
+        if level == "sub" and scope not in ("subcategory", "any"):
+            continue
+        _cats = _sysimg_norm_list(it.get("categories", ""))
+        _subs = _sysimg_norm_list(it.get("subcategories", ""))
+        if level == "cat":
+            ok = _sysimg_list_ok([cat], _cats)
+        elif level == "sub":
+            ok = _sysimg_list_ok([sub], _subs)
+        elif scope == "category":
+            ok = _sysimg_list_ok([cat], _cats)
+        elif scope == "subcategory":
+            ok = _sysimg_list_ok([sub], _subs)
+        else:
+            ok = _sysimg_list_ok([cat], _cats) and _sysimg_list_ok([sub], _subs)
+        if ok:
+            return it
+    return None
+
+
+def _get_system_images():
+    """Lee system_images; migra cover_defaults legacy una vez (y lo borra)."""
+    from services.catalog_service import get_conn
+    import json as _js
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT value FROM tvcat_settings WHERE key='system_images'").fetchone()
+        if row and row["value"]:
+            try:
+                data = _js.loads(row["value"])
+                if isinstance(data, dict) and isinstance(data.get("items"), list):
+                    return data
+            except Exception:
+                pass
+        # Migración legacy cover_defaults -> protegidos
+        legacy = conn.execute("SELECT value FROM tvcat_settings WHERE key='cover_defaults'").fetchone()
+        base = _default_system_images()["items"]
+        if legacy and legacy["value"]:
+            try:
+                _defs = _js.loads(legacy["value"])
+                _li = _defs.get("items", []) if isinstance(_defs, dict) else []
+                _map = {"media": 0, "games": 1, "books": 2}
+                for _d in _li:
+                    _i = _map.get(str(_d.get("id", "")))
+                    if _i is not None:
+                        base[_i]["categories"] = str(_d.get("categories", base[_i]["categories"]))[:500]
+                        base[_i]["subcategories"] = str(_d.get("subcategories", base[_i]["subcategories"]))[:500]
+            except Exception:
+                pass
+            try:
+                conn.execute("DELETE FROM tvcat_settings WHERE key='cover_defaults'")
+                conn.commit()
+            except Exception:
+                pass
+        data = {"items": base}
+        try:
+            conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES ('system_images', ?)",
+                         (_js.dumps(data, ensure_ascii=False),))
+            conn.commit()
+        except Exception:
+            pass
+        return data
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _save_system_images(items):
+    """Valida y persiste. Los protected no se borran (se fusionan por id)."""
+    from services.catalog_service import get_conn
+    import json as _js
+    if not isinstance(items, list) or not items:
+        raise ValueError("Sin items")
+    base = {it["id"]: dict(it) for it in _default_system_images()["items"]}
+    clean = []
+    seen = set()
+    for it in items[:_SYSIMG_MAX_ITEMS]:
+        if not isinstance(it, dict):
+            continue
+        _id = str(it.get("id", ""))[:32]
+        if not _id or _id in seen:
+            continue
+        seen.add(_id)
+        kind = it.get("kind") if it.get("kind") in _SYSIMG_KINDS else "cover"
+        scope = it.get("scope") if it.get("scope") in _SYSIMG_SCOPES else "any"
+        try:
+            asset = it.get("asset")
+            asset = int(asset) if asset is not None else None
+        except Exception:
+            asset = None
+        if _id in base:
+            # Protegido: solo imagen/emoji/listas (id/kind/scope fijos).
+            _b = base[_id]
+            clean.append({
+                "id": _id, "name": _b["name"], "kind": _b["kind"], "scope": _b["scope"],
+                "categories": str(it.get("categories", _b["categories"]))[:500],
+                "subcategories": str(it.get("subcategories", _b["subcategories"]))[:500],
+                "emoji": str(it.get("emoji", _b["emoji"]))[:8] or _b["emoji"],
+                "asset": asset, "protected": True,
+            })
+        else:
+            clean.append({
+                "id": _id,
+                "name": str(it.get("name", ""))[:64] or _id,
+                "kind": kind, "scope": scope,
+                "categories": str(it.get("categories", ""))[:500],
+                "subcategories": str(it.get("subcategories", ""))[:500],
+                "emoji": str(it.get("emoji", "🖼️"))[:8] or "🖼️",
+                "asset": asset, "protected": False,
+            })
+    # Los protegidos que falten se reponen (no eliminables).
+    for _id, _b in base.items():
+        if _id not in seen:
+            clean.insert(list(base.keys()).index(_id), dict(_b))
+    conn = get_conn()
+    try:
+        conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES ('system_images', ?)",
+                     (_js.dumps({"items": clean}, ensure_ascii=False),))
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    try:
+        _SYSIMG_ICONS_CACHE["ts"] = 0
+    except Exception:
+        pass
+    return clean
+
+
+def _sysimg_blob(asset):
+    """(bytes, mime) del asset: legacy (-1/-2/-3, channel '') o sysimg (<=-1001)."""
+    from services.catalog_service import get_conn
+    try:
+        _aid = int(asset)
+    except Exception:
+        return None, None
+    conn = get_conn()
+    try:
+        if _aid in (-1, -2, -3):
+            row = conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id='' AND telegram_msg_id=? AND asset_type='cover' LIMIT 1", (_aid,)).fetchone()
+        else:
+            row = conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='sysimg' AND asset_index=0 LIMIT 1", (_SYSIMG_CHANNEL, _aid)).fetchone()
+        if row and row["image_blob"]:
+            return row["image_blob"], row["mime_type"] or "image/png"
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return None, None
+
+
+_SYSIMG_ICONS_CACHE = {"ts": 0, "data": None}
+
+
+@app.get(api_url("/api/config/system-images"))
+async def get_system_images(request: Request):
+    s = _get_cover_session(request)
+    if not s or s.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    return _get_system_images()
+
+
+@app.put(api_url("/api/config/system-images"))
+async def save_system_images(request: Request):
+    s = _get_cover_session(request)
+    if not s or s.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    items = body.get("items", []) if isinstance(body, dict) else []
+    try:
+        clean = _save_system_images(items)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"success": True, "items": clean}
+
+
+@app.post(api_url("/api/config/system-images/upload"))
+async def upload_system_image(request: Request):
+    """Sube imagen: valida contenido, guarda original + reducida en sysimg."""
+    s = _get_cover_session(request)
+    if not s or s.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    try:
+        form = await request.form()
+        _up = form.get("file")
+        kind = str(form.get("kind") or "cover")
+    except Exception:
+        raise HTTPException(400, "Formulario inválido")
+    if kind not in _SYSIMG_KINDS:
+        kind = "cover"
+    if _up is None:
+        raise HTTPException(400, "Falta file")
+    try:
+        raw = await _up.read()
+    except Exception:
+        raise HTTPException(400, "No se pudo leer")
+    if not raw or len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(400, "Vacío o >5MB")
+
+    def _work():
+        import io as _io
+        from PIL import Image as _PI
+        try:
+            _im = _PI.open(_io.BytesIO(raw))
+            _im.load()
+        except Exception:
+            return None, "No es imagen válida"
+        if (_im.format or "").upper() not in ("PNG", "JPEG", "JPG", "WEBP"):
+            return None, "Solo PNG/JPG/WebP"
+        _im = _im.convert("RGB")
+        _w, _h = _im.size
+        _maxw = 480 if kind == "cover" else 192
+        _small = _im.copy()
+        if _w > _maxw:
+            _small.thumbnail((_maxw, _maxw * 4), _PI.Resampling.LANCZOS)
+        _bs, _bf = _io.BytesIO(), _io.BytesIO()
+        _small.save(_bs, "WEBP", quality=85)
+        _im.save(_bf, "WEBP", quality=90)
+        return ((_bs.getvalue(), _small.size), (_bf.getvalue(), _im.size)), ""
+    try:
+        import asyncio as _aio
+        _res, _err = await _aio.to_thread(_work)
+    except Exception as e:
+        raise HTTPException(500, str(e)[:200])
+    if not _res:
+        raise HTTPException(400, _err or "Imagen inválida")
+    (_sb, (_sw, _sh)), (_fb, (_fw, _fh)) = _res
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT MIN(telegram_msg_id) FROM catalog_assets WHERE channel_id=?", (_SYSIMG_CHANNEL,)).fetchone()
+        _low = row[0] if row and row[0] else -1000
+        _aid = min(int(_low) - 1, -1001)
+        conn.execute("INSERT OR REPLACE INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source) VALUES (?, ?, 'sysimg', 0, ?, 'image/webp', ?, ?, ?, 'sysimg')",
+                     (_SYSIMG_CHANNEL, _aid, _sb, len(_sb), _sw, _sh))
+        conn.execute("INSERT OR REPLACE INTO catalog_assets (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source) VALUES (?, ?, 'sysimg', 1, ?, 'image/webp', ?, ?, ?, 'sysimg-full')",
+                     (_SYSIMG_CHANNEL, _aid, _fb, len(_fb), _fw, _fh))
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return {"success": True, "asset": _aid}
+
+
+@app.get(api_url("/api/sysimg/{item_id}"))
+async def serve_system_image(item_id: str, full: int = 0):
+    items = _get_system_images().get("items", [])
+    _it = next((x for x in items if str(x.get("id")) == str(item_id)), None)
+    if _it is None or _it.get("asset") is None:
+        raise HTTPException(404)
+    if full:
+        from services.catalog_service import get_conn
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='sysimg' AND asset_index=1 LIMIT 1", (_SYSIMG_CHANNEL, int(_it["asset"]))).fetchone()
+            if row and row["image_blob"]:
+                return Response(content=row["image_blob"], media_type=row["mime_type"] or "image/webp")
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    data, mime = _sysimg_blob(_it["asset"])
+    if not data:
+        raise HTTPException(404)
+    return Response(content=data, media_type=mime)
+
+
+@app.get(api_url("/api/sysimg-asset/{asset}"))
+async def serve_system_asset(asset: int, request: Request):
+    """Preview de un blob sysimg por número (editor admin, antes de guardar)."""
+    s = _get_cover_session(request)
+    if not s or s.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT image_blob, mime_type FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='sysimg' AND asset_index=0 LIMIT 1", (_SYSIMG_CHANNEL, int(asset))).fetchone()
+        if row and row["image_blob"]:
+            return Response(content=row["image_blob"], media_type=row["mime_type"] or "image/webp")
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    raise HTTPException(404)
+
+
+@app.get(api_url("/api/sysimg-icons"))
+async def get_system_icons(request: Request):
+    """Iconos kind=icon para el árbol (autenticado, no solo admin). Cache 60s."""
+    from services.auth_service import get_session
+    import time as _t
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s:
+        raise HTTPException(403)
+    if _SYSIMG_ICONS_CACHE["data"] is not None and (_t.time() - _SYSIMG_ICONS_CACHE["ts"]) < 60:
+        return _SYSIMG_ICONS_CACHE["data"]
+    items = _get_system_images().get("items", [])
+    out = {"items": [], "generic_cat": None, "generic_sub": None}
+    for it in items:
+        if it.get("kind") != "icon":
+            continue
+        _e = {"id": it.get("id"), "scope": it.get("scope") or "any",
+              "categories": it.get("categories") or "", "subcategories": it.get("subcategories") or "",
+              "emoji": it.get("emoji") or ""}
+        _e["img"] = ("/api/sysimg/" + str(it.get("id"))) if it.get("asset") is not None else ""
+        out["items"].append(_e)
+        if it.get("id") == "icon-cat":
+            out["generic_cat"] = {"img": _e["img"], "emoji": _e["emoji"]}
+        elif it.get("id") == "icon-sub":
+            out["generic_sub"] = {"img": _e["img"], "emoji": _e["emoji"]}
+    _SYSIMG_ICONS_CACHE.update({"ts": _t.time(), "data": out})
+    return out
 
 
 def _sanitize_plugin_list(raw: str):

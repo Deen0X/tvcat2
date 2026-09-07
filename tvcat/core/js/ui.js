@@ -608,38 +608,116 @@ var UI = {
     _keyTesterFlashTimers: {},
 
     loadCoverDefaults: function() {
+        // 2026-09-07: editor CRUD de imágenes del sistema (covers + iconos).
         var list = document.getElementById('covers-list');
         var st = document.getElementById('covers-status');
         if (list) list.innerHTML = '<span style="font-size:0.75rem;color:#888;">Cargando...</span>';
         window.API.ajax({
-            url: '/api/config/cover-defaults',
+            url: '/api/config/system-images',
             success: function(res) {
                 var items = (res && res.items) || [];
-                try { window._coverDefaultsCache = items; } catch(e) {}
-                if (!list) return;
-                var html = '';
-                for (var i = 0; i < items.length; i++) {
-                    (function(it, idx) {
-                        var aid = it.asset_id;
-                        var nm = (it.name || '').replace(/</g, '&lt;');
-                        var cats = (it.categories || '').replace(/</g, '&lt;');
-                        var subs = (it.subcategories || '').replace(/</g, '&lt;');
-                        html += '<div data-cover-idx="' + idx + '" data-asset="' + aid + '" style="display:flex;gap:12px;align-items:center;background:rgba(255,255,255,0.04);border:1px solid #333;border-radius:8px;padding:8px;">' +
-                            '<img src="/api/cover-default/' + aid + '" style="width:60px;height:88px;object-fit:cover;background:#18181b;border-radius:6px;flex-shrink:0;" onerror="this.onerror=null;this.src=\'/static/TVCat.png\'">' +
-                            '<div style="flex:1;min-width:0;">' +
-                            '<div style="font-size:0.8rem;font-weight:600;color:#fff;">' + nm + ' <span style="color:#71717a;font-weight:400;">(cover ' + aid + ')</span></div>' +
-                            '<label style="font-size:0.7rem;color:#888;">Categoría</label>' +
-                            '<input data-cover-cats value="' + cats.replace(/"/g, '&quot;') + '" placeholder="media;video" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 8px;color:#fff;font-size:0.8rem;box-sizing:border-box;margin-bottom:6px;">' +
-                            '<label style="font-size:0.7rem;color:#888;">Subcategoría</label>' +
-                            '<input data-cover-subs value="' + subs.replace(/"/g, '&quot;') + '" placeholder="movie;movies;peli" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 8px;color:#fff;font-size:0.8rem;box-sizing:border-box;">' +
-                            '</div></div>';
-                    })(items[i], i);
-                }
-                list.innerHTML = html || '<span style="font-size:0.75rem;color:#888;">Sin items</span>';
-                if (st) { st.textContent = items.length + ' covers'; st.style.color = '#71717a'; }
+                try { window._sysImagesCache = items; window._sysNewSeq = 0; } catch(e) {}
+                if (list) list.innerHTML = window.UI._sysImagesHtml(items) +
+                    '<button onclick="window.UI._sysImagesAdd()" style="margin-top:8px;background:#27272a;border:1px solid #52525b;color:#fff;border-radius:6px;padding:6px 14px;font-size:0.8rem;cursor:pointer;">＋ Añadir imagen</button>';
+                if (st) { st.textContent = items.length + ' imágenes'; st.style.color = '#71717a'; }
             },
             error: function() { if (list) list.innerHTML = '<span style="font-size:0.75rem;color:#f87171;">Error al cargar (solo admin)</span>'; }
         });
+    },
+    _sysEsc: function(v) { return String(v === undefined || v === null ? '' : v).replace(/</g, '&lt;').replace(/"/g, '&quot;'); },
+    _sysImagesHtml: function(items) {
+        var self = window.UI;
+        var html = '';
+        for (var i = 0; i < items.length; i++) {
+            (function(it) {
+                var prot = !!it.protected;
+                var sid = self._sysEsc(it.id);
+                var nm = self._sysEsc(it.name);
+                var kind = it.kind === 'icon' ? 'icon' : 'cover';
+                var scope = it.scope || 'any';
+                var cats = self._sysEsc(it.categories);
+                var subs = self._sysEsc(it.subcategories);
+                var emoji = self._sysEsc(it.emoji);
+                var asset = (it.asset === undefined || it.asset === null) ? '' : it.asset;
+                var prev = asset !== '' ? '/api/sysimg/' + encodeURIComponent(it.id) : '/static/TVCat.png';
+                var ph = kind === 'icon' ? 'width:60px;height:60px;' : 'width:60px;height:88px;';
+                var dis = prot ? ' disabled style="opacity:0.55;"' : '';
+                html += '<div data-sys-id="' + sid + '" data-sys-asset="' + asset + '" style="display:flex;gap:12px;align-items:flex-start;background:rgba(255,255,255,0.04);border:1px solid #333;border-radius:8px;padding:8px;margin-bottom:8px;">' +
+                    '<div style="flex-shrink:0;text-align:center;">' +
+                    '<img data-sys-prev src="' + prev + '" style="' + ph + 'object-fit:cover;background:#18181b;border-radius:6px;" onerror="this.onerror=null;this.src=\'/static/TVCat.png\'">' +
+                    '<div style="font-size:1rem;margin-top:2px;" data-sys-emojiprev>' + (emoji || '') + '</div>' +
+                    (prot ? '' : '<label style="display:block;margin-top:4px;font-size:0.7rem;color:#e11d48;background:#27272a;border:1px solid #52525b;border-radius:6px;padding:4px 8px;cursor:pointer;">Subir<input type="file" accept="image/png,image/jpeg,image/webp" data-sys-file style="display:none;" onchange="window.UI._sysImagesUpload(this)">') + '</label></div>' +
+                    '<div style="flex:1;min-width:0;">' +
+                    '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">' +
+                    '<input data-sys-name value="' + nm + '" placeholder="Nombre"' + (prot ? ' disabled style="opacity:0.55;"' : '') + ' style="flex:1;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 8px;color:#fff;font-size:0.8rem;box-sizing:border-box;font-weight:600;">' +
+                    (prot ? '<span style="font-size:0.65rem;color:#71717a;flex-shrink:0;">sistema</span>'
+                           : '<button onclick="window.UI._sysImagesDel(this)" title="Eliminar" style="background:none;border:1px solid #52525b;color:#f87171;border-radius:6px;padding:4px 8px;font-size:0.75rem;cursor:pointer;flex-shrink:0;">✕</button>') +
+                    '</div>' +
+                    '<div style="display:flex;gap:6px;margin-bottom:6px;">' +
+                    '<select data-sys-kind' + dis + ' style="flex:1;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px;color:#fff;font-size:0.75rem;">' +
+                    '<option value="cover"' + (kind === 'cover' ? ' selected' : '') + '>Cover</option>' +
+                    '<option value="icon"' + (kind === 'icon' ? ' selected' : '') + '>Icono</option></select>' +
+                    '<select data-sys-scope' + dis + ' style="flex:1;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px;color:#fff;font-size:0.75rem;">' +
+                    '<option value="any"' + (scope === 'any' ? ' selected' : '') + '>Cat+Sub</option>' +
+                    '<option value="category"' + (scope === 'category' ? ' selected' : '') + '>Categoría</option>' +
+                    '<option value="subcategory"' + (scope === 'subcategory' ? ' selected' : '') + '>Subcategoría</option></select>' +
+                    '<input data-sys-emoji value="' + emoji + '" placeholder="📁" maxlength="8" title="Emoji si no hay imagen" style="width:52px;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 8px;color:#fff;font-size:0.8rem;box-sizing:border-box;text-align:center;">' +
+                    '</div>' +
+                    '<label style="font-size:0.7rem;color:#888;">Categorías (;)</label>' +
+                    '<input data-sys-cats value="' + cats + '" placeholder="media;video" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 8px;color:#fff;font-size:0.8rem;box-sizing:border-box;margin-bottom:6px;">' +
+                    '<label style="font-size:0.7rem;color:#888;">Subcategorías (;)</label>' +
+                    '<input data-sys-subs value="' + subs + '" placeholder="movie;movies;peli" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 8px;color:#fff;font-size:0.8rem;box-sizing:border-box;">' +
+                    '</div></div>';
+            })(items[i]);
+        }
+        return html;
+    },
+    _sysImagesAdd: function() {
+        var list = document.getElementById('covers-list');
+        if (!list) return;
+        try { window._sysNewSeq = (window._sysNewSeq || 0) + 1; } catch (e) { window._sysNewSeq = 1; }
+        var tmp = document.createElement('div');
+        tmp.innerHTML = window.UI._sysImagesHtml([{ id: 'new-' + Date.now() + '-' + window._sysNewSeq, name: '', kind: 'cover', scope: 'any', categories: '', subcategories: '', emoji: '🖼️', asset: null, protected: false }]);
+        var btn = list.querySelector('button');
+        if (btn) list.insertBefore(tmp.firstChild, btn);
+        else list.appendChild(tmp.firstChild);
+    },
+    _sysImagesDel: function(btn) {
+        try {
+            var row = btn;
+            while (row && !row.getAttribute('data-sys-id')) row = row.parentNode;
+            if (row && row.parentNode) row.parentNode.removeChild(row);
+        } catch (e) {}
+    },
+    _sysImagesUpload: function(input) {
+        var file = input && input.files && input.files[0];
+        if (!file) return;
+        var row = input;
+        while (row && !row.getAttribute('data-sys-id')) row = row.parentNode;
+        var kindEl = row ? row.querySelector('[data-sys-kind]') : null;
+        var fd = new FormData();
+        fd.append('file', file);
+        fd.append('kind', kindEl ? kindEl.value : 'cover');
+        var st = document.getElementById('covers-status');
+        if (st) { st.textContent = 'Subiendo...'; st.style.color = '#71717a'; }
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/config/system-images/upload', true);
+        xhr.onload = function() {
+            try {
+                var res = JSON.parse(xhr.responseText || '{}');
+                if (xhr.status >= 200 && xhr.status < 300 && res.asset !== undefined) {
+                    if (row) {
+                        row.setAttribute('data-sys-asset', res.asset);
+                        var prev = row.querySelector('[data-sys-prev]');
+                        if (prev) { prev.onerror = null; prev.src = '/api/sysimg-asset/' + res.asset; }
+                    }
+                    if (st) { st.textContent = 'Imagen subida (Guarda para aplicar)'; st.style.color = '#4ade80'; }
+                } else if (st) { st.textContent = 'Error: ' + (res.detail || 'subida'); st.style.color = '#f87171'; }
+            } catch (e) { if (st) { st.textContent = 'Error de subida'; st.style.color = '#f87171'; } }
+            try { input.value = ''; } catch (e2) {}
+        };
+        xhr.onerror = function() { if (st) { st.textContent = 'Error de red'; st.style.color = '#f87171'; } };
+        xhr.send(fd);
     },
 
     renderKeyMapTable: function() {
@@ -2594,31 +2672,37 @@ window.handleLocalAvatarFile = function(input) { UI.handleLocalAvatarFile(input)
 window.selectLocalAvatar = function(v) { UI.selectAvatarUrl(v); };
 window.applyGlobalSettings = function() { UI.applyGlobalSettings(); };
 window.saveCoverDefaults = function() {
+    // 2026-09-07: persiste imágenes del sistema (PUT /api/config/system-images).
     var list = document.getElementById('covers-list');
     var st = document.getElementById('covers-status');
     if (!list) return;
-    var rows = list.querySelectorAll('[data-cover-idx]');
-    var cache = window._coverDefaultsCache || [];
+    var rows = list.querySelectorAll('[data-sys-id]');
     var items = [];
     for (var i = 0; i < rows.length; i++) {
         var r = rows[i];
-        var idx = parseInt(r.getAttribute('data-cover-idx'), 10);
-        var src = cache[idx] || {};
-        var catsEl = r.querySelector('[data-cover-cats]');
-        var subsEl = r.querySelector('[data-cover-subs]');
+        var gv = function(sel) { var el = r.querySelector(sel); return el ? el.value : ''; };
+        var assetRaw = r.getAttribute('data-sys-asset');
         items.push({
-            id: src.id || ('a' + idx),
-            name: src.name || '',
-            asset_id: src.asset_id !== undefined ? src.asset_id : parseInt(r.getAttribute('data-asset'), 10),
-            categories: catsEl ? catsEl.value : '',
-            subcategories: subsEl ? subsEl.value : ''
+            id: r.getAttribute('data-sys-id') || ('sys-' + i),
+            name: gv('[data-sys-name]'),
+            kind: gv('[data-sys-kind]') || 'cover',
+            scope: gv('[data-sys-scope]') || 'any',
+            categories: gv('[data-sys-cats]'),
+            subcategories: gv('[data-sys-subs]'),
+            emoji: gv('[data-sys-emoji]'),
+            asset: (assetRaw === '' || assetRaw === null) ? null : parseInt(assetRaw, 10)
         });
     }
     if (st) { st.textContent = 'Guardando...'; st.style.color = '#71717a'; }
     window.API.ajax({
-        method: 'PUT', url: '/api/config/cover-defaults',
+        method: 'PUT', url: '/api/config/system-images',
         data: {items: items},
-        success: function() { if (st) { st.textContent = 'Guardado'; st.style.color = '#4ade80'; } try { window._coverDefaultsCache = items; } catch(e) {} },
+        success: function(res) {
+            if (st) { st.textContent = 'Guardado'; st.style.color = '#4ade80'; }
+            try { window._sysIconsTs = 0; } catch (e) {}
+            if (window.UI && window.UI.loadCoverDefaults) window.UI.loadCoverDefaults();
+            try { if (typeof buildCategoryTree === 'function') buildCategoryTree(); } catch (e2) {}
+        },
         error: function() { if (st) { st.textContent = 'Error al guardar'; st.style.color = '#f87171'; } }
     });
 };
