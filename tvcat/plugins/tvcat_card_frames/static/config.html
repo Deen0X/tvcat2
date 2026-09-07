@@ -111,7 +111,7 @@ function pokeCatalog() {
 
 function loadAll() {
     xhr('GET', '/api/cardframes/sets', null, false, function(b, st) {
-        if (st !== 200) { document.getElementById('borders-list').textContent = 'Error cargando (¿login?).'; return; }
+        if (st !== 200) { document.getElementById('borders-list').textContent = 'Error cargando sets: HTTP ' + st + (st === 401 ? ' (sesión: reabre desde el catálogo logueado)' : st === 0 ? ' (petición abortada: recarga)' : ''); return; }
         _data = b;
         renderBorders(); renderSets(); fillBorderSelect(); renderPreview();
     });
