@@ -415,7 +415,7 @@ window.toggleSettingsModal = function() {
                 var _last = null;
                 if (window.UI && window.UI._settingsLastTabKey) _last = localStorage.getItem(window.UI._settingsLastTabKey());
                 if (!_last) _last = localStorage.getItem('tvcat_settings_last_tab');
-                var valid = ['profile','security','screen','cache','categories','remote','admin','plugins','version','userbot','enricher','mobile','contents','administration','logs'];
+                var valid = ['profile','security','screen','cache','categories','remote','admin','plugins','version','userbot','enricher','mobile','contents','administration','logs','covers'];
                 if (_last && valid.indexOf(_last) !== -1) {
                     if (typeof switchSettingsTab === 'function') switchSettingsTab(_last);
                     else if (window.UI && window.UI.switchSettingsTab) window.UI.switchSettingsTab(_last);
@@ -1732,11 +1732,30 @@ window.toggleTgAutoCollap = function() {
 };
 
 function loadSettings() {
-    loadUserbotConfig();
-    loadUserbotSessions();
+    // 2026-09-07: currentUser se puebla desde /api/auth/me PRIMERO e
+    // independiente del resto (si otra init fallaba, las pestañas admin
+    // redirigían a Mi Perfil con sesión admin válida).
+    try {
+        window.API.ajax({
+            url: '/api/auth/me',
+            success: function(session) {
+                try {
+                    if (window.Catalog) window.Catalog.currentUser = {
+                        display_name: (session && session.username) || '',
+                        username: (session && session.username) || '',
+                        role: (session && session.role) || '',
+                        is_admin: !!(session && session.role === 'admin')
+                    };
+                } catch (eU) {}
+            },
+            error: function() {}
+        });
+    } catch (eM) {}
+    try { loadUserbotConfig(); } catch (e1) {}
+    try { loadUserbotSessions(); } catch (e2) {}
     try { window.refreshTgUsageLeds(); } catch (e) {}
-    try { window.refreshBucketsLive(); } catch (e2) {}
-    window.loadEnrichConfig();
+    try { window.refreshBucketsLive(); } catch (e2b) {}
+    try { window.loadEnrichConfig(); } catch (e3) {}
     window.API.ajax({
         url: '/api/auth/me',
         success: function(session) {

@@ -283,7 +283,7 @@ var UI = {
             if (!confirm('Tienes cambios sin guardar. ¿Cambiar de sección sin guardar?')) return;
             window._settingsDirty = false;
         }
-        var user = window.Catalog.currentUser;
+        var user = (window.Catalog && window.Catalog.currentUser) || {};
         var isAdmin = user && (user.username === 'admin' || user.is_admin);
         if (tabName === 'admin' && !isAdmin) {
             tabName = 'profile';
@@ -957,7 +957,7 @@ var UI = {
         var lastTab = null;
         try { lastTab = localStorage.getItem(this._settingsLastTabKey()); } catch(e) {}
         if (!lastTab) { try { lastTab = localStorage.getItem('tvcat_settings_last_tab'); } catch(e) {} }
-        var validTabs = ['profile','security','screen','cache','categories','remote','admin','plugins','version','userbot','mobile','contents','administration','logs'];
+        var validTabs = ['profile','security','screen','cache','categories','remote','admin','plugins','version','userbot','mobile','contents','administration','logs','enricher','covers'];
         if (!lastTab || validTabs.indexOf(lastTab) === -1) lastTab = 'profile';
         if ((lastTab === 'admin' || lastTab === 'plugins' || lastTab === 'userbot' || lastTab === 'contents' || lastTab === 'administration') && !isAdmin) {
             lastTab = 'profile';
