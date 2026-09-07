@@ -5068,6 +5068,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                 }
             }
+            // Decorators nuevos (aún no guardados en el orden) se añaden al final
+            // en orden de registro; sin esto quedan mudos hasta re-guardar el orden.
+            try {
+                var _regDec = window.pluginSystem.getPluginsByType('grid-decorator');
+                for (var _di = 0; _di < _regDec.length; _di++) {
+                    if (decorators.indexOf(_regDec[_di].name) === -1) decorators.push(_regDec[_di].name);
+                }
+            } catch (e) {}
             window.pluginSystem.setDecoratorOrder(decorators);
         }
     }

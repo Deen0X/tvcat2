@@ -1,0 +1,24 @@
+{
+  "name": "tvcat_card_frames",
+  "version": "1.0.0",
+  "type": "grid-decorator",
+  "displayName": "Marcos de carta",
+  "description": "Bordes PNG sobre el cover (par idle/selected), sets por categoría/subcategoría con default, shine global en el seleccionado. Prefs en servidor por usuario-dispositivo.",
+  "iconEmoji": "🖼️",
+  "defaultEnabled": true,
+  "priority": 50,
+  "js": ["card_frames.js?v=1.0.3"],
+  "css": ["card_frames.css?v=1.0.2"],
+  "has_interface": true,
+  "settings_ui": "/plugin-static/tvcat_card_frames/config.html",
+  "tray": [
+    {
+      "id": "cardframes",
+      "label": "Marcos de carta",
+      "iconEmoji": "🖼️",
+      "color": "#eab308",
+      "action": "toggle-plugin"
+    }
+  ],
+  "access": { "admin": true, "user": true, "child": false }
+}

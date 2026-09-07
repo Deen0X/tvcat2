@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Marcos de carta — Configuración</title>
+<style>
+    body { background:#0d0d0f; color:#f4f4f5; font-family:'Segoe UI',system-ui,Arial,sans-serif; margin:0; padding:16px; font-size:14px; }
+    h3 { margin:0 0 12px; }
+    .card { background:#18181b; border:1px solid #27272a; border-radius:8px; padding:12px; margin-bottom:12px; }
+    .btn { background:#eab308; border:none; color:#111; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:13px; font-weight:700; }
+    .btn2 { background:#27272a; border:1px solid #3f3f46; color:#fff; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:12px; }
+    .muted { color:#a1a1aa; font-size:12px; }
+    .row { display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid #1f1f22; }
+    input[type=text], input[type=number], textarea { width:100%; box-sizing:border-box; background:#0d0d0f; border:1px solid #3f3f46; color:#f4f4f5; border-radius:6px; padding:8px; font-size:13px; margin-bottom:8px; }
+    label.f { display:block; margin-bottom:8px; }
+    label.f span { display:block; color:#a1a1aa; font-size:12px; margin-bottom:3px; }
+    .thumb { width:64px; height:96px; object-fit:fill; background:#000; border-radius:4px; flex-shrink:0; }
+    .prev-grid { display:flex; gap:10px; flex-wrap:wrap; }
+    .prev-item { width:130px; }
+    .prev-cover { position:relative; width:130px; padding-top:145%; background:#000; overflow:hidden; border-radius:4px; }
+    .prev-cover img.cov { position:absolute; top:0; right:0; bottom:0; left:0; width:100%; height:100%; object-fit:cover; }
+    .prev-cover .fr { position:absolute; top:0; right:0; bottom:0; left:0; }
+    .prev-cover .fr img { width:100%; height:100%; object-fit:fill; display:block; }
+</style>
+</head>
+<body>
+<h3>Marcos de carta 🖼️</h3>
+<div class="muted" style="margin-bottom:12px;">Bordes PNG sobre el cover (par idle/selected). El primer set que casa con la categoría/subcategoría gana; si ninguno, se usa el default. Solo admin puede subir y ordenar. Cada usuario guarda su on/off + shine por dispositivo en el servidor.</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Mis preferencias (este dispositivo)</b></div>
+    <label class="f"><span><input type="checkbox" id="p-enabled" style="width:auto;"> Marcos activados</span></label>
+    <label class="f"><span><input type="checkbox" id="p-shine" style="width:auto;"> Shine en el seleccionado (bucle)</span></label>
+    <div style="display:flex;gap:8px;">
+        <label class="f" style="flex:1;"><span>Retardo shine (ms)</span><input type="number" id="p-delay" value="800" min="0" max="10000"></label>
+        <label class="f" style="flex:1;"><span>Periodo shine (ms)</span><input type="number" id="p-period" value="2600" min="600" max="20000"></label>
+    </div>
+    <button class="btn" onclick="savePrefs()">Guardar mis preferencias</button>
+    <span class="muted" id="prefs-status"></span>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Subir nuevo borde (par PNG)</b> <span class="muted">— solo admin</span></div>
+    <label class="f"><span>Nombre</span><input type="text" id="b-name" placeholder="ArtDeco dorado"></label>
+    <div style="display:flex;gap:8px;">
+        <label class="f" style="flex:1;"><span>PNG sin seleccionar (idle)</span><input type="file" id="b-idle" accept="image/png"></label>
+        <label class="f" style="flex:1;"><span>PNG seleccionado</span><input type="file" id="b-sel" accept="image/png"></label>
+    </div>
+    <button class="btn" onclick="uploadBorder()">Subir par</button>
+    <span class="muted" id="up-status"></span>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Bordes</b></div>
+    <div id="borders-list"><span class="muted">Cargando...</span></div>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Sets por categoría (los sets con filtros siempre ganan a los generales; entre ellos, el primero de la lista)</b></div>
+    <div id="sets-list"><span class="muted">Cargando...</span></div>
+    <div style="margin-top:10px;border-top:1px solid #27272a;padding-top:10px;">
+        <div style="margin-bottom:6px;"><b id="set-form-title">Nuevo set</b></div>
+        <label class="f"><span>Nombre</span><input type="text" id="s-name" placeholder="Películas celuloide"></label>
+        <label class="f"><span>Borde</span><select id="s-border" style="width:100%;background:#0d0d0f;color:#fff;border:1px solid #3f3f46;border-radius:6px;padding:8px;"></select></label>
+        <label class="f"><span>Categorías (vacío = todas; separa con ;)</span><input type="text" id="s-cats" placeholder="peliculas; pelis"></label>
+        <label class="f"><span>Subcategorías (vacío = todas)</span><input type="text" id="s-subs" placeholder="accion"></label>
+        <div style="display:flex;gap:8px;">
+            <button class="btn" onclick="saveSet()">Guardar set</button>
+            <button class="btn2" onclick="resetSetForm()" id="s-cancel" style="display:none;">Cancelar</button>
+        </div>
+        <span class="muted" id="set-status"></span>
+    </div>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Vista previa (4 covers al azar, uno seleccionado)</b></div>
+    <div><button class="btn2" onclick="renderPreview()">Regenerar preview</button></div>
+    <div class="prev-grid" id="preview" style="margin-top:10px;"></div>
+</div>
+
+<script>
+var _data = { borders: [], sets: [], default_border_id: null };
+var _editingSet = null;
+
+function deviceId() {
+    try {
+        var d = localStorage.getItem('tvcat_device_id');
+        if (!d) { d = 'dev-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); localStorage.setItem('tvcat_device_id', d); }
+        return d;
+    } catch (e) { return 'default'; }
+}
+function xhr(method, url, body, isForm, cb) {
+    var x = new XMLHttpRequest();
+    x.open(method, url, true);
+    if (!isForm) x.setRequestHeader('Content-Type', 'application/json');
+    x.onload = function() { var b = {}; try { b = JSON.parse(x.responseText || '{}'); } catch (e) {} if (cb) cb(b, x.status); };
+    x.onerror = function() { if (cb) cb({}, 0); };
+    x.send(body ? (isForm ? body : JSON.stringify(body)) : null);
+}
+function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function pokeCatalog() {
+    // Refresca los marcos del catálogo abierto sin recargar la página (conserva scroll).
+    try {
+        if (parent && parent.window && parent.window.pluginSystem) {
+            var p = parent.window.pluginSystem.getPlugin('tvcat_card_frames');
+            if (p && p.refreshCardFrames) { p.refreshCardFrames(); return; }
+        }
+        if (parent && parent.Catalog) parent.Catalog.load(parent.Catalog.currentCategory || 'home');
+    } catch (e) {}
+}
+
+function loadAll() {
+    xhr('GET', '/api/cardframes/sets', null, false, function(b, st) {
+        if (st !== 200) { document.getElementById('borders-list').textContent = 'Error cargando (¿login?).'; return; }
+        _data = b;
+        renderBorders(); renderSets(); fillBorderSelect(); renderPreview();
+    });
+    xhr('GET', '/api/cardframes/prefs?device_id=' + encodeURIComponent(deviceId()), null, false, function(b) {
+        var p = (b && b.prefs) || {};
+        document.getElementById('p-enabled').checked = p.enabled !== false;
+        document.getElementById('p-shine').checked = p.shine_enabled !== false;
+        document.getElementById('p-delay').value = p.shine_delay_ms != null ? p.shine_delay_ms : 800;
+        document.getElementById('p-period').value = p.shine_period_ms != null ? p.shine_period_ms : 2600;
+    });
+}
+function savePrefs() {
+    var body = {
+        device_id: deviceId(),
+        enabled: document.getElementById('p-enabled').checked,
+        shine_enabled: document.getElementById('p-shine').checked,
+        shine_delay_ms: parseInt(document.getElementById('p-delay').value || '800', 10),
+        shine_period_ms: parseInt(document.getElementById('p-period').value || '2600', 10)
+    };
+    xhr('POST', '/api/cardframes/prefs', body, false, function(b, st) {
+        document.getElementById('prefs-status').textContent = st === 200 ? 'Guardado ✓' : 'Error ' + st;
+        if (st === 200) pokeCatalog();
+    });
+}
+function uploadBorder() {
+    var nm = document.getElementById('b-name').value;
+    var fi = document.getElementById('b-idle').files[0];
+    var fs = document.getElementById('b-sel').files[0];
+    if (!fi || !fs) { document.getElementById('up-status').textContent = 'Elige ambos PNG.'; return; }
+    var fd = new FormData();
+    fd.append('name', nm);
+    fd.append('idle', fi);
+    fd.append('selected', fs);
+    xhr('POST', '/api/cardframes/borders', fd, true, function(b, st) {
+        document.getElementById('up-status').textContent = st === 200 ? 'Subido ✓' : ('Error: ' + esc((b && b.detail) || st));
+        if (st === 200) { document.getElementById('b-name').value = ''; loadAll(); pokeCatalog(); }
+    });
+}
+function renderBorders() {
+    var c = document.getElementById('borders-list');
+    var h = '';
+    for (var i = 0; i < _data.borders.length; i++) {
+        var b = _data.borders[i];
+        var isDef = _data.default_border_id === b.id;
+        h += '<div class="row">'
+            + '<img class="thumb" src="/api/cardframes/img/' + encodeURIComponent(b.id) + '/idle">'
+            + '<img class="thumb" src="/api/cardframes/img/' + encodeURIComponent(b.id) + '/selected">'
+            + '<div class="name">' + esc(b.name) + (isDef ? ' <span class="muted">(default)</span>' : '') + '<br><span class="muted">' + Math.round((b.idle_bytes || 0) / 1024) + 'KB + ' + Math.round((b.selected_bytes || 0) / 1024) + 'KB</span></div>'
+            + (isDef ? '' : '<button class="btn2" onclick="setDefault(\'' + b.id + '\')">Default</button>')
+            + (isDef ? '' : '<button class="btn2" onclick="delBorder(\'' + b.id + '\')">Eliminar</button>')
+            + '</div>';
+    }
+    c.innerHTML = h || '<span class="muted">Sin bordes.</span>';
+}
+function setDefault(id) {
+    xhr('POST', '/api/cardframes/default', { border_id: id }, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } else alert('Error: ' + ((b && b.detail) || st)); });
+}
+function delBorder(id) {
+    if (!confirm('¿Eliminar borde?')) return;
+    xhr('DELETE', '/api/cardframes/borders/' + encodeURIComponent(id), null, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } else alert('Error: ' + ((b && b.detail) || st)); });
+}
+function fillBorderSelect() {
+    var s = document.getElementById('s-border');
+    var h = '';
+    for (var i = 0; i < _data.borders.length; i++) h += '<option value="' + esc(_data.borders[i].id) + '">' + esc(_data.borders[i].name) + '</option>';
+    s.innerHTML = h;
+}
+function renderSets() {
+    var c = document.getElementById('sets-list');
+    var h = '';
+    for (var i = 0; i < _data.sets.length; i++) {
+        var s = _data.sets[i];
+        var bn = '';
+        for (var k = 0; k < _data.borders.length; k++) if (_data.borders[k].id === s.border_id) bn = _data.borders[k].name;
+        h += '<div class="row">'
+            + '<div class="name">#' + (i + 1) + ' ' + esc(s.name) + ' → ' + esc(bn) + '<br><span class="muted">cat: ' + esc(s.categories || '(todas)') + ' · sub: ' + esc(s.subcategories || '(todas)') + (s.enabled ? '' : ' · OFF') + '</span></div>'
+            + '<button class="btn2" onclick="moveSet(' + i + ',-1)">▲</button>'
+            + '<button class="btn2" onclick="moveSet(' + i + ',1)">▼</button>'
+            + '<button class="btn2" onclick="editSet(\'' + s.id + '\')">Editar</button>'
+            + '<button class="btn2" onclick="toggleSet(\'' + s.id + '\')">' + (s.enabled ? 'Off' : 'On') + '</button>'
+            + '<button class="btn2" onclick="delSet(\'' + s.id + '\')">Eliminar</button>'
+            + '</div>';
+    }
+    c.innerHTML = h || '<span class="muted">Sin sets (se usa el default).</span>';
+}
+function moveSet(idx, d) {
+    var ids = [];
+    for (var i = 0; i < _data.sets.length; i++) ids.push(_data.sets[i].id);
+    var j = idx + d;
+    if (j < 0 || j >= ids.length) return;
+    var t = ids[idx]; ids[idx] = ids[j]; ids[j] = t;
+    xhr('POST', '/api/cardframes/reorder', { ids: ids }, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } });
+}
+function editSet(id) {
+    for (var i = 0; i < _data.sets.length; i++) if (_data.sets[i].id === id) {
+        var s = _data.sets[i];
+        _editingSet = id;
+        document.getElementById('set-form-title').textContent = 'Editar set';
+        document.getElementById('s-name').value = s.name;
+        document.getElementById('s-border').value = s.border_id;
+        document.getElementById('s-cats').value = s.categories;
+        document.getElementById('s-subs').value = s.subcategories;
+        document.getElementById('s-cancel').style.display = '';
+    }
+}
+function resetSetForm() {
+    _editingSet = null;
+    document.getElementById('set-form-title').textContent = 'Nuevo set';
+    document.getElementById('s-name').value = '';
+    document.getElementById('s-cats').value = '';
+    document.getElementById('s-subs').value = '';
+    document.getElementById('s-cancel').style.display = 'none';
+}
+function saveSet() {
+    var body = {
+        border_id: document.getElementById('s-border').value,
+        name: document.getElementById('s-name').value,
+        categories: document.getElementById('s-cats').value,
+        subcategories: document.getElementById('s-subs').value,
+        position: _data.sets.length,
+        enabled: 1
+    };
+    if (_editingSet) {
+        xhr('PUT', '/api/cardframes/sets/' + encodeURIComponent(_editingSet), body, false, function(b, st) { if (st === 200) { resetSetForm(); loadAll(); pokeCatalog(); } });
+    } else {
+        xhr('POST', '/api/cardframes/sets', body, false, function(b, st) { if (st === 200) { resetSetForm(); loadAll(); pokeCatalog(); } });
+    }
+}
+function toggleSet(id) {
+    for (var i = 0; i < _data.sets.length; i++) if (_data.sets[i].id === id) {
+        var s = _data.sets[i];
+        xhr('PUT', '/api/cardframes/sets/' + encodeURIComponent(id),
+            { border_id: s.border_id, name: s.name, categories: s.categories, subcategories: s.subcategories, position: s.position, enabled: s.enabled ? 0 : 1 },
+            false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } });
+    }
+}
+function delSet(id) {
+    if (!confirm('¿Eliminar set?')) return;
+    xhr('DELETE', '/api/cardframes/sets/' + encodeURIComponent(id), null, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } });
+}
+function renderPreview() {
+    var box = document.getElementById('preview');
+    var items = [];
+    try { if (parent && parent.Catalog && parent.Catalog.currentItems) items = parent.Catalog.currentItems.slice(); } catch (e) {}
+    if (!items.length || !_data.borders.length) { box.innerHTML = '<span class="muted">Abre el catálogo primero para tener covers, y sube un borde.</span>'; return; }
+    var picks = [];
+    var used = {};
+    while (picks.length < 4 && picks.length < items.length) {
+        var k = Math.floor(Math.random() * items.length);
+        if (used[k]) continue;
+        used[k] = 1;
+        picks.push(items[k]);
+    }
+    var defId = _data.default_border_id || (_data.borders[0] && _data.borders[0].id);
+    var h = '';
+    for (var i = 0; i < picks.length; i++) {
+        var it = picks[i];
+        var src = (it.cover_url || ('/api/cover/' + (it.item_id || '')));
+        var sel = i === 0;
+        var kind = sel ? 'selected' : 'idle';
+        h += '<div class="prev-item"><div class="prev-cover">'
+            + '<img class="cov" src="' + esc(src) + '" onerror="this.style.display=\'none\'">'
+            + '<div class="fr"><img src="/api/cardframes/img/' + encodeURIComponent(defId) + '/' + kind + '"></div>'
+            + '</div><div class="muted">' + esc(it.title || '') + (sel ? ' ★' : '') + '</div></div>';
+    }
+    box.innerHTML = h;
+}
+loadAll();
+</script>
+</body>
+</html>
