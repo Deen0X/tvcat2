@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>TVCat Instalador PS3 — Configuración</title>
+<style>
+    body { background:#0d0d0f; color:#f4f4f5; font-family:'Segoe UI',system-ui,Arial,sans-serif; margin:0; padding:16px; font-size:14px; }
+    h3 { margin:0 0 12px; color:#f4f4f5; }
+    .card { background:#18181b; border:1px solid #27272a; border-radius:8px; padding:12px; margin-bottom:12px; }
+    .btn { background:#e11d48; border:none; color:#fff; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:13px; }
+    .btn2 { background:#27272a; border:1px solid #3f3f46; color:#fff; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:12px; }
+    .muted { color:#a1a1aa; font-size:12px; }
+    .row { display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid #1f1f22; }
+    .led { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+    .name { flex:1; font-weight:600; }
+    input[type=text], input[type=password], input[type=number] {
+        width:100%; box-sizing:border-box; background:#0d0d0f; border:1px solid #3f3f46; color:#f4f4f5;
+        border-radius:6px; padding:8px; font-size:13px; margin-bottom:8px;
+    }
+    label.f { display:block; margin-bottom:8px; }
+    label.f span { display:block; color:#a1a1aa; font-size:12px; margin-bottom:3px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .bar { height:6px; background:#27272a; border-radius:3px; overflow:hidden; margin:4px 0; }
+    .bar > div { height:100%; background:#e11d48; transition:width 0.4s; }
+</style>
+</head>
+<body>
+<h3>Instalador PS3</h3>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b id="form-title">Añadir consola PS3</b></div>
+    <div class="muted" style="margin-bottom:10px;">La PS3 debe tener un servidor FTP activo (webMAN, multiMAN o Irisman). El destino determina el tipo de fichero: PS3ISO (ISO), packages (PKG).</div>
+    <div class="grid">
+        <label class="f"><span>Nombre</span><input type="text" id="f-name" placeholder="PS3 salón"></label>
+        <label class="f"><span>Host / IP</span><input type="text" id="f-host" placeholder="192.168.1.50"></label>
+    </div>
+    <div class="grid">
+        <label class="f"><span>Puerto</span><input type="number" id="f-port" value="21"></label>
+        <label class="f"><span>Usuario</span><input type="text" id="f-user" placeholder="(opcional)"></label>
+    </div>
+    <label class="f"><span>Contraseña</span><input type="password" id="f-pass" placeholder="(opcional)"></label>
+    <label class="f"><span>Destino en la PS3</span><input type="text" id="f-dest" list="dest-list" placeholder="/dev_hdd0/PS3ISO">
+        <datalist id="dest-list">
+            <option value="/dev_hdd0/PS3ISO">
+            <option value="/dev_hdd0/packages">
+            <option value="/dev_hdd0/GAMES">
+        </datalist>
+    </label>
+    <div style="display:flex;gap:8px;">
+        <button class="btn" onclick="saveConsole()" id="f-save">Guardar</button>
+        <button class="btn2" onclick="resetForm()" id="f-cancel" style="display:none;">Cancelar</button>
+    </div>
+    <div class="muted" id="form-status" style="margin-top:6px;"></div>
+</div>
+
+<div class="card" id="cats-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;" onclick="toggleCatsCard()">
+        <div style="margin-bottom:8px;"><b>Condiciones de aparición en Hero</b></div>
+        <span id="cats-ind" style="font-size:10px;transition:transform 0.2s;">▼</span>
+    </div>
+    <div id="cats-body">
+        <div class="muted" style="margin-bottom:8px;">El botón "Enviar a PS3" aparece si la <b>categoría</b> o <b>subcategoría</b> coincide (saneado, minúsculas). Use <code>*</code> como comodín para cualquier categoría/subcategoría. Separe con <code>;</code> o salto de línea.</div>
+        <label class="f"><span>Categorías (ej: juego; game)</span><textarea id="f-cats" rows="2" placeholder="juego; juegos; game; games; gamez" style="width:100%;box-sizing:border-box;background:#0d0d0f;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;padding:8px;font-size:13px;resize:vertical;"></textarea></label>
+        <label class="f"><span>Subcategorías (ej: ps3; playstation 3)</span><textarea id="f-subs" rows="2" placeholder="ps3; playstation 3; playstation3; ps 3" style="width:100%;box-sizing:border-box;background:#0d0d0f;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;padding:8px;font-size:13px;resize:vertical;"></textarea></label>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <button class="btn" onclick="saveCats()">Guardar condiciones</button>
+            <span class="muted" id="cats-status"></span>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Consolas configuradas</b></div>
+    <div id="consoles-list"><span class="muted">Cargando...</span></div>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Cola de envío</b></div>
+    <div id="queue-list"><span class="muted">Cargando...</span></div>
+    <div style="margin-top:8px;">
+        <button class="btn2" onclick="clearQueue('')">Limpiar toda la cola</button>
+    </div>
+</div>
+
+<script>
+var API = '/api/installer/ps3';
+var editingId = null;
+
+function api(url, opts, cb) {
+    opts = opts || {};
+    var xhr = new XMLHttpRequest();
+    xhr.open(opts.method || 'GET', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() { var b = {}; try { b = JSON.parse(xhr.responseText || '{}'); } catch(e) {} if (cb) cb(b, xhr.status); };
+    xhr.onerror = function() { if (cb) cb({}, 0); };
+    xhr.send(opts.data ? JSON.stringify(opts.data) : null);
+}
+
+function ledClass(status, state) {
+    if (status === 'offline') return '#52525b';
+    if (state === 'downloading' || state === 'uploading') return '#eab308';
+    return '#22c55e';
+}
+
+function stateLabel(c) {
+    if (c.state === 'downloading') return 'descargando';
+    if (c.state === 'uploading') return 'subiendo';
+    return c.state || 'idle';
+}
+
+function saveConsole() {
+    var name = document.getElementById('f-name').value.trim();
+    var host = document.getElementById('f-host').value.trim();
+    var port = parseInt(document.getElementById('f-port').value || '21', 10);
+    var user = document.getElementById('f-user').value.trim();
+    var pass = document.getElementById('f-pass').value;
+    var dest = document.getElementById('f-dest').value.trim();
+
+    if (!host) { setStatus('El host es obligatorio.'); return; }
+
+    var data = { name: name, host: host, port: port, username: user, password: pass, destination: dest };
+    var url = API + '/consoles';
+    var method = 'POST';
+    if (editingId) {
+        url = API + '/consoles/' + editingId;
+        method = 'PATCH';
+        if (!pass) delete data.password;
+    }
+    api(url, { method: method, data: data }, function(res) {
+        if (res && res.ok) {
+            setStatus(editingId ? 'Consola actualizada.' : 'Consola añadida.');
+            resetForm();
+            refresh();
+        } else {
+            setStatus('Error: ' + (res.detail || 'desconocido'));
+        }
+    });
+}
+
+function setStatus(msg) {
+    var el = document.getElementById('form-status');
+    if (el) el.textContent = msg;
+}
+
+function resetForm() {
+    editingId = null;
+    document.getElementById('form-title').textContent = 'Añadir consola PS3';
+    document.getElementById('f-save').textContent = 'Guardar';
+    document.getElementById('f-cancel').style.display = 'none';
+    document.getElementById('f-name').value = '';
+    document.getElementById('f-host').value = '';
+    document.getElementById('f-port').value = '21';
+    document.getElementById('f-user').value = '';
+    document.getElementById('f-pass').value = '';
+    document.getElementById('f-dest').value = '/dev_hdd0/PS3ISO';
+    setStatus('');
+}
+
+function editConsole(cid) {
+    api(API + '/consoles', {}, function(res) {
+        var consoles = (res && res.consoles) || [];
+        for (var i = 0; i < consoles.length; i++) {
+            if (consoles[i].id === cid) {
+                var c = consoles[i];
+                editingId = cid;
+                document.getElementById('form-title').textContent = 'Editar consola: ' + c.name;
+                document.getElementById('f-save').textContent = 'Actualizar';
+                document.getElementById('f-cancel').style.display = 'inline-block';
+                document.getElementById('f-name').value = c.name || '';
+                document.getElementById('f-host').value = c.host || '';
+                document.getElementById('f-port').value = c.port || 21;
+                document.getElementById('f-user').value = c.username || '';
+                document.getElementById('f-pass').value = '';
+                document.getElementById('f-pass').placeholder = c.has_password ? '•••••• (dejar vacío para no cambiar)' : '(opcional)';
+                document.getElementById('f-dest').value = c.destination || '';
+                break;
+            }
+        }
+    });
+}
+
+function delConsole(cid) {
+    if (!confirm('¿Borrar esta consola?')) return;
+    api(API + '/consoles/' + cid, { method: 'DELETE' }, function() { refresh(); });
+}
+
+function testConsole(cid) {
+    var btn = document.getElementById('test-' + cid);
+    if (btn) { btn.textContent = 'Probando...'; btn.disabled = true; }
+    api(API + '/consoles/' + cid + '/test', { method: 'POST' }, function(res) {
+        if (btn) { btn.textContent = 'Probar'; btn.disabled = false; }
+        if (res && res.ok) alert('Conexión correcta.');
+        else alert('Error de conexión: ' + (res && res.error ? res.error : (res && res.detail ? res.detail : 'desconocido')));
+        refresh();
+    });
+}
+
+function clearQueue(cid) {
+    api(API + '/queue' + (cid ? '?cid=' + encodeURIComponent(cid) : ''), { method: 'DELETE' }, function() { refresh(); });
+}
+
+function toggleCatsCard(force) {
+    var body = document.getElementById('cats-body');
+    var ind = document.getElementById('cats-ind');
+    if (!body) return;
+    var isHidden = body.style.display === 'none';
+    var shouldShow = force !== undefined ? force : isHidden;
+    body.style.display = shouldShow ? '' : 'none';
+    if (ind) ind.style.transform = shouldShow ? '' : 'rotate(-90deg)';
+}
+var _catsInitialized = false;
+function loadCats() {
+    var GAPI = '/api/plugin/tvcat_installer_ps3/cats';
+    api(GAPI, {}, function(res){
+        if (res) {
+            var catsEl = document.getElementById('f-cats');
+            var subsEl = document.getElementById('f-subs');
+            var isCatsFocused = document.activeElement === catsEl;
+            var isSubsFocused = document.activeElement === subsEl;
+            if (!isCatsFocused && res.raw_categories !== undefined) catsEl.value = res.raw_categories;
+            if (!isSubsFocused && res.raw_subcategories !== undefined) subsEl.value = res.raw_subcategories;
+            if (!_catsInitialized) {
+                var hasCats = res.raw_categories && res.raw_categories.trim().length > 0;
+                var hasSubs = res.raw_subcategories && res.raw_subcategories.trim().length > 0;
+                toggleCatsCard(!(hasCats || hasSubs));
+                _catsInitialized = true;
+            }
+        } else {
+            api(API + '/cats', {}, function(res2){
+                if (res2) {
+                    var catsEl2 = document.getElementById('f-cats');
+                    var subsEl2 = document.getElementById('f-subs');
+                    var isCatsFocused2 = document.activeElement === catsEl2;
+                    var isSubsFocused2 = document.activeElement === subsEl2;
+                    if (!isCatsFocused2 && res2.raw_categories !== undefined) catsEl2.value = res2.raw_categories;
+                    if (!isSubsFocused2 && res2.raw_subcategories !== undefined) subsEl2.value = res2.raw_subcategories;
+                    if (!_catsInitialized) {
+                        var hasCats2 = res2.raw_categories && res2.raw_categories.trim().length > 0;
+                        var hasSubs2 = res2.raw_subcategories && res2.raw_subcategories.trim().length > 0;
+                        toggleCatsCard(!(hasCats2 || hasSubs2));
+                        _catsInitialized = true;
+                    }
+                }
+            });
+        }
+    });
+}
+function saveCats() {
+    var cats = document.getElementById('f-cats').value;
+    var subs = document.getElementById('f-subs').value;
+    var st = document.getElementById('cats-status');
+    if (st) st.textContent = 'Guardando...';
+    var GAPI = '/api/plugin/tvcat_installer_ps3/cats';
+    api(GAPI, {method:'POST', data:{categories:cats, subcategories:subs}}, function(res){
+        if (res && res.ok) {
+            if (st) st.textContent = 'Guardado ✓';
+        } else {
+            // fallback al endpoint específico
+            api(API + '/cats', {method:'POST', data:{categories:cats, subcategories:subs}}, function(res2){
+                if (st) st.textContent = res2 && res2.ok ? 'Guardado ✓' : 'Error';
+                setTimeout(function(){ if(st) st.textContent=''; }, 2000);
+            });
+            return;
+        }
+        setTimeout(function(){ if(st) st.textContent=''; }, 2000);
+    });
+}
+
+function refresh() {
+    loadCats();
+    api(API + '/consoles', {}, function(res) {
+        var list = document.getElementById('consoles-list');
+        var consoles = (res && res.consoles) || [];
+        if (consoles.length === 0) { list.innerHTML = '<span class="muted">Ninguna consola PS3 configurada.</span>'; }
+        else {
+            var html = '';
+            for (var i = 0; i < consoles.length; i++) {
+                var c = consoles[i];
+                var led = '<span class="led" style="background:' + ledClass(c.status, c.state) + ';"></span>';
+                var speed = c.speed_bps > 0 ? (c.speed_bps / 1048576).toFixed(1) + ' MB/s' : '-';
+                html += '<div class="row">' + led +
+                    '<span class="name">' + c.name + '</span>' +
+                    '<span class="muted">' + c.host + ':' + c.port + '</span>' +
+                    '<button class="btn2" id="test-' + c.id + '" onclick="testConsole(\'' + c.id + '\')">Probar</button>' +
+                    '<button class="btn2" onclick="editConsole(\'' + c.id + '\')">Editar</button>' +
+                    '<button class="btn2" onclick="delConsole(\'' + c.id + '\')">Borrar</button>' +
+                    '</div>' +
+                    '<div class="muted" style="padding:0 0 6px 0;">' + stateLabel(c) + ' | ' + Math.round((c.progress || 0) * 100) + '% | ' + speed + ' | cola:' + c.queued + '</div>' +
+                    (c.current_file ? '<div class="muted" style="padding:0 0 6px 0;word-break:break-all;">' + c.current_file + '</div>' : '');
+            }
+            list.innerHTML = html;
+        }
+    });
+
+    api(API + '/status', {}, function(res) {
+        var el = document.getElementById('queue-list');
+        var queue = (res && res.queue) || [];
+        if (queue.length === 0) { el.innerHTML = '<span class="muted">Cola vacía.</span>'; }
+        else {
+            var html = '';
+            for (var i = 0; i < queue.length; i++) {
+                var q = queue[i];
+                var state = q.state === 'failed' ? '<span style="color:#ef4444;">fallido</span>' : 'pendiente';
+                html += '<div class="row"><span class="name" style="font-weight:400;">' + q.filename + '</span>' +
+                    '<span class="muted">' + q.target + '</span>' +
+                    '<span class="muted">' + state + '</span></div>';
+                if (q.error) html += '<div class="muted" style="padding:0 0 6px 0;word-break:break-all;">' + q.error + '</div>';
+            }
+            el.innerHTML = html;
+        }
+    });
+}
+
+resetForm();
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

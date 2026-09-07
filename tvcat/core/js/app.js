@@ -2487,16 +2487,14 @@ function loadTgindexChannels() {
 
                 // Botones compactos del mismo tamaño (paquete con flecha superpuesta)
                 var btnStyle = 'padding:4px 8px;font-size:0.75rem;line-height:1;white-space:nowrap;flex-shrink:0;';
-                // 2026-09-04 F4: LED de estado (completo/provisional/desactualizado).
-                var _last = ch.last_scanned_msg_id || 0;
-                var _chLast = ch.channel_last_msg_id || 0;
-                // 2026-09-04: last = último PROCESADO; channel_last puede ir uno por
-                // delante (el +1 es el hueco incremental, no un pendiente real).
-                var _ledC = '#71717a', _ledT = 'Sin datos';
-                if (ch.test_only) { _ledC = '#facc15'; _ledT = 'Provisional (solo test)'; }
-                else if (_chLast && _last >= _chLast - 1) { _ledC = '#22c55e'; _ledT = 'Completo ' + _last + '/' + _chLast; }
-                else if (_last > 0) { _ledC = '#fb923c'; _ledT = 'Desactualizado ' + _last + '/' + (_chLast || '?'); }
-                var _led = '<span data-ch-led="' + id + '" title="' + _ledT + '" style="width:9px;height:9px;border-radius:50%;background:' + _ledC + ';flex-shrink:0;box-shadow:0 0 4px ' + _ledC + ';"></span>';
+                // 2026-09-06: LED por item (cerrado E-L / abierto C-U).
+                // Azul=test, rojo=>100 o sin datos, amarillo=1-100, verde=0.
+                var _ls = window._scanLedState({
+                    start: ch.start_msg_id || 0, end: ch.end_msg_id || 0,
+                    last: ch.last_scanned_msg_id || 0, upto: ch.scanned_upto_msg_id || 0,
+                    chLast: ch.channel_last_msg_id || 0, testOnly: !!ch.test_only
+                });
+                var _led = '<span data-ch-led="' + id + '" title="' + _ls.t + '" style="width:9px;height:9px;border-radius:50%;background:' + _ls.c + ';flex-shrink:0;box-shadow:0 0 4px ' + _ls.c + ';"></span>';
                 // 2026-09-04 F4: combo de topología provisional + conteo.
                 var _topo = String(ch.topology_type !== undefined && ch.topology_type !== null ? ch.topology_type : 4);
                 try {
@@ -3099,20 +3097,40 @@ window.checkChannelLast = function(id) {
         error: function() {}
     });
 };
+window._scanLedState = function(o) {
+    // 2026-09-06: pendientes por tipo de item. Cerrado [S,E]: E-L (L = máx. del
+    // rango cubierto). Abierto: C-U (U = cursor examinado, C = último del canal).
+    // Sin tolerancia -1: con cursor de examinados, C-U es exacto.
+    o = o || {};
+    var E = +(o.end || 0);
+    var L = +(o.last || 0), U = +(o.upto || 0), C = +(o.chLast || 0);
+    if (o.testOnly) return { c: '#3b82f6', t: 'Solo test (provisional)' };
+    if (L <= 0 && U <= 0) return { c: '#ef4444', t: 'Sin datos de escaneo' };
+    var pend, detail;
+    if (E > 0) {
+        pend = Math.max(0, E - L);
+        detail = 'Rango ' + Math.min(L, E) + '/' + E;
+    } else {
+        if (!(C > 0)) return { c: '#facc15', t: 'Último del canal sin comprobar — examinado hasta ' + U };
+        pend = Math.max(0, C - U);
+        detail = 'Examinado ' + U + '/' + C;
+    }
+    if (pend <= 0) return { c: '#22c55e', t: 'Al día — ' + detail };
+    if (pend > 100) return { c: '#ef4444', t: pend + ' pendientes — ' + detail };
+    return { c: '#facc15', t: (pend === 1 ? '1 pendiente — ' : pend + ' pendientes — ') + detail };
+};
 window._paintChannelLed = function(id, st) {
     try {
         var el = document.querySelector('[data-ch-led="' + id + '"]');
         if (!el) return;
-        var last = (st && st.last_scanned) || 0;
-        var chLast = (st && st.channel_last) || 0;
-        var testOnly = st && st.test_only ? true : false;
-        var c = '#71717a', t = 'Sin datos';
-        if (testOnly) { c = '#facc15'; t = 'Provisional (solo test)'; }
-        else if (chLast && last >= chLast - 1) { c = '#22c55e'; t = 'Completo ' + last + '/' + chLast; }
-        else if (last > 0) { c = '#fb923c'; t = 'Desactualizado ' + last + '/' + (chLast || '?'); }
-        el.style.background = c;
-        el.style.boxShadow = '0 0 4px ' + c;
-        el.title = t;
+        var s = window._scanLedState({
+            start: (st && st.start_msg_id) || 0, end: (st && st.end_msg_id) || 0,
+            last: (st && st.last_scanned) || 0, upto: (st && st.scanned_upto) || 0,
+            chLast: (st && st.channel_last) || 0, testOnly: !!(st && st.test_only)
+        });
+        el.style.background = s.c;
+        el.style.boxShadow = '0 0 4px ' + s.c;
+        el.title = s.t;
     } catch (e) {}
 };
 window._autoCheckRunning = false;

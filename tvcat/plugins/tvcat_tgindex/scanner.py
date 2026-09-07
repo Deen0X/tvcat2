@@ -1189,6 +1189,12 @@ async def parse_topology(scan_id, stop_event=None):
             if max_scan_msg_id > 0:
                 conn_sys = get_db_connection(system=True)
                 conn_sys.execute("UPDATE tvcat_scanned_channels SET last_scanned_msg_id = ? WHERE id = ?", (max_scan_msg_id, scan_id))
+                # 2026-09-06: rango cerrado cubierto hasta el fin → completo.
+                try:
+                    if end_id and end_id > 0 and int(max_scan_msg_id) >= int(end_id):
+                        conn_sys.execute("UPDATE tvcat_scanned_channels SET range_complete = 1 WHERE id = ?", (scan_id,))
+                except Exception:
+                    pass
                 conn_sys.commit()
                 conn_sys.close()
 
@@ -1289,15 +1295,34 @@ async def _scan_channel(account_id, ch, idx, total):
     # En escaneo limpio el caché se vacía (last_id=0): respetar el mensaje de inicio configurado.
     if last_id < start_msg_id - 1:
         last_id = start_msg_id - 1
+    # 2026-09-06: cursor POR ITEM (U). El máx. global contamina items del mismo
+    # canal con rangos disjuntos (1-5 nunca se fetcheaba si solo se escaneó 10-20).
+    # item_from se autocorrige si el inicio avanza; retrocesos de rango los resetea
+    # el save-channel (U=S-1, RC=0).
+    try:
+        _upto = int(ch.get("scanned_upto_msg_id") or 0)
+    except Exception:
+        _upto = 0
+    item_from = max(start_msg_id - 1, _upto)
 
     log_suffix = f" (Topic {topic_id})" if topic_id is not None else ""
     add_log(f"🔄 Escaneando '{name}' ({raw_ch_id}){log_suffix} — Topología {topo}")
 
-    if end_id > 0 and last_id >= end_id:
+    if end_id > 0 and item_from >= end_id:
         add_log(f"  ℹ️ '{name}' ya escaneado hasta el límite ({end_id}).")
+        try:
+            for _pi0 in scanner_status.get("plan_items", []):
+                if int(_pi0.get("id", -1)) == int(ch.get("id", -2)):
+                    _pi0["from"] = max(start_msg_id, item_from + 1)
+                    _pi0["to"] = int(end_id)
+                    _pi0["count"] = 0
+                    _pi0["done"] = 0
+                    break
+        except Exception:
+            pass
         return last_id, 0
 
-    add_log(f"  📊 Incremental desde msg_id={last_id}")
+    add_log(f"  📊 Incremental desde msg_id={item_from}")
 
     # Header del topic solo si topic_only está activo y hay topic_id
     header_msg_id = None
@@ -1319,7 +1344,7 @@ async def _scan_channel(account_id, ch, idx, total):
     try:
         for _pi0 in scanner_status.get("plan_items", []):
             if int(_pi0.get("id", -1)) == int(ch.get("id", -2)):
-                _pi0["from"] = max(start_msg_id, last_id + 1)
+                _pi0["from"] = max(start_msg_id, item_from + 1)
                 _pi0["to"] = 0
                 _pi0["count"] = 0
                 break
@@ -1332,21 +1357,21 @@ async def _scan_channel(account_id, ch, idx, total):
         try:
             _live = await get_telegram_service().get_channel_last(
                 raw_ch_id, session_string=session_string, api_id=api_id, api_hash=api_hash)
-            _hasta = int(_live) if _live else last_id
+            _hasta = int(_live) if _live else item_from
         except Exception:
             _hasta = 0
     # Actualizar bounds del plan (progreso granular real).
     try:
         for _pi in scanner_status.get("plan_items", []):
             if int(_pi.get("id", -1)) == int(ch.get("id", -2)):
-                _pi["from"] = max(start_msg_id, last_id + 1)
+                _pi["from"] = max(start_msg_id, item_from + 1)
                 _pi["to"] = _hasta
-                _pi["count"] = max(0, _hasta - max(start_msg_id, last_id + 1) + 1) + len(_saned_ids)
+                _pi["count"] = max(0, _hasta - max(start_msg_id, item_from + 1) + 1) + len(_saned_ids)
                 scanner_status["plan_total"] = sum(int(_x.get("count", 0)) for _x in scanner_status.get("plan_items", []))
                 break
     except Exception:
         pass
-    if _hasta and _hasta <= last_id and not _saned_ids:
+    if _hasta and _hasta <= item_from and not _saned_ids:
         return last_id, 0
 
     # 2026-09-04: avance granular real — cada lote de 100 actualiza el done del
@@ -1374,7 +1399,7 @@ async def _scan_channel(account_id, ch, idx, total):
         saved = await asyncio.wait_for(
             service.scan_messages(
                 channel_id=raw_ch_id,
-                from_id=last_id,
+                from_id=item_from,
                 to_id=end_id if end_id > 0 else None,
                 topic_id=effective_topic,
                 session_string=session_string,
@@ -1423,6 +1448,18 @@ async def _scan_channel(account_id, ch, idx, total):
     max_id = _get_last_cached_id(raw_ch_id)
     _total_new = int(saved or 0) + _resaved
     add_log(f"  ✅ Canal '{name}': {_total_new} mensajes nuevos guardados (último msg #{max_id}).")
+    # 2026-09-06: sellar cursor examinado (U). El próximo resumen arranca aquí
+    # (ej. topic 10-100 examinado hasta 23550 con live 23554 → solo 4 pendientes).
+    try:
+        from tvcat.gateway import get_db_connection as _gdbU
+        _uc = _gdbU(system=True)
+        _uc.execute("UPDATE tvcat_scanned_channels SET scanned_upto_msg_id = ? WHERE id = ? "
+                    "AND (scanned_upto_msg_id IS NULL OR scanned_upto_msg_id < ?)",
+                    (int(_hasta), int(ch.get("id")), int(_hasta)))
+        _uc.commit()
+        _uc.close()
+    except Exception:
+        pass
     return max_id, _total_new
 
 
@@ -1517,7 +1554,8 @@ def _delete_all_channel_data(scan_config_id: int):
     cursor.execute("SELECT channel_id FROM tvcat_scanned_channels WHERE id = ?", (scan_config_id,))
     row = cursor.fetchone()
     # Resetear last_scanned_msg_id para que un futuro parse no salte los mensajes
-    cursor.execute("UPDATE tvcat_scanned_channels SET last_scanned_msg_id = 0 WHERE id = ?", (scan_config_id,))
+    # 2026-09-06: también cursor U y RC (si no, el resume resucitaría cursor viejo).
+    cursor.execute("UPDATE tvcat_scanned_channels SET last_scanned_msg_id = 0, scanned_upto_msg_id = 0, range_complete = 0 WHERE id = ?", (scan_config_id,))
     system_conn.commit()
     system_conn.close()
     if not row:
@@ -1588,10 +1626,11 @@ def _clean_scan_items(scan_config_id: int):
     """Borra items del catálogo + episodios + assets de un scan, sin tocar telegram_scan."""
     import os
     # Resetear last_scanned para que el parse posterior reprocese todo
+    # 2026-09-06: también cursor U y RC (Limpiar = re-escaneo total).
     try:
         from tvcat.gateway import get_db_connection
         sc = get_db_connection(system=True)
-        sc.execute("UPDATE tvcat_scanned_channels SET last_scanned_msg_id = 0 WHERE id = ?", (scan_config_id,))
+        sc.execute("UPDATE tvcat_scanned_channels SET last_scanned_msg_id = 0, scanned_upto_msg_id = 0, range_complete = 0 WHERE id = ?", (scan_config_id,))
         sc.commit(); sc.close()
     except Exception:
         pass
@@ -2006,9 +2045,40 @@ async def _process_manual_task(task):
             print(f" [TGIndex] Aviso: refresh central tras scan #{channel_id}: {e}")
 
 
+_CURSOR_COLS_OK = False
+
+
+def _ensure_cursor_columns():
+    """2026-09-06: columnas U/RC también desde el ciclo (la lista no siempre se
+    abre antes del primer ciclo tras actualizar). Una sola vez por proceso."""
+    global _CURSOR_COLS_OK
+    if _CURSOR_COLS_OK:
+        return
+    try:
+        from tvcat.gateway import get_db_connection as _gdbC
+        _cc = _gdbC(system=True)
+        for _ddl in ("ALTER TABLE tvcat_scanned_channels ADD COLUMN scanned_upto_msg_id INTEGER DEFAULT 0",
+                     "ALTER TABLE tvcat_scanned_channels ADD COLUMN range_complete INTEGER DEFAULT 0"):
+            try:
+                _cc.execute(_ddl)
+            except Exception:
+                pass
+        try:
+            _cc.execute("UPDATE tvcat_scanned_channels SET scanned_upto_msg_id = last_scanned_msg_id "
+                        "WHERE scanned_upto_msg_id IS NULL OR scanned_upto_msg_id = 0")
+        except Exception:
+            pass
+        _cc.commit()
+        _cc.close()
+    except Exception:
+        pass
+    _CURSOR_COLS_OK = True
+
+
 async def _process_periodic_cycle():
     global _cycle_counter, scanner_status
     try:
+        await asyncio.to_thread(_ensure_cursor_columns)
         async def _get_enabled_channels():
             def _sync():
                 from tvcat.gateway import get_db_connection
@@ -2174,8 +2244,8 @@ async def _process_periodic_cycle():
     scanner_status.update({"status": "idle", "progress_percent": 100, "current_item": "Completado."})
     add_log(f"✅ Ciclo Periódico de Escaneo #{_cycle_counter} finalizado.")
     # 2026-09-04 F4: sellar estado por item (channel_last + test_only=0).
-    # 2026-09-04b: el plan puede venir vacío (skip sin novedades); en ese caso se
-    # sella con el max cacheado real para que el LED no se quede colgado.
+    # 2026-09-06: solo con `to` real del plan; los skips conservan su C previo
+    # (el fallback al máx. global clobberaba items cerrados ya completos).
     try:
         _sconn2 = get_db_connection(system=True)
         _sconn2.row_factory = sqlite3.Row
@@ -2189,8 +2259,11 @@ async def _process_periodic_cycle():
         for _ar in _allitems:
             try:
                 _to = _planmap.get(int(_ar["id"]), 0)
+                # 2026-09-06: sin `to` el item se saltó (refresh_cycles, sin
+                # cuenta, early-return previo): conservar el valor previo en vez
+                # de clobber con el máx. global del canal (dejaba LEDs colgados).
                 if not _to:
-                    _to = _get_last_cached_id(str(_ar["channel_id"] or ""))
+                    continue
                 if _to:
                     _sconn2.execute("UPDATE tvcat_scanned_channels SET channel_last_msg_id = ?, test_only = 0 WHERE id = ?",
                                     (int(_to), int(_ar["id"])))

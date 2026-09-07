@@ -458,17 +458,26 @@ def _ensure_channel_category_column():
 
 
 def _ensure_scanstate_columns():
-    """2026-09-04 F4: columnas de estado por scan item (tolerante, sin migración dura)."""
+    """2026-09-04 F4: columnas de estado por scan item (tolerante, sin migración dura).
+    2026-09-06: + scanned_upto_msg_id (cursor de fetch) + range_complete, con
+    backfill conservador U=L (solo filas con U=0; no pisa re-ejecuciones)."""
     try:
         conn = get_db_connection(system=True)
         for ddl in ("ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_msg_id INTEGER DEFAULT 0",
                     "ALTER TABLE tvcat_scanned_channels ADD COLUMN test_only INTEGER DEFAULT 0",
                     "ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_checked_at INTEGER DEFAULT 0",
-                    "ALTER TABLE tvcat_scanned_channels ADD COLUMN parse_sig TEXT DEFAULT ''"):
+                    "ALTER TABLE tvcat_scanned_channels ADD COLUMN parse_sig TEXT DEFAULT ''",
+                    "ALTER TABLE tvcat_scanned_channels ADD COLUMN scanned_upto_msg_id INTEGER DEFAULT 0",
+                    "ALTER TABLE tvcat_scanned_channels ADD COLUMN range_complete INTEGER DEFAULT 0"):
             try:
                 conn.execute(ddl)
             except Exception:
                 pass
+        try:
+            conn.execute("UPDATE tvcat_scanned_channels SET scanned_upto_msg_id = last_scanned_msg_id "
+                         "WHERE scanned_upto_msg_id IS NULL OR scanned_upto_msg_id = 0")
+        except Exception:
+            pass
         conn.commit()
         conn.close()
     except Exception:
@@ -545,13 +554,19 @@ async def add_channel(payload: ChannelRequest):
         
         current_last_scanned = 0
         current_start_msg_id = 0
+        current_end_msg_id = 0
+        current_topic_id = None
+        current_topic_only = 0
         current_enabled = None
         if payload.id:
-            row = conn.execute("SELECT last_scanned_msg_id, start_msg_id, enabled FROM tvcat_scanned_channels WHERE id = ?", (payload.id,)).fetchone()
+            row = conn.execute("SELECT last_scanned_msg_id, start_msg_id, end_msg_id, topic_id, topic_only, enabled FROM tvcat_scanned_channels WHERE id = ?", (payload.id,)).fetchone()
             if row:
                 current_last_scanned = row[0]
                 current_start_msg_id = row[1]
-                current_enabled = row[2]
+                current_end_msg_id = row[2] or 0
+                current_topic_id = row[3]
+                current_topic_only = row[4] or 0
+                current_enabled = row[5]
 
         last_scanned_msg_id = max(0, start_msg_id - 1)
         if payload.id and start_msg_id == current_start_msg_id:
@@ -596,6 +611,25 @@ async def add_channel(payload: ChannelRequest):
                  content_type, category, custom_sub, auto_refresh, payload.telegram_account_id, payload.refresh_cycles, enabled, topic_only, effective_topic_name),
             )
         new_id = payload.id or conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # 2026-09-06: si cambia el universo examinado (rango o topic), el cursor y
+        # la cobertura caducan: reset U/L/RC para re-examinar desde el inicio.
+        # (El `max(start-1, U)` del ciclo ya se autocorrige si el inicio avanza;
+        # si retrocede o cambia el topic, sin reset esos mensajes no se fetchean.)
+        try:
+            _rc_reset = False
+            if payload.id:
+                _rc_reset = (start_msg_id != (current_start_msg_id or 0)
+                             or int(end_msg_id or 0) != int(current_end_msg_id or 0)
+                             or (effective_topic_id or 0) != (current_topic_id or 0)
+                             or int(topic_only or 0) != int(current_topic_only or 0))
+            else:
+                _rc_reset = True
+            if _rc_reset:
+                conn.execute("UPDATE tvcat_scanned_channels SET scanned_upto_msg_id = ?, range_complete = 0, "
+                             "last_scanned_msg_id = ? WHERE id = ?",
+                             (max(0, start_msg_id - 1), max(0, start_msg_id - 1), new_id))
+        except Exception:
+            pass
         conn.commit()
         conn.close()
 
@@ -946,11 +980,14 @@ async def check_channel_last(cid: int):
         from services.telegram_service import get_telegram_service
         conn = get_db_connection(system=True)
         conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_checked_at INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        row = conn.execute("SELECT channel_id, telegram_account_id, last_scanned_msg_id, channel_last_msg_id, test_only, channel_last_checked_at FROM tvcat_scanned_channels WHERE id = ?", (cid,)).fetchone()
+        for _ddl in ("ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_checked_at INTEGER DEFAULT 0",
+                     "ALTER TABLE tvcat_scanned_channels ADD COLUMN scanned_upto_msg_id INTEGER DEFAULT 0",
+                     "ALTER TABLE tvcat_scanned_channels ADD COLUMN range_complete INTEGER DEFAULT 0"):
+            try:
+                conn.execute(_ddl)
+            except Exception:
+                pass
+        row = conn.execute("SELECT channel_id, telegram_account_id, last_scanned_msg_id, channel_last_msg_id, test_only, channel_last_checked_at, scanned_upto_msg_id, range_complete, start_msg_id, end_msg_id FROM tvcat_scanned_channels WHERE id = ?", (cid,)).fetchone()
         if not row:
             conn.close()
             raise HTTPException(status_code=404, detail="Scan item no encontrado")
@@ -964,6 +1001,10 @@ async def check_channel_last(cid: int):
             conn.close()
             return {"success": True, "last_scanned": d.get("last_scanned_msg_id") or 0,
                     "channel_last": d.get("channel_last_msg_id") or 0, "test_only": d.get("test_only") or 0,
+                    "scanned_upto": d.get("scanned_upto_msg_id") or 0,
+                    "range_complete": d.get("range_complete") or 0,
+                    "start_msg_id": d.get("start_msg_id") or 0,
+                    "end_msg_id": d.get("end_msg_id") or 0,
                     "cached": True}
         ch_id = d["channel_id"]
         api_id, api_hash, session_string, _u = _resolve_account_creds(d["telegram_account_id"])
@@ -977,11 +1018,15 @@ async def check_channel_last(cid: int):
                 last = 0
         conn.execute("UPDATE tvcat_scanned_channels SET channel_last_msg_id = ?, channel_last_checked_at = ? WHERE id = ?", (int(last or 0), now, cid))
         conn.commit()
-        cur = conn.execute("SELECT last_scanned_msg_id, channel_last_msg_id, test_only FROM tvcat_scanned_channels WHERE id = ?", (cid,)).fetchone()
+        cur = conn.execute("SELECT last_scanned_msg_id, channel_last_msg_id, test_only, scanned_upto_msg_id, range_complete, start_msg_id, end_msg_id FROM tvcat_scanned_channels WHERE id = ?", (cid,)).fetchone()
         conn.close()
         d2 = dict(cur) if cur else {}
         return {"success": True, "last_scanned": d2.get("last_scanned_msg_id") or 0,
-                "channel_last": d2.get("channel_last_msg_id") or 0, "test_only": d2.get("test_only") or 0}
+                "channel_last": d2.get("channel_last_msg_id") or 0, "test_only": d2.get("test_only") or 0,
+                "scanned_upto": d2.get("scanned_upto_msg_id") or 0,
+                "range_complete": d2.get("range_complete") or 0,
+                "start_msg_id": d2.get("start_msg_id") or 0,
+                "end_msg_id": d2.get("end_msg_id") or 0}
     except HTTPException:
         raise
     except Exception as e:

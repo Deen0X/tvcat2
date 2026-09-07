@@ -1,0 +1,19 @@
+{
+  "name": "tvcat_installer_ps3",
+  "displayName": "Enviar a PS3",
+  "description": "Para títulos Juego/PS3: envía el fichero (ISO/PKG) por FTP a una PS3 con webMAN/multiMAN. Alta manual de consolas FTP, cola secuencial con reanudación.",
+  "type": "player",
+  "version": "0.1.0",
+  "defaultEnabled": true,
+  "icon": "static/plugin_icon.png",
+  "iconEmoji": "\ud83c\udfae",
+  "action_category": "playback",
+  "single_button": true,
+  "priority": 10,
+  "js": ["installer_ps3.js"],
+  "css": [],
+  "applies_to": ["juego", "ps3"],
+  "settings_ui": "/plugin-static/tvcat_installer_ps3/config.html",
+  "has_interface": false,
+  "access": { "admin": true, "user": true, "child": false }
+}
