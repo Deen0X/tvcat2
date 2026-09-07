@@ -1239,6 +1239,18 @@ async def get_scan_status():
     return status
 
 
+@router.post("/api/user/scan/logs/clear")
+async def clear_scan_logs():
+    """2026-09-07: vacía el log del servidor (el frontal solo limpiaba el DOM
+    y el siguiente poll repintaba las líneas viejas)."""
+    try:
+        from .scanner import scanner_status as _ss
+        _ss["logs"] = []
+    except Exception:
+        pass
+    return {"success": True}
+
+
 
 
 

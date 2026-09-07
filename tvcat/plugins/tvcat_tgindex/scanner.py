@@ -1386,7 +1386,10 @@ async def _scan_channel(account_id, ch, idx, total):
             _pt = int(scanner_status.get("plan_total", 0) or 0)
             scanner_status["plan_done"] = _pd
             if _pt > 0:
-                scanner_status["progress_percent"] = min(99, int(_pd * 100 / _pt))
+                # 2026-09-07: el fetch es la fase 0-59 (parse 60-95, cierre
+                # 96-99). Antes done==count saltaba a 99% y el parse/sync
+                # corrían "clavados" en 99%.
+                scanner_status["progress_percent"] = min(59, int(60 * _pd / _pt))
             scanner_status["current_item"] = f"Escaneando '{name}': {_saved_now} mensajes..."
         except Exception:
             pass
@@ -2101,6 +2104,12 @@ async def _process_periodic_cycle():
     if _empty_run:
         add_log(f"📡 Ciclo #{_cycle_counter}: sin scan items habilitados, solo disponibilidad.")
 
+    # 2026-09-07: el ciclo parte de log limpio (si no, el frontal repinta
+    # líneas de ejecuciones anteriores y parece que escanea varias veces).
+    try:
+        scanner_status["logs"] = []
+    except Exception:
+        pass
     add_log(f"📡 Iniciando Ciclo Periódico de Escaneo #{_cycle_counter}...")
     total = len(channels)
 
@@ -2216,6 +2225,13 @@ async def _process_periodic_cycle():
 
             # 2026-09-04: SIN streaming (decisión de diseño: un solo refresh al
             # final). La central se reconcilia entera al terminar el ciclo.
+            # 2026-09-07: fase de cierre 96-98 (antes el plan se marcaba done
+            # aquí y saltaba a 99% mientras sync/reconcile seguían corriendo).
+            try:
+                scanner_status.update({"progress_percent": 96,
+                                       "current_item": f"Sincronizando '{name}'..."})
+            except Exception:
+                pass
             # Avance del plan granular
             try:
                 for _pi in scanner_status.get("plan_items", []):
@@ -2225,8 +2241,6 @@ async def _process_periodic_cycle():
                 _pd = sum(int(_x.get("done", 0)) for _x in scanner_status.get("plan_items", []))
                 _pt = int(scanner_status.get("plan_total", 0) or 0)
                 scanner_status["plan_done"] = _pd
-                if _pt > 0:
-                    scanner_status["progress_percent"] = min(99, int(_pd * 100 / _pt))
             except Exception:
                 pass
 
@@ -2246,6 +2260,12 @@ async def _process_periodic_cycle():
     # 2026-09-04 F4: sellar estado por item (channel_last + test_only=0).
     # 2026-09-06: solo con `to` real del plan; los skips conservan su C previo
     # (el fallback al máx. global clobberaba items cerrados ya completos).
+    # 2026-09-07: fase 99 (sellado final).
+    try:
+        scanner_status.update({"progress_percent": 99,
+                               "current_item": "Sellando estado..."})
+    except Exception:
+        pass
     try:
         _sconn2 = get_db_connection(system=True)
         _sconn2.row_factory = sqlite3.Row
@@ -2275,6 +2295,11 @@ async def _process_periodic_cycle():
         pass
     # 2026-09-04: reconciliación total en el PLUGIN (wipe + solo habilitados en
     # orden visual id DESC). Lee el estado FINAL (toggles de mitad entran aquí).
+    try:
+        scanner_status.update({"progress_percent": 98,
+                               "current_item": "Reconciliando catálogo..."})
+    except Exception:
+        pass
     try:
         from .sync import reconcile_availability
         from tvcat.gateway import get_db_connection as _gdbc

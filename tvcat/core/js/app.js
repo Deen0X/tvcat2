@@ -2292,7 +2292,7 @@ window.showTgindexConfig = function() {
         '<option value="incremental">Incremental</option></select>' +
         '<button class="btn-primary" id="tgindex-apply-btn" onclick="applyTgindexFlow(false)" style="padding:6px 14px;font-size:0.85rem;">\u25B6 Aplicar</button>' +
         '<span id="scan-status" style="font-size:0.8rem;color:var(--text-secondary);"></span></div>' +
-        '<div id="scan-progress" style="margin-top:6px;height:4px;background:var(--bg-card);border-radius:2px;overflow:hidden;"><div id="scan-progress-bar" style="width:0%;height:100%;background:var(--accent);"></div></div>' +
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:6px;"><div id="scan-progress" style="flex:1;height:4px;background:var(--bg-card);border-radius:2px;overflow:hidden;"><div id="scan-progress-bar" style="width:0%;height:100%;background:var(--accent);"></div></div><span id="scan-progress-pct" style="font-size:0.7rem;color:var(--text-secondary);flex-shrink:0;min-width:30px;text-align:right;">0%</span></div>' +
 
         // Logs (persistente)
         '<div style="margin-top:8px;display:flex;align-items:center;">' +
@@ -3317,9 +3317,11 @@ window.applyTgindexFlow = function(closeAfter) {
     _setTgindexFlowButtons(true);
     if (status) status.textContent = 'Aplicando disponibilidad...';
     // 2026-09-04: limpiar log en cada Aplicar (solo esta interacción).
+    // 2026-09-07: también en el servidor (si no, el poll repinta lo viejo).
     try {
         var _sl = document.getElementById('scan-log');
         if (_sl) _sl.innerHTML = '';
+        window.API.ajax({ method: 'POST', url: '/api/user/scan/logs/clear', success: function() {}, error: function() {} });
     } catch (eL) {}
     // 2026-09-04: Guardar cambios incluye la config de Actualizaciones automáticas.
     try {
@@ -3383,24 +3385,28 @@ window.applyTgindexFlow = function(closeAfter) {
 };
 
 function pollScanStatus() {
+    // 2026-09-07: escritor ÚNICO de estado/barra/% (el poll de logs ya no los
+    // toca: dos escritores alternaban textos en la misma línea).
     var status = document.getElementById('scan-status');
     var bar = document.getElementById('scan-progress-bar');
+    var pctEl = document.getElementById('scan-progress-pct');
     var log = document.getElementById('scan-log');
+    var setPct = function(p) {
+        p = Math.max(0, Math.min(100, Math.round(p || 0)));
+        if (bar) bar.style.width = p + '%';
+        if (pctEl) pctEl.textContent = p + '%';
+    };
     window.API.ajax({
         url: '/api/user/scan/status',
         success: function(res) {
             if (res.status === 'scanning') {
-                if (status) {
-                    var cur = res.current_item || 'Escaneando...';
-                    var pct = (res.progress_percent || 0);
-                    status.textContent = cur + ' ' + pct + '%';
-                }
-                if (bar) bar.style.width = (res.progress_percent || 0) + '%';
+                if (status) status.textContent = res.current_item || 'Escaneando...';
+                setPct(res.progress_percent);
                 if (res.logs && log) { log.innerHTML = res.logs.slice(-30).join('\n'); log.scrollTop = log.scrollHeight; }
                 setTimeout(pollScanStatus, 2000);
             } else {
                 if (status) status.textContent = '\u2705 Escaneo completado';
-                if (bar) bar.style.width = '100%';
+                setPct(100);
                 if (res.logs && log) { log.innerHTML = res.logs.slice(-30).join('\n'); log.scrollTop = log.scrollHeight; }
                 _setTgindexFlowButtons(false);
                 loadTgindexChannels();
@@ -3559,16 +3565,19 @@ window.toggleTgindexLogs = function() {
 };
 
 window.clearTgindexLogs = function() {
+    // 2026-09-07: limpia DOM + servidor (si no, el siguiente poll repinta).
     var log = document.getElementById('scan-log');
     if (log) log.innerHTML = '';
+    try {
+        window.API.ajax({ method: 'POST', url: '/api/user/scan/logs/clear', success: function() {}, error: function() {} });
+    } catch (e) {}
 };
 
 function startTgindexLogPolling() {
     if (_tgindex_logs_timer) clearInterval(_tgindex_logs_timer);
     _tgindex_logs_timer = setInterval(function() {
+        // 2026-09-07: SOLO log (estado/barra/% los pinta pollScanStatus).
         var log = document.getElementById('scan-log');
-        var bar = document.getElementById('scan-progress-bar');
-        var status = document.getElementById('scan-status');
         if (!log) { clearInterval(_tgindex_logs_timer); _tgindex_logs_timer = null; return; }
         window.API.ajax({
             url: '/api/user/scan/status',
@@ -3578,8 +3587,6 @@ function startTgindexLogPolling() {
                     log.innerHTML = res.logs.slice(-40).join('\n');
                     if (wasScrolled) log.scrollTop = log.scrollHeight;
                 }
-                if (bar && res.status === 'scanning') bar.style.width = (res.progress_percent || 0) + '%';
-                if (status && res.status === 'scanning') status.textContent = 'Escaneando... ' + (res.progress_percent || 0) + '%';
             }
         });
     }, 2500);
