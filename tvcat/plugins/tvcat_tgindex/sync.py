@@ -54,7 +54,9 @@ def _ensure_export_tables(conn):
             sync_status         TEXT DEFAULT 'active' CHECK(sync_status IN ('active', 'deleted')),
             sync_timestamp      INTEGER DEFAULT (unixepoch()),
             extra_json          TEXT DEFAULT '{}',
-            info_messages       TEXT
+            info_messages       TEXT,
+            is_collection       INTEGER DEFAULT 0,
+            collection_raw      TEXT DEFAULT ''
         )
     """)
     c.execute("""
@@ -99,6 +101,12 @@ def _ensure_export_tables(conn):
         c.execute("ALTER TABLE plugin_catalog_export ADD COLUMN info_messages TEXT")
     except:
         pass
+    for _tbl in ["unified_catalog", "plugin_catalog_export"]:
+        for _col, _typ in [("is_collection", "INTEGER DEFAULT 0"), ("collection_raw", "TEXT DEFAULT ''")]:
+            try:
+                c.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_typ}")
+            except:
+                pass
     conn.commit()
 
 
@@ -167,8 +175,9 @@ def sync():
              alt_titles, cover_url, telegram_link, telegram_msg_id,
              group_title, group_title_flat, season_display,
              source, source_channel_id, tg_user_id, client_type,
-             sync_status, sync_timestamp, info_messages)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             sync_status, sync_timestamp, info_messages,
+             is_collection, collection_raw)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             d.get("item_id"),
             d.get("title"),
@@ -190,16 +199,18 @@ def sync():
             d.get("client_type", "telethon"),
             sync_status,
             int(d.get("sync_timestamp", 0)) or 0,
-            d.get("info_messages", "")
+            d.get("info_messages", ""),
+            int(d.get("is_collection", 0) or 0),
+            d.get("collection_raw", "")
         ))
         items_copied += 1
 
     # Copiar item_episodes → plugin_episodes_export
     eps_copied = 0
     episode_rows = c.execute("""
-        SELECT e.*, c.source as cat_source
+        SELECT e.*, u.sync_status as cat_source
         FROM item_episodes e
-        LEFT JOIN unified_catalog c ON e.item_id = c.id
+        LEFT JOIN unified_catalog u ON (e.item_id = u.id OR e.item_id = u.item_id)
     """).fetchall()
     insert_cursor = conn.cursor()
     for row in episode_rows:
@@ -309,8 +320,9 @@ def refresh_export_source(source_tag):
                  alt_titles, cover_url, telegram_link, telegram_msg_id,
                  group_title, group_title_flat, season_display,
                  source, source_channel_id, tg_user_id, client_type,
-                 sync_status, sync_timestamp, extra_json, info_messages)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 sync_status, sync_timestamp, extra_json, info_messages,
+                 is_collection, collection_raw)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 d.get("item_id"), d.get("title"), d.get("category", ""), d.get("subcategory", ""),
                 d.get("description", ""), "", d.get("rating", 0),
@@ -318,7 +330,8 @@ def refresh_export_source(source_tag):
                 d.get("group_title"), d.get("group_title_flat"), d.get("season_display"),
                 "tvcat_tgindex", d.get("source_channel_id", ""), d.get("tg_user_id"),
                 d.get("client_type", "telethon"), st, 0, "{}",
-                d.get("info_messages", "")
+                d.get("info_messages", ""),
+                int(d.get("is_collection", 0) or 0), d.get("collection_raw", "")
             ))
         if int_ids:
             phi = ",".join("?" * len(int_ids))

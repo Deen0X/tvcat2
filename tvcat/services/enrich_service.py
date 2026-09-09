@@ -316,12 +316,26 @@ async def search(query: str, category: str = "", subcategory: str = "") -> dict:
 
     # ── URL directa de TMDB: ej. https://www.themoviedb.org/movie/1452176-slug
     #    o https://www.themoviedb.org/tv/108978-reacher → id + media_type del enlace.
+    #    La URL es la autoridad: se usa tal cual sin validar contra búsqueda.
     url_match = re.match(r'^https?://(?:www\.)?themoviedb\.org/(movie|tv)/(\d+)', query.strip())
     if url_match and provider_name == 'tmdb':
         media_type = "tv" if url_match.group(1) == "tv" else "movie"
         tmdb_id = url_match.group(2)
+        details = None
         try:
             details = await provider.get_details(tmdb_id, media_type=media_type)
+            # TMDB puede devolver datos de un tipo distinto al solicitado
+            # (p.ej. /tv/ID que es en realidad una película). Detectar y corregir:
+            # primera emisión → tv; estreno cinematográfico → movie.
+            if details and media_type == "tv" and details.get("api_release_date"):
+                _rd = details.get("api_release_date") or ""
+                _fad = details.get("first_air_date")
+                if _rd and not _fad:
+                    print(f"[ENRICH] TMDB auto-correct: id={tmdb_id} es película, reintentando como movie", flush=True)
+                    details = await provider.get_details(tmdb_id, media_type="movie")
+            elif details and media_type == "movie" and details.get("first_air_date"):
+                print(f"[ENRICH] TMDB auto-correct: id={tmdb_id} es serie, reintentando como tv", flush=True)
+                details = await provider.get_details(tmdb_id, media_type="tv")
         except Exception as e:
             print(f"[ENRICH] Error TMDB directo ('{query}'): {e}", flush=True)
             details = None
@@ -337,7 +351,7 @@ async def search(query: str, category: str = "", subcategory: str = "") -> dict:
                 "poster": covers[0] if covers else None,
                 "year": details.get("api_year"),
                 "provider": provider_name,
-                "media_type": media_type,
+                "media_type": details.get("api_category") or media_type,
             }
             return {"candidates": [candidate] if candidate.get("title") else [],
                     "has_more": False, "provider": provider_name,

@@ -7,7 +7,7 @@
   "iconEmoji": "🖼️",
   "defaultEnabled": true,
   "priority": 50,
-  "js": ["card_frames.js?v=1.0.3"],
+  "js": ["card_frames.js?v=1.0.4"],
   "css": ["card_frames.css?v=1.0.2"],
   "has_interface": true,
   "settings_ui": "/plugin-static/tvcat_card_frames/config.html",

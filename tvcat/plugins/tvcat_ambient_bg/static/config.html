@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Fondo ambiental — Configuración</title>
+<style>
+    body { background:#0d0d0f; color:#f4f4f5; font-family:'Segoe UI',system-ui,Arial,sans-serif; margin:0; padding:16px; font-size:14px; }
+    h3 { margin:0 0 12px; }
+    .card { background:#18181b; border:1px solid #27272a; border-radius:8px; padding:12px; margin-bottom:12px; }
+    .btn { background:#8b5cf6; border:none; color:#fff; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:13px; font-weight:700; }
+    .muted { color:#a1a1aa; font-size:12px; }
+    input[type=text], input[type=number], select { width:100%; box-sizing:border-box; background:#0d0d0f; border:1px solid #3f3f46; color:#f4f4f5; border-radius:6px; padding:8px; font-size:13px; margin-bottom:8px; }
+    label.f { display:block; margin-bottom:8px; }
+    label.f span { display:block; color:#a1a1aa; font-size:12px; margin-bottom:3px; }
+</style>
+</head>
+<body>
+<h3>Fondo ambiental 🔮</h3>
+<div class="muted" style="margin-bottom:12px;">Tiñe el fondo del catálogo con el título seleccionado. Cada usuario guarda su ajuste por dispositivo en el servidor. El icono 🔮 del panel lateral apaga/enciende el plugin.</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Mis preferencias (este dispositivo)</b></div>
+    <label class="f"><span><input type="checkbox" id="p-enabled" style="width:auto;"> Efecto activado</span></label>
+    <label class="f"><span>Modo</span><select id="p-mode">
+        <option value="lava">Lava (paleta + deriva)</option>
+        <option value="cover">Cover difuminado</option>
+        <option value="off">Apagado</option>
+    </select></label>
+    <label class="f"><span>Zona del cover</span><select id="p-crop">
+        <option value="center">Centro (estable)</option>
+        <option value="random">Aleatoria (varía)</option>
+    </select></label>
+    <div style="display:flex;gap:8px;">
+        <label class="f" style="flex:1;"><span>Velo negro % (legibilidad)</span><input type="number" id="p-veil" value="55" min="0" max="90"></label>
+        <label class="f" style="flex:1;"><span>Difuminado (ancho canvas)</span><select id="p-blur">
+            <option value="24">24 (muy difuso)</option>
+            <option value="48">48 (medio)</option>
+            <option value="96">96 (definido)</option>
+        </select></label>
+        <label class="f" style="flex:1;"><span>Deriva lava (s)</span><input type="number" id="p-drift" value="24" min="8" max="120"></label>
+    </div>
+    <button class="btn" onclick="savePrefs()">Guardar mis preferencias</button>
+    <span class="muted" id="prefs-status"></span>
+</div>
+
+<script>
+function deviceId() {
+    try {
+        var d = localStorage.getItem('tvcat_device_id');
+        if (!d) { d = 'dev-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); localStorage.setItem('tvcat_device_id', d); }
+        return d;
+    } catch (e) { return 'default'; }
+}
+function xhr(method, url, body, cb) {
+    var x = new XMLHttpRequest();
+    x.open(method, url, true);
+    x.setRequestHeader('Content-Type', 'application/json');
+    x.onload = function() { var b = {}; try { b = JSON.parse(x.responseText || '{}'); } catch (e) {} if (cb) cb(b, x.status); };
+    x.onerror = function() { if (cb) cb({}, 0); };
+    x.send(body ? JSON.stringify(body) : null);
+}
+function pokeCatalog() {
+    try {
+        if (parent && parent.window && parent.window.pluginSystem) {
+            var p = parent.window.pluginSystem.getPlugin('tvcat_ambient_bg');
+            if (p && p.refreshAmbient) { p.refreshAmbient(); return; }
+        }
+        if (parent && parent.Catalog) parent.Catalog.load(parent.Catalog.currentCategory || 'home');
+    } catch (e) {}
+}
+xhr('GET', '/api/ambient/prefs?device_id=' + encodeURIComponent(deviceId()), null, function(b, st) {
+    if (st !== 200) { document.getElementById('prefs-status').textContent = 'Error cargando: HTTP ' + st; return; }
+    var p = (b && b.prefs) || {};
+    document.getElementById('p-enabled').checked = p.enabled !== false;
+    document.getElementById('p-mode').value = p.mode || 'lava';
+    document.getElementById('p-crop').value = p.crop || 'center';
+    document.getElementById('p-veil').value = p.veil != null ? p.veil : 55;
+    document.getElementById('p-blur').value = String(p.blur || 48);
+    document.getElementById('p-drift').value = p.drift_s != null ? p.drift_s : 24;
+});
+function savePrefs() {
+    var body = {
+        device_id: deviceId(),
+        enabled: document.getElementById('p-enabled').checked,
+        mode: document.getElementById('p-mode').value,
+        crop: document.getElementById('p-crop').value,
+        veil: parseInt(document.getElementById('p-veil').value || '55', 10),
+        blur: parseInt(document.getElementById('p-blur').value || '48', 10),
+        drift_s: parseInt(document.getElementById('p-drift').value || '24', 10)
+    };
+    xhr('POST', '/api/ambient/prefs', body, function(b, st) {
+        document.getElementById('prefs-status').textContent = st === 200 ? 'Guardado ✓' : 'Error: HTTP ' + st;
+        if (st === 200) pokeCatalog();
+    });
+}
+</script>
+</body>
+</html>

@@ -73,6 +73,8 @@
 
     function _doLoad(category) {
         currentCategory = category || 'home';
+        // Salir de modo colección al navegar (el grid se repinta con el catálogo normal)
+        window._activeCollection = null;
         // Si hay búsqueda activa, delegar a búsqueda para respetar filtro de texto
         var si = document.getElementById('global-search');
         var st = si ? si.value.trim() : '';
@@ -108,6 +110,8 @@
     }
 
     function _doSearch(query) {
+        // Buscar sale de modo colección (búsqueda global normal)
+        window._activeCollection = null;
         if (!query || query.trim().length < 2) {
             _doLoad(currentCategory);
             return;
@@ -177,6 +181,17 @@
         var html = '';
         for (var i = 0; i < items.length; i++) {
             var item = items[i];
+            // Pseudo-ítem "Volver al catálogo" (modo colección): tarjeta inicial
+            // con click propio; grid.onclick lo ignora (ver abajo).
+            if (item.item_id === '__back__') {
+                html += '<div class="grid-item grid-back" tabindex="0" data-id="__back__" data-index="' + i + '" onclick="Catalog.closeCollection()">' +
+                    '<div class="grid-item-cover" style="display:flex;align-items:center;justify-content:center;font-size:3rem;background:#18181b;">↩️</div>' +
+                    '<div class="grid-item-info">' +
+                    '<div class="grid-item-title">' + escapeHtml(item.title || 'Volver al catálogo') + '</div>' +
+                    '</div>' +
+                    '</div>';
+                continue;
+            }
             var title = item.title || 'Sin título';
             var cat = item.category || '';
             var year = item.year || '';
@@ -204,6 +219,7 @@
                 coverImg +
                 '<div class="grid-item-badge">' + cat.charAt(0).toUpperCase() + cat.slice(1) + '</div>' +
                 (item.has_mkv ? '<div class="grid-item-badge-mkv"><img src="/static/mkv.png" onerror="this.parentNode.textContent=\'\uD83D\uDCE6\'"></div>' : '') +
+                (item.has_comment ? '<div class="grid-item-comment-badge"><img src="/static/comment-full.png" data-comment-badge="full" alt="" onerror="this.style.display=\'none\'"></div>' : '') +
                 '<button class="grid-item-fav' + favActive + '" data-fav="' + (item.fav ? 'true' : 'false') + '" data-rep-id="' + repId + '" onclick="Catalog.toggleGridFavorite(event,\'' + item.item_id + '\',\'' + cat + '\')">' +
                 '<svg viewBox="0 0 24 24" fill="' + favFill + '"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>' +
                 '</button>' +
@@ -230,6 +246,7 @@
             var item = closestClass(t, 'grid-item');
             if (item && !closestClass(t, 'grid-item-fav')) {
                 var id = item.getAttribute('data-id');
+                if (!id || id === '__back__') return;
                 if (id) window.openDetails(id);
             }
         };
@@ -385,6 +402,62 @@
         }
     };
     window.Catalog.currentEpisodes = currentEpisodes;
+
+    // ---- Colecciones TVCatCollection ----
+    // openCollection: resuelve la colección y pinta solo sus títulos en orden,
+    // con pseudo-ítem inicial "Volver al catálogo". closeCollection: restaura.
+    // loadCollections: muestra todas las colecciones (entrada lateral).
+    // ES5 estricto (SmartTV antigua).
+    Catalog.openCollection = function(itemId) {
+        showLoading(true);
+        window.API.ajax({
+            url: '/api/collection/resolve?item_id=' + encodeURIComponent(itemId),
+            success: function(data) {
+                showLoading(false);
+                var list = data.items || [];
+                if (!list.length) {
+                    var extra = data.missing_count ? ' (' + data.missing_count + ' no encontrados)' : '';
+                    alert('Esta colección no tiene títulos disponibles en tu catálogo.' + extra);
+                    return;
+                }
+                window._activeCollection = { id: itemId, title: (data.collection && data.collection.title) || '' };
+                currentItems = [{ item_id: '__back__', title: 'Volver al catálogo' }].concat(list);
+                renderItems(currentItems);
+                updateBadge(list.length);
+                try { if (typeof window.closeDetails === 'function') window.closeDetails(); } catch (e) {}
+                try { window.scrollTo(0, 0); } catch (e2) {}
+            },
+            error: function() {
+                showLoading(false);
+                alert('No se pudo abrir la colección.');
+            }
+        });
+    };
+    Catalog.closeCollection = function() {
+        window._activeCollection = null;
+        load(currentCategory === 'collections' ? 'home' : currentCategory);
+    };
+    Catalog.loadCollections = function() {
+        window._activeCollection = null;
+        currentCategory = 'collections';
+        showLoading(true);
+        var mySeq = ++_loadSeq;
+        window.API.ajax({
+            url: '/api/collections',
+            success: function(data) {
+                if (mySeq !== _loadSeq) return;
+                currentItems = data.items || [];
+                renderItems(currentItems);
+                updateBadge(data.count !== undefined ? data.count : currentItems.length);
+                showLoading(false);
+            },
+            error: function() {
+                if (mySeq !== _loadSeq) return;
+                showLoading(false);
+            }
+        });
+    };
+
     window.refreshCover = function(itemId) {
         if (!confirm('¿Refrescar cover desde Telegram? Se re-descargará la imagen del mensaje original.')) return;
         var btn = document.querySelector('.meta-cover-refresh');
@@ -657,6 +730,23 @@
                 var hasEpisodes = item.episodes && item.episodes.length > 0;
                 var subcat = (item.subcategory || '').toLowerCase();
 
+                // Colecciones: botón único "Abrir colección" en lugar de reproductores.
+                // Los plugins heropage-action (sección 3) se siguen mostrando.
+                if (item.is_collection) {
+                    var colSection = document.createElement('div');
+                    colSection.className = 'hero-actions-section';
+                    var colBtn = document.createElement('button');
+                    colBtn.className = 'btn-stacked btn-play';
+                    colBtn.id = 'btn-open-collection';
+                    colBtn.innerHTML = '<span class="btn-emoji">\uD83D\uDCDA</span><span style="font-size:0.7rem;margin-top:2px;">Abrir colecci\u00F3n</span>';
+                    colBtn.title = 'Abrir colección';
+                    colBtn.setAttribute('aria-label', 'Abrir colección');
+                    colBtn.onclick = function() { Catalog.openCollection(itemId); };
+                    colSection.appendChild(colBtn);
+                    actionsEl.appendChild(colSection);
+                }
+
+                if (!item.is_collection) {
                 // 1. Player section (filtrado por applies_to: categoría o subcategoría, con '*')
                 var players = [];
                 try {
@@ -752,7 +842,7 @@
                 })(actionsEl, item, itemId, hasEpisodes, subcat);
                 
                 // 2. Episodes (hardcoded core feature) — normalized to hero standard
-                if (hasEpisodes && subcat.match(/(anime|series|tv)/)) {
+                if (hasEpisodes) {
                     var epSection = document.createElement('div');
                     epSection.className = 'hero-actions-section';
                     var epBtn = document.createElement('button');
@@ -765,6 +855,8 @@
                     epSection.appendChild(epBtn);
                     actionsEl.appendChild(epSection);
                 }
+
+                } // fin guard !is_collection (reproductores + episodios + reintento)
 
                 // 3. heropage-action plugins
                 var heroButtons = [];
@@ -845,6 +937,9 @@
                     metaFavBtn.parentNode.insertBefore(metaMkvIcon, metaFavBtn.nextSibling);
                 }
             }
+
+            // Comentario global del título (2026-09-08): badge + panel bajo demanda.
+            try { _setupHeroComment(item); } catch (e) {}
 
             // Show modal
             var modal = document.getElementById('detail-modal');
@@ -1054,7 +1149,7 @@
         }
         stopHeroThumbs();
         _heroItemId = itemId;
-        var fetchEps = currentEpisodes[itemId] && currentEpisodes[itemId].seasons
+        var fetchEps = currentEpisodes[itemId] && currentEpisodes[itemId].seasons && Object.keys(currentEpisodes[itemId].seasons).length > 0
             ? Promise.resolve(currentEpisodes[itemId].seasons)
             : new Promise(function(resolve) {
                 window.API.ajax({
@@ -1131,6 +1226,285 @@
         _heroThumbTimer = setInterval(poll, 2000);
     }
 
+    // ====== COMENTARIOS GLOBALES POR TÍTULO (2026-09-08) ======
+    // Un comentario por item_id, visible para todos los usuarios autenticados.
+    // Panel en el área del arte del hero (derecha) + badge en el grid.
+    // ES5 estricto (Tizen 2.4): sin fetch, sin template literals.
+    var _heroCommentState = null;
+
+    function _heroCommentIsAdmin() {
+        try {
+            var cu = window.Catalog ? window.Catalog.currentUser : null;
+            cu = cu || {};
+            var uname = (cu.username || cu.display_name || '').toString().toLowerCase();
+            return (uname === 'admin') || !!cu.is_admin || cu.role === 'admin';
+        } catch (e) { return false; }
+    }
+
+    function _commentAvatarHtml(c) {
+        var name = c.display_name || c.username || '?';
+        if (c.avatar_url) {
+            return '<img src="' + escapeHtml(String(c.avatar_url)) + '" alt="">';
+        }
+        var letter = escapeHtml(String(name).charAt(0).toUpperCase() || '?');
+        var bg = c.color || '#52525b';
+        return '<span style="background:' + escapeHtml(String(bg)) + ';">' + letter + '</span>';
+    }
+
+    function refreshGridCommentBadge(itemId, has) {
+        try {
+            var cover = document.querySelector('.grid-item[data-id="' + itemId + '"] .grid-item-cover');
+            if (cover) {
+                var old = cover.querySelector('.grid-item-comment-badge');
+                if (has && !old) {
+                    var d = document.createElement('div');
+                    d.className = 'grid-item-comment-badge';
+                    d.innerHTML = '<img src="/static/comment-full.png" data-comment-badge="full" alt="" onerror="this.style.display=\'none\'">';
+                    cover.appendChild(d);
+                } else if (!has && old) {
+                    old.parentNode.removeChild(old);
+                }
+            }
+        } catch (e) {}
+        try {
+            for (var i = 0; i < currentItems.length; i++) {
+                if (String(currentItems[i].item_id) === String(itemId)) {
+                    currentItems[i].has_comment = has ? 1 : 0;
+                    break;
+                }
+            }
+        } catch (e) {}
+    }
+
+    function _heroCommentContainer() {
+        var cs = document.querySelectorAll('.hero-container');
+        return (cs && cs.length) ? cs[0] : null;
+    }
+
+    function _closeHeroCommentBox() {
+        try {
+            var b = document.getElementById('hero-comment');
+            if (b && b.parentNode) b.parentNode.removeChild(b);
+        } catch (e) {}
+    }
+
+    function _updateHeroCommentBadge() {
+        try {
+            var st = _heroCommentState;
+            if (!st) return;
+            var btn = document.querySelector('.meta-comment-btn img');
+            if (!btn) return;
+            var has = !!(st.payload && st.payload.has_comment);
+            var src = has ? '/static/comment-full.png' : '/static/comment-empty.png';
+            if (btn.getAttribute('src') !== src) btn.setAttribute('src', src);
+        } catch (e) {}
+    }
+
+    // Prepara el badge (siempre visible, como el corazón) y guarda el payload.
+    // El panel SOLO se abre al presionar el badge; sin comentarios no se muestra nada.
+    function _setupHeroComment(item) {
+        var itemId = item.item_id || item.id;
+        if (!itemId) return;
+        _closeHeroCommentBox();
+        _heroCommentState = { itemId: itemId, payload: (item.item_comment || null), editing: false, open: false };
+        try {
+            var categoryEl = document.getElementById('meta-category');
+            if (categoryEl && categoryEl.parentNode) {
+                var olds = categoryEl.parentNode.querySelectorAll('.meta-comment-btn');
+                for (var i = olds.length - 1; i >= 0; i--) olds[i].remove();
+                var btn = document.createElement('button');
+                btn.className = 'meta-fav-btn meta-comment-btn';
+                btn.title = 'Comentarios';
+                btn.setAttribute('aria-label', 'Comentarios');
+                btn.innerHTML = '<img src="/static/comment-empty.png" alt="" onerror="this.outerHTML=\'💬\'">';
+                btn.onclick = function() { Catalog.toggleHeroComment(); };
+                categoryEl.parentNode.appendChild(btn);
+            }
+        } catch (e) {}
+        if (_heroCommentState.payload) {
+            _updateHeroCommentBadge();
+        } else {
+            window.API.ajax({
+                url: '/api/item/' + encodeURIComponent(itemId) + '/comment',
+                success: function(res) {
+                    if (!_heroCommentState || String(_heroCommentState.itemId) !== String(itemId)) return;
+                    _heroCommentState.payload = res;
+                    _updateHeroCommentBadge();
+                    if (_heroCommentState.open) _openPaintHeroComment(_heroCommentState);
+                },
+                error: function() {}
+            });
+        }
+    }
+
+    // Pinta según estado: con comentario → vista; sin comentario → editor vacío.
+    function _openPaintHeroComment(st) {
+        if (!st.payload) return; // sigue cargando (se pinta al llegar el GET)
+        if (st.payload.has_comment) { st.editing = false; _paintHeroComment(); }
+        else if (st.payload.can_edit) { st.editing = true; _paintHeroComment(); }
+        else { st.open = false; _closeHeroCommentBox(); }
+    }
+
+    Catalog.toggleHeroComment = function() {
+        var st = _heroCommentState;
+        if (!st) return;
+        var box = document.getElementById('hero-comment');
+        if (box) {
+            st.open = false;
+            st.editing = false;
+            _closeHeroCommentBox();
+            return;
+        }
+        st.open = true;
+        var cont = _heroCommentContainer();
+        if (!cont) { st.open = false; return; }
+        var nb = document.createElement('div');
+        nb.id = 'hero-comment';
+        nb.innerHTML = '<div class="hc-loading">…</div>';
+        cont.appendChild(nb);
+        _openPaintHeroComment(st);
+    };
+
+    Catalog.closeHeroComment = function() {
+        if (_heroCommentState) { _heroCommentState.open = false; _heroCommentState.editing = false; }
+        _closeHeroCommentBox();
+    };
+
+    function _paintHeroComment() {
+        var st = _heroCommentState;
+        if (!st) return;
+        var box = document.getElementById('hero-comment');
+        if (!box) return;
+        if (st.editing) {
+            _paintHeroCommentEditor(box, st);
+            return;
+        }
+        var p = st.payload || { has_comment: false, comment: null, can_edit: true, can_delete: false };
+        var html = '<span class="hc-close" onclick="Catalog.closeHeroComment()" title="Cerrar">×</span>';
+        if (p.has_comment && p.comment) {
+            var c = p.comment;
+            var name = escapeHtml(String(c.display_name || c.username || '?'));
+            var txt = escapeHtml(String(c.text || '')).replace(/\n/g, '<br>');
+            var edited = c.edited ? ' <span class="hc-edited">(editado)</span>' : '';
+            html += '<div class="hc-head"><span class="hc-avatar">' + _commentAvatarHtml(c) +
+                '</span><span class="hc-name">' + name + '</span>' + edited + '</div>';
+            html += '<div class="hc-text">' + txt + '</div>';
+            html += '<div class="hc-actions">';
+            if (p.can_edit) html += '<button class="hc-btn" onclick="Catalog.editHeroComment()">Editar</button>';
+            if (p.can_delete) html += '<button class="hc-btn hc-danger" onclick="Catalog.deleteHeroComment()">Eliminar</button>';
+            html += '</div>';
+        } else {
+            html += '<div class="hc-empty">Sin comentarios todavía.</div>';
+        }
+        box.innerHTML = html;
+    }
+
+    function _paintHeroCommentEditor(box, st) {
+        var p = st.payload || {};
+        var c = (p.has_comment && p.comment) ? p.comment : null;
+        var initial = c ? String(c.text || '') : '';
+        var canToggle = !p.has_comment || !!p.is_owner || _heroCommentIsAdmin();
+        var checked = c ? !!c.editable_by_others : false;
+        var html = '<span class="hc-close" onclick="Catalog.closeHeroComment()" title="Cerrar">×</span>' +
+            '<div class="hc-head"><span class="hc-name">Comentarios</span></div>' +
+            '<textarea id="hero-comment-text" class="hc-textarea" maxlength="500" rows="4">' +
+            escapeHtml(initial) + '</textarea>' +
+            '<div class="hc-row"><span id="hero-comment-count" class="hc-count">' + initial.length + '/500</span></div>';
+        if (canToggle) {
+            html += '<label class="hc-shared"><input type="checkbox" id="hero-comment-shared"' +
+                (checked ? ' checked' : '') + '> Permitir que otros usuarios lo editen</label>';
+        }
+        html += '<div class="hc-actions">' +
+            '<button class="hc-btn hc-primary" onclick="Catalog.saveHeroComment()">Guardar</button>' +
+            '<button class="hc-btn" onclick="Catalog.cancelHeroComment()">Cancelar</button>' +
+            '</div>';
+        box.innerHTML = html;
+        var ta = document.getElementById('hero-comment-text');
+        if (ta) {
+            ta.oninput = function() {
+                var el = document.getElementById('hero-comment-count');
+                if (el) el.textContent = String(ta.value.length) + '/500';
+            };
+            try { ta.focus(); } catch (e) {}
+        }
+    }
+
+    Catalog.editHeroComment = function() {
+        if (!_heroCommentState) return;
+        var p = _heroCommentState.payload;
+        if (p && p.has_comment && !p.can_edit) return;
+        _heroCommentState.editing = true;
+        _paintHeroComment();
+    };
+
+    Catalog.cancelHeroComment = function() {
+        if (!_heroCommentState) return;
+        _heroCommentState.editing = false;
+        var p = _heroCommentState.payload;
+        if (p && p.has_comment) _paintHeroComment();
+        else Catalog.closeHeroComment();
+    };
+
+    Catalog.saveHeroComment = function() {
+        if (!_heroCommentState) return;
+        var itemId = _heroCommentState.itemId;
+        var ta = document.getElementById('hero-comment-text');
+        if (!ta) return;
+        var text = ta.value.replace(/^\s+|\s+$/g, '');
+        if (!text) { alert('El comentario no puede estar vacío.'); return; }
+        if (text.length > 500) { alert('Máximo 500 caracteres.'); return; }
+        var data = { text: text };
+        var sh = document.getElementById('hero-comment-shared');
+        if (sh) data.editable_by_others = !!sh.checked;
+        window.API.ajax({
+            method: 'PUT',
+            url: '/api/item/' + encodeURIComponent(itemId) + '/comment',
+            data: data,
+            success: function(res) {
+                if (!_heroCommentState || String(_heroCommentState.itemId) !== String(itemId)) return;
+                _heroCommentState.payload = res;
+                _heroCommentState.editing = false;
+                _paintHeroComment();
+                _updateHeroCommentBadge();
+                refreshGridCommentBadge(itemId, true);
+            },
+            error: function(status, resp) {
+                var msg = 'No se pudo guardar.';
+                try {
+                    var j = JSON.parse(resp);
+                    if (j && j.detail) msg = j.detail;
+                } catch (e) {}
+                alert(msg);
+            }
+        });
+    };
+
+    Catalog.deleteHeroComment = function() {
+        if (!_heroCommentState) return;
+        var itemId = _heroCommentState.itemId;
+        if (!confirm('¿Eliminar el comentario global de este título?')) return;
+        window.API.ajax({
+            method: 'DELETE',
+            url: '/api/item/' + encodeURIComponent(itemId) + '/comment',
+            success: function() {
+                if (!_heroCommentState || String(_heroCommentState.itemId) !== String(itemId)) return;
+                _heroCommentState.payload = { has_comment: false, comment: null, can_edit: true, can_delete: false };
+                _heroCommentState.editing = false;
+                Catalog.closeHeroComment();
+                _updateHeroCommentBadge();
+                refreshGridCommentBadge(itemId, false);
+            },
+            error: function(status, resp) {
+                var msg = 'No se pudo eliminar.';
+                try {
+                    var j = JSON.parse(resp);
+                    if (j && j.detail) msg = j.detail;
+                } catch (e) {}
+                alert(msg);
+            }
+        });
+    };
+
     // ====== VARIANT SWITCH ======
     Catalog.switchVariant = function(id) {
         window.API.ajax({
@@ -1145,6 +1519,11 @@
     window.closeDetails = function() {
         if (_slideshowTimeout) { clearTimeout(_slideshowTimeout); _slideshowTimeout = null; }
         try { stopHeroThumbs(); } catch (e) {}
+        try {
+            var hc = document.getElementById('hero-comment');
+            if (hc && hc.parentNode) hc.parentNode.removeChild(hc);
+        } catch (e) {}
+        _heroCommentState = null;
         var modal = document.getElementById('detail-modal');
         if (modal) modal.classList.add('hidden');
         setTimeout(function() {
@@ -1321,7 +1700,7 @@
         };
 
         // Si el hero ya precargó los episodios, reutilizar sin nueva llamada
-        if (currentEpisodes[id] && currentEpisodes[id].seasons) {
+        if (currentEpisodes[id] && currentEpisodes[id].seasons && Object.keys(currentEpisodes[id].seasons).length > 0) {
             _resetEpBtn();
             _gotSeasons(currentEpisodes[id].seasons);
             return;
@@ -1461,7 +1840,20 @@
                             var card = document.createElement('div');
                             card.className = 'episode-card' + (isWatched ? ' watched' : '') + (isNext ? ' next-to-play' : '');
                             card.setAttribute('tabindex', '0');
-                            card.onclick = function() { Catalog.playEpisode(idx); };
+                             card.onclick = function() { 
+                                var ep = episodes[idx];
+                                if (!ep) return;
+                                var item = { id: currentMediaId, title: ep.title || ep.display_name || 'Episodio' };
+                                var activePlayers = [];
+                                try { activePlayers = window.pluginSystem && window.pluginSystem.getActivePlayers ? window.pluginSystem.getActivePlayers() : []; } catch(e) {}
+                                if (activePlayers.length === 1) {
+                                    var pl = activePlayers[0];
+                                    if (typeof pl.play === 'function') pl.play(item);
+                                    else Catalog._playWithPlayer(item, currentMediaId, true, '', pl);
+                                } else if (activePlayers.length > 1) {
+                                    Catalog._showPlayerSelector(item, currentMediaId, true, '', activePlayers);
+                                }
+                             };
 
                             var displayTitle = (ep.episode_number || (idx + 1)) + '. ' + (ep.title || 'Episodio ' + (ep.episode_number || (idx + 1)));
 
@@ -1565,8 +1957,13 @@
                 if (!currentPref || currentPref === 'auto') {
                     localStorage.setItem('tvcat_preferred_player', window.getPlayerType ? window.getPlayerType() : activePlayers[0].playerType);
                 }
+                // Usar el plugin directamente, no playMedia genérico
+                var pl = activePlayers[0];
+                if (typeof pl.play === 'function') { pl.play(itemArg, ep); }
+                else { Catalog._playWithPlayer(itemArg, id, true, subcat, pl); }
+            } else {
+                Catalog.playMedia(itemArg, ep);
             }
-            Catalog.playMedia(itemArg, ep);
             return;
         }
 
@@ -1593,7 +1990,8 @@
                 btn.onclick = function() {
                     overlay.remove();
                     localStorage.setItem('tvcat_preferred_player', plugin.playerType);
-                    Catalog.playMedia(itemArg, ep);
+                    if (typeof plugin.play === 'function') { plugin.play(itemArg, ep); }
+                    else { Catalog._playWithPlayer(itemArg, id, true, subcat, plugin); }
                 };
                 panel.appendChild(btn);
             })(activePlayers[pi]);
@@ -1760,7 +2158,7 @@
     Catalog._playWithPlayer = function(item, itemId, hasEpisodes, subcat, playerPlugin) {
         if (!playerPlugin || !playerPlugin.play) return;
 
-        if (hasEpisodes && subcat.match(/(anime|series|tv)/)) {
+        if (hasEpisodes && subcat.match(/(anime|series|tv|various)/i)) {
             // Series: find next unwatched episode, then play
             window.API.ajax({
                 url: '/api/media/' + itemId + '/episodes',

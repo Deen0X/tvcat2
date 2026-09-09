@@ -1369,6 +1369,21 @@ def _filter_items(items, search: str = "", fields: Optional[str] = None, year_fr
         filtered.append(it)
     return filtered
 
+def _enrich_has_comment(items):
+    """Añade has_comment (0/1) a listas de items que no pasan por
+    get_random_items (favoritos, continue, completed). Una sola query."""
+    if not items:
+        return items
+    try:
+        from services.catalog_service import get_has_comment_map
+        cmap = get_has_comment_map([it.get("item_id") for it in items if isinstance(it, dict)])
+        for it in items:
+            if isinstance(it, dict):
+                it["has_comment"] = 1 if cmap.get(str(it.get("item_id"))) else 0
+    except Exception:
+        pass
+    return items
+
 @app.get(api_url("/api/catalog/continue"))
 async def catalog_continue(request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = ""):
     from services.favorites_service import get_continue_watching
@@ -1380,6 +1395,7 @@ async def catalog_continue(request: Request, search: str = "", limit: int = 200,
     # limitar tras filtrar si se pidió search (mantener límite)
     if search or year_from or year_to or genres:
         items = items[:min(limit,200)]
+    _enrich_has_comment(items)
     return {"items": items, "count": len(items)}
 
 @app.get(api_url("/api/catalog/completed"))
@@ -1392,6 +1408,7 @@ async def catalog_completed(request: Request, search: str = "", limit: int = 200
     items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
     if search or year_from or year_to or genres:
         items = items[:min(limit,200)]
+    _enrich_has_comment(items)
     return {"items": items, "count": len(items)}
 
 @app.get(api_url("/api/catalog/visibility"))
@@ -1448,6 +1465,7 @@ async def get_catalog(category: str, request: Request, search: str = "", limit: 
             if search or yf is not None or yt is not None or exclude_genres:
                 items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
                 items = items[:min(limit,200)]
+            _enrich_has_comment(items)
             return {"items": items, "count": len(items)}
         except Exception as e:
             try: conn.close()
@@ -1563,14 +1581,17 @@ async def get_genres():
     return {"genres": sorted(raw), "terms": ordered}
 
 def _sort_variants(variants: list) -> list:
-    """Ordena variantes: primero temporadas numeradas, luego especiales/OVAs."""
+    """Ordena variantes: primero por rorder si existe, luego por season_number/título."""
     def _weight(v):
+        ro = v.get("rorder")
+        if ro is not None:
+            return (0, ro, 0, v.get("season_number") or 0, v.get("title") or "")
         label = (v.get("season_display") or v.get("title") or "").lower()
         is_special = 1 if any(x in label for x in ("ova","pelicula","movie","especial","special")) else 0
         import re
         m = re.search(r"(\d+)", label)
         num = int(m.group(1)) if m else (999 if is_special else 500)
-        return (is_special, num, label)
+        return (1, num, is_special, v.get("season_number") or 0, v.get("title") or "")
     seen = set()
     result = []
     for v in variants:
@@ -1645,7 +1666,7 @@ def _get_variants_and_rep(conn, item_id: str):
     if not gtf:
         return [], item_id
     rows = conn.execute(
-        "SELECT id, item_id, title, group_title FROM unified_catalog WHERE group_title_flat=? AND COALESCE(subcategory,'')=? ORDER BY id ASC",
+        "SELECT id, item_id, title, group_title, rorder FROM unified_catalog WHERE group_title_flat=? AND COALESCE(subcategory,'')=? ORDER BY id ASC",
         (gtf, subcat)
     ).fetchall()
     variants = []
@@ -1654,7 +1675,7 @@ def _get_variants_and_rep(conn, item_id: str):
     for r in rows:
         vid = r["item_id"]
         sd = _variant_label(r["title"], r["group_title"] or "")
-        v = {"id": vid, "title": r["title"], "season_display": sd}
+        v = {"id": vid, "title": r["title"], "season_display": sd, "rorder": r["rorder"]}
         variants.append(v)
         if r["id"] < (min_id or float('inf')):
             min_id = r["id"]
@@ -5163,6 +5184,142 @@ def _find_episode_by_id_in_plugin_dbs(episode_id):
     return None
 
 
+def _collection_user_filters(conn, user_id):
+    """Cláusulas de visibilidad de 3 niveles (§18) para colecciones: una colección
+    nunca muestra lo que el usuario no puede ver."""
+    where, params = [], []
+    if not user_id:
+        return where, params
+    try:
+        urow = conn.execute("SELECT role, profile_id FROM tvcat_users WHERE id=?", (user_id,)).fetchone()
+        role = urow["role"] if urow else "user"
+        profile_id = urow["profile_id"] if urow else None
+    except Exception:
+        role, profile_id = "user", None
+    try:
+        from services.catalog_service import _apply_content_layer
+        _apply_content_layer(conn, where, params, f"visibility_{user_id}")
+        _apply_content_layer(conn, where, params, f"available_{user_id}")
+        if role != "admin" and profile_id:
+            _apply_content_layer(conn, where, params, f"access_{profile_id}")
+    except Exception:
+        pass
+    return where, params
+
+
+def _mark_favs(conn, profile_id, items):
+    try:
+        fav_rows = conn.execute("SELECT item_id FROM tvcat_favorites WHERE profile_id=?", (profile_id,)).fetchall()
+        fav_set = {str(r["item_id"]) for r in fav_rows}
+        for it in items:
+            it["fav"] = str(it.get("item_id", "")) in fav_set
+    except Exception:
+        pass
+    return items
+
+
+@app.get(api_url("/api/collections"))
+async def list_collections(request: Request, limit: int = 200):
+    """Lista todos los ítems tipo colección visibles para el usuario."""
+    from services.catalog_service import get_conn
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s:
+        raise HTTPException(401)
+    user_id = s.get("user_id")
+    conn = get_conn()
+    try:
+        where, params = _collection_user_filters(conn, user_id)
+        where.append("COALESCE(is_collection,0) = 1")
+        rows = conn.execute(
+            f"SELECT item_id, title, category, subcategory, source, description, year, rating, cover_url FROM unified_catalog WHERE {' AND '.join(where)} ORDER BY title ASC LIMIT ?",
+            params + [min(limit, 200)]).fetchall()
+        items = [dict(r) for r in rows]
+        for it in items:
+            it["is_collection"] = 1
+        _mark_favs(conn, s.get("profile_id") or user_id, items)
+        return {"items": items, "count": len(items)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.get(api_url("/api/collection/resolve"))
+async def resolve_collection(item_id: str, request: Request):
+    """Resuelve una colección a sus títulos en orden. Omite los no encontrados
+    (missing_count). Busca en title + alt_titles, con año si se indicó."""
+    import json as _json
+    from services.catalog_service import get_conn
+    from services.auth_service import get_session
+    from services.text_norm import normalize_title, parse_collection_entries
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s:
+        raise HTTPException(401)
+    user_id = s.get("user_id")
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+        if not row:
+            raise HTTPException(404)
+        col = dict(row)
+        if not int(col.get("is_collection", 0) or 0):
+            raise HTTPException(400, "No es una colección")
+        entries = parse_collection_entries(col.get("collection_raw") or "")
+        where, params = _collection_user_filters(conn, user_id)
+        where.append("COALESCE(is_collection,0) = 0")
+        cands = conn.execute(
+            f"SELECT item_id, title, year, alt_titles, cover_url, category, subcategory FROM unified_catalog WHERE {' AND '.join(where) if where else '1=1'} ORDER BY id DESC",
+            params).fetchall()
+        # Índice: normalizado -> filas (más reciente primero por ORDER BY id DESC)
+        norm_index = {}
+        lit_index = {}
+        for c in cands:
+            cd = dict(c)
+            names = [cd.get("title") or ""]
+            try:
+                for a in (_json.loads(cd.get("alt_titles") or "[]") or []):
+                    if a:
+                        names.append(str(a))
+            except Exception:
+                pass
+            for nm in names:
+                lit_index.setdefault(nm, []).append(cd)
+                nn = normalize_title(nm)
+                if nn:
+                    norm_index.setdefault(nn, []).append(cd)
+        items, missing = [], []
+        for pos, e in enumerate(entries):
+            et, ey = e.get("title", ""), e.get("year")
+            hit = None
+            pool = lit_index.get(et, []) if e.get("literal") else norm_index.get(normalize_title(et), [])
+            for cd in pool or []:
+                if ey and str(cd.get("year") or "") != str(ey):
+                    continue
+                hit = cd
+                break
+            if hit:
+                items.append({
+                    "item_id": hit.get("item_id"), "title": hit.get("title"),
+                    "category": hit.get("category", ""), "subcategory": hit.get("subcategory", ""),
+                    "year": hit.get("year", ""), "cover_url": hit.get("cover_url", ""),
+                    "position": pos,
+                })
+            else:
+                missing.append(et)
+        _mark_favs(conn, s.get("profile_id") or user_id, items)
+        return {"success": True,
+                "collection": {"item_id": item_id, "title": col.get("title", "")},
+                "items": items, "count": len(items),
+                "missing": missing, "missing_count": len(missing)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @app.get(api_url("/api/movie/{item_id}"))
 async def get_item_details(item_id: str, request: Request = None):
     from services.catalog_service import get_conn
@@ -5191,6 +5348,15 @@ async def get_item_details(item_id: str, request: Request = None):
             fav_row = conn.execute("SELECT 1 FROM tvcat_favorites WHERE profile_id=? AND item_id=?", (profile_id, item_id)).fetchone()
             is_fav = fav_row is not None
     result["favorite"] = is_fav
+    # Comentario global del título (hero): payload con permisos para el frontal.
+    try:
+        if request:
+            _cs = _comment_session(request)
+            if _cs:
+                from services.catalog_service import get_item_comment as _gic
+                result["item_comment"] = _comment_payload(_gic(item_id), _cs)
+    except Exception:
+        pass
     # Buscar episodios por item_id TEXT o por id INTEGER (bug scanner: usa cat_id INTEGER)
     int_id_str = str(row["id"])
     raw_eps = [dict(e) for e in conn.execute(
@@ -6592,6 +6758,87 @@ async def favorites_list(request: Request):
     if not session: raise HTTPException(401)
     items = get_favorites(session.get("profile_id") or session["user_id"])
     return {"items": items, "count": len(items)}
+
+# --- API: Comentarios globales por título (2026-09-08) ---
+# Un comentario por item_id, visible para todos los usuarios autenticados.
+# El creador puede abrirlo a edición colaborativa (editable_by_others).
+# Eliminar: solo creador o admin.
+def _comment_session(request: Request):
+    from services.auth_service import get_session
+    token = request.cookies.get("tvcat_session", "")
+    if not token:
+        ah = request.headers.get("Authorization", "")
+        if ah.startswith("Bearer "):
+            token = ah[7:]
+    return get_session(token) if token else None
+
+
+def _comment_payload(comment, session):
+    if not comment:
+        return {"has_comment": False, "comment": None, "can_edit": True, "can_delete": False}
+    uid = session.get("user_id")
+    is_admin = session.get("role") == "admin"
+    is_owner = str(comment.get("user_id")) == str(uid)
+    can_edit = bool(is_admin or is_owner or comment.get("editable_by_others"))
+    return {"has_comment": True, "comment": comment,
+            "can_edit": can_edit,
+            "can_delete": bool(is_admin or is_owner),
+            "is_owner": is_owner}
+
+@app.get(api_url("/api/item/{item_id}/comment"))
+async def get_item_comment(item_id: str, request: Request):
+    from services.catalog_service import get_item_comment as _get
+    session = _comment_session(request)
+    if not session: raise HTTPException(401)
+    return _comment_payload(_get(item_id), session)
+
+@app.put(api_url("/api/item/{item_id}/comment"))
+async def put_item_comment(item_id: str, request: Request):
+    from services.catalog_service import get_item_comment as _get, set_item_comment as _set
+    from services.catalog_service import COMMENT_MAX_LEN
+    session = _comment_session(request)
+    if not session: raise HTTPException(401)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "JSON inválido")
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "El comentario no puede estar vacío")
+    if len(text) > COMMENT_MAX_LEN:
+        raise HTTPException(400, f"Máximo {COMMENT_MAX_LEN} caracteres")
+    uid = session.get("user_id")
+    is_admin = session.get("role") == "admin"
+    existing = _get(item_id)
+    if existing:
+        is_owner = str(existing.get("user_id")) == str(uid)
+        if not (is_admin or is_owner or existing.get("editable_by_others")):
+            raise HTTPException(403, "Sin permiso de edición")
+        # El flag colaborativo solo lo toca el creador o el admin; los
+        # editores externos conservan el valor existente.
+        if is_admin or is_owner:
+            flag = bool(body.get("editable_by_others"))
+        else:
+            flag = bool(existing.get("editable_by_others"))
+    else:
+        # Crear: cualquier usuario autenticado; el flag lo decide el creador.
+        flag = bool(body.get("editable_by_others"))
+    saved = _set(item_id, existing["user_id"] if existing else uid, text, flag)
+    return _comment_payload(saved, session)
+
+@app.delete(api_url("/api/item/{item_id}/comment"))
+async def delete_item_comment(item_id: str, request: Request):
+    from services.catalog_service import get_item_comment as _get, delete_item_comment as _del
+    session = _comment_session(request)
+    if not session: raise HTTPException(401)
+    existing = _get(item_id)
+    if not existing:
+        raise HTTPException(404, "Sin comentario")
+    uid = session.get("user_id")
+    if not (session.get("role") == "admin" or str(existing.get("user_id")) == str(uid)):
+        raise HTTPException(403, "Solo el creador o el admin pueden eliminar")
+    _del(item_id)
+    return {"success": True}
 
 @app.get(api_url("/api/watch/history"))
 async def watch_history(request: Request):

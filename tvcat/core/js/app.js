@@ -3550,7 +3550,7 @@ function pollGlobalScanBar() {
                 var items = res.plan_items || [];
                 var dn = 0, tt = 0;
                 for (var i = 0; i < items.length; i++) { dn += (items[i].done || 0); tt += (items[i].count || 0); }
-                var p = tt > 0 ? Math.min(99, Math.round(dn * 100 / tt)) : (res.progress_percent || 0);
+                var planP = tt > 0 ? Math.min(99, Math.round(dn * 100 / tt)) : 0; var p = (tt > 0 && dn < tt) ? planP : (res.progress_percent || 0);
                 var cur = res.current_item || 'Escaneando...';
                 wrap.classList.remove('hidden');
                 if (fill) fill.style.width = p + '%';
@@ -4188,6 +4188,10 @@ function buildCategoryTree() {
                                 return;
                             }
                             var html = '';
+                            // Entrada única "Colecciones": filtra los ítems tipo
+                            // colección (TVCatCollection). No es sección expandible.
+                            html += '<div class="tree-source">' +
+                                '<label class="tree-item tree-source-label" style="cursor:pointer;" onclick="if(window.Catalog&&window.Catalog.loadCollections)window.Catalog.loadCollections()">\uD83D\uDCDA Colecciones</label></div>';
                             for (var s = 0; s < _visTree.length; s++) {
                                 var src = _visTree[s];
                                 if (_visAvailable.plugins[src.source] === false) continue;

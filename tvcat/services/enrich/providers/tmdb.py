@@ -72,6 +72,16 @@ class TMDBProvider:
     def _format(self, details, media_type):
         if not details:
             return None
+        # Detectar tipo REAL de la respuesta: TMDB puede devolver datos de película
+        # aunque se consulte como TV (o viceversa) si el ID no existe en ese namespace.
+        # first_air_date presente → tv; release_date presente → movie.
+        actual_type = media_type
+        has_fad = bool(details.get("first_air_date"))
+        has_rd = bool(details.get("release_date"))
+        if has_fad and not has_rd:
+            actual_type = "tv"
+        elif has_rd and not has_fad:
+            actual_type = "movie"
         api_data = {
             "api_id": str(details.get("id")),
             "api_title": details.get("title") or details.get("name"),
@@ -79,8 +89,11 @@ class TMDBProvider:
             "api_rating": details.get("vote_average"),
             "api_rating_count": details.get("vote_count"),
             "api_release_date": details.get("release_date") or details.get("first_air_date"),
-            "api_category": media_type,
+            "api_category": actual_type,
             "provider": self.name,
+            # Pasar fechas crudas para que enrich_service pueda detectar inconsistencias.
+            "first_air_date": details.get("first_air_date"),
+            "release_date": details.get("release_date"),
         }
         if "genres" in details:
             api_data["api_genres"] = json.dumps([g["name"] for g in details["genres"]])

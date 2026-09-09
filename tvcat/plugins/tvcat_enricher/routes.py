@@ -213,6 +213,7 @@ class SearchReq(BaseModel):
 class DetailsReq(BaseModel):
     provider: str
     id: str
+    media_type: Optional[str] = None
 
 
 class SaveReq(BaseModel):
@@ -387,7 +388,7 @@ async def get_enricher_item(item_id: str, request: Request):
     # Datos originales (del catálogo)
     from services.catalog_service import get_conn
     conn = get_conn()
-    row = conn.execute("SELECT title, category, subcategory, description, year, rating FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+    row = conn.execute("SELECT title, category, subcategory, description, year, rating, rorder, season_number FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
     conn.close()
     original = dict(row) if row else {}
     # 2026-09-04: poster_blob (bytes) no es serializable a JSON (rompía el modal
@@ -520,7 +521,7 @@ async def proxy_search(req: SearchReq):
 async def proxy_details(req: DetailsReq):
     try:
         import services.enrich_service as es
-        res = await es.get_details(req.provider, req.id)
+        res = await es.get_details(req.provider, req.id, media_type_hint=req.media_type)
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

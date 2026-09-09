@@ -59,35 +59,416 @@ def _make_tag(text):
     return f"#{clean}" if clean else ""
 
 
-def insert_scanned_item(title, subcategory, category, description, telegram_msg_id, telegram_link, files, source=None, alt_titles=None, group_title=None, season_number=None, season_display=None, metadata=None, conn=None, tg_user_id=None):
-    """Inserta o actualiza un título en unified_catalog + item_episodes."""
+_ROORDER_RE = re.compile(
+    r"(?i)^(?:rorder|recommended\s+order|orden\s+recomendado|orden\s+de\s+visualización|orden)\s*[:=\-]\s*(\d+)"
+)
+
+
+def _extract_rorder(text: str) -> int | None:
+    """Extrae el número de orden recomendado desde el texto del cover."""
+    if not text:
+        return None
+    for line in text.split("\n"):
+        m = _ROORDER_RE.search(line.strip())
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+_COLLECTION_TAG = "tvcatcollection"
+
+
+def _is_collection_text(text):
+    """Detecta mensaje de colección: contiene el tag TVCatCollection en cualquier
+    parte del texto/caption (no se exige primera línea: reserva para futuros tags)."""
+    if not text:
+        return False
+    try:
+        compact = re.sub(r"[\s_\-]+", "", text.lower())
+        return _COLLECTION_TAG in compact
+    except Exception:
+        return False
+
+
+_COLLECTION_LINE_RE = re.compile(r"^\s*(?:(\d{4})\s*;)?\s*;?\s*(!?)(.+?)\s*$")
+
+
+def _parse_collection_entries(raw_text):
+    """Parsea el cuerpo de un mensaje colección en entradas ordenadas
+    [{year|None, title, literal}]. Formato por línea: `AÑO; Título`, `; Título`
+    o `Título`. `!` inicial = búsqueda literal (sin saneo)."""
+    entries = []
+    if not raw_text:
+        return entries
+    for line in raw_text.split("\n"):
+        s = (line or "").strip()
+        if not s:
+            continue
+        try:
+            if _COLLECTION_TAG in re.sub(r"[\s_\-]+", "", s.lower()):
+                continue
+        except Exception:
+            pass
+        m = _COLLECTION_LINE_RE.match(s)
+        if not m:
+            continue
+        year, bang, title = m.group(1), m.group(2), (m.group(3) or "").strip()
+        if not title:
+            continue
+        entries.append({"year": year, "title": title, "literal": bool(bang)})
+    return entries
+
+
+_SCHEMA_READY = False
+
+
+def _ensure_plugin_schema(conn):
+    """Crea columnas e indices del plugin una sola vez por proceso."""
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    cur = conn.cursor()
+    for _ddl in [
+        "ALTER TABLE unified_catalog ADD COLUMN tg_user_id INTEGER",
+        "ALTER TABLE item_episodes ADD COLUMN tg_user_id INTEGER",
+        "ALTER TABLE item_episodes ADD COLUMN prepared_by_tghirayi INTEGER DEFAULT 0",
+        "ALTER TABLE item_episodes ADD COLUMN tghirayi_version TEXT DEFAULT ''",
+        "ALTER TABLE item_episodes ADD COLUMN video_codec TEXT DEFAULT ''",
+        "ALTER TABLE item_episodes ADD COLUMN is_mkv INTEGER DEFAULT 0",
+        "ALTER TABLE unified_catalog ADD COLUMN has_mkv INTEGER DEFAULT 0",
+        "ALTER TABLE unified_catalog ADD COLUMN rorder INTEGER",
+        "ALTER TABLE unified_catalog ADD COLUMN is_collection INTEGER DEFAULT 0",
+        "ALTER TABLE unified_catalog ADD COLUMN collection_raw TEXT DEFAULT ''",
+    ]:
+        try:
+            cur.execute(_ddl)
+        except Exception:
+            pass
+    for _idx in [
+        "CREATE INDEX IF NOT EXISTS idx_episodes_item_msg ON item_episodes(item_id, telegram_msg_id)",
+        "CREATE INDEX IF NOT EXISTS idx_uc_telegram_msg ON unified_catalog(telegram_msg_id)",
+        "CREATE INDEX IF NOT EXISTS idx_uc_source ON unified_catalog(source)",
+    ]:
+        try:
+            cur.execute(_idx)
+        except Exception:
+            pass
+    try:
+        cur.execute("DELETE FROM item_episodes WHERE id NOT IN (SELECT MIN(e.id) FROM item_episodes e LEFT JOIN unified_catalog u ON (u.id = CAST(e.item_id AS INTEGER) OR u.item_id = e.item_id) GROUP BY COALESCE(u.id, e.item_id), e.telegram_msg_id)")
+    except Exception:
+        pass
+    conn.commit()
+    _SCHEMA_READY = True
+
+
+_FORUM_TOPICS_TTL = 24 * 3600
+_FORUM_TOPICS_FAILED_AT = {}
+
+
+def _ensure_forum_topics_table():
+    """Tabla central telegram_forum_topics (cache de titulos de topics)."""
+    try:
+        from tvcat.gateway import get_db_connection as _gdb
+        _c = _gdb()
+        try:
+            _c.execute("CREATE TABLE IF NOT EXISTS telegram_forum_topics (channel_id TEXT NOT NULL, topic_id INTEGER NOT NULL, title TEXT DEFAULT '', updated_at INTEGER DEFAULT 0, PRIMARY KEY (channel_id, topic_id))")
+            _c.commit()
+        finally:
+            try:
+                _c.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _get_forum_topic_titles(canon_ch):
+    """Devuelve {topic_id: title} desde la cache central. {} si no hay."""
+    try:
+        from tvcat.gateway import get_db_connection as _gdb
+        _c = _gdb()
+        try:
+            rows = _c.execute("SELECT topic_id, title FROM telegram_forum_topics WHERE channel_id = ?", (str(canon_ch),)).fetchall()
+        finally:
+            try:
+                _c.close()
+            except Exception:
+                pass
+        out = {}
+        for _r in rows or []:
+            try:
+                _tid = int(_r[0])
+                _ti = (" ".join(str(_r[1] or "").split()))[:60]
+                if _tid and _ti:
+                    out[_tid] = _ti
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return {}
+
+
+def _save_forum_topics(canon_ch, mapping):
+    """Guarda {topic_id: title} en la cache central. Retorna guardados."""
+    try:
+        import time as _time
+        _now = int(_time.time())
+        items = []
+        for _k, _v in (mapping or {}).items():
+            try:
+                _tid = int(_k)
+                _ti = (" ".join(str(_v or "").split()))[:60]
+                if _tid and _ti:
+                    items.append((str(canon_ch), _tid, _ti, _now))
+            except Exception:
+                pass
+        if not items:
+            return 0
+        from tvcat.gateway import get_db_connection as _gdb
+        _c = _gdb()
+        try:
+            _c.executemany("INSERT OR REPLACE INTO telegram_forum_topics (channel_id, topic_id, title, updated_at) VALUES (?, ?, ?, ?)", items)
+            _c.commit()
+        finally:
+            try:
+                _c.close()
+            except Exception:
+                pass
+        return len(items)
+    except Exception:
+        return 0
+
+
+def _forum_topics_stale(canon_ch, want_ids=None):
+    """True si hay que refrescar: sin tabla, falta algun want_id o TTL vencido."""
+    try:
+        import time as _time
+        from tvcat.gateway import get_db_connection as _gdb
+        _c = _gdb()
+        try:
+            _t = _c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_forum_topics'").fetchone()
+            if not _t:
+                return True
+            rows = _c.execute("SELECT topic_id, updated_at FROM telegram_forum_topics WHERE channel_id = ?", (str(canon_ch),)).fetchall()
+        finally:
+            try:
+                _c.close()
+            except Exception:
+                pass
+        _have = {}
+        for _r in rows or []:
+            try:
+                _have[int(_r[0])] = int(_r[1] or 0)
+            except Exception:
+                pass
+        for _w in want_ids or []:
+            try:
+                if int(_w) not in _have:
+                    return True
+            except Exception:
+                pass
+        if not _have:
+            return True
+        return (int(_time.time()) - max(_have.values())) > _FORUM_TOPICS_TTL
+    except Exception:
+        return True
+
+
+async def _fetch_forum_topics(channel_ref, session_string, api_id, api_hash, only_ids=None):
+    """Nombres de topics via Telegram por IDs (best-effort). Devuelve {id: title}.
+
+    Usa GetForumTopicsByIDRequest sobre los IDs que hay en cache: exacto y sin
+    tope de paginacion (el listado completo se cortaba en 100)."""
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        from telethon.tl.functions.messages import GetForumTopicsByIDRequest
+        want = []
+        for _w in only_ids or []:
+            try:
+                _wi = int(_w)
+                if _wi and _wi not in want:
+                    want.append(_wi)
+            except Exception:
+                pass
+        if not want:
+            return {}
+        _s = str(channel_ref).strip()
+        try:
+            _entity_ref = int(_s)
+        except Exception:
+            _entity_ref = _s
+        client = TelegramClient(StringSession(session_string), int(api_id), str(api_hash), device_model="TVCat_Idx", app_version="1.0")
+        await client.connect()
+        try:
+            try:
+                peer = await client.get_input_entity(_entity_ref)
+            except Exception:
+                peer = _entity_ref
+            out = {}
+            def _collect(topics):
+                for _tt in topics or []:
+                    try:
+                        _tid = int(getattr(_tt, "id", 0) or 0)
+                        _ti = (" ".join(str(getattr(_tt, "title", "") or "").split()))[:60]
+                        if _tid and _ti:
+                            out[_tid] = _ti
+                    except Exception:
+                        pass
+            for _i in range(0, len(want), 100):
+                _chunk = want[_i:_i + 100]
+                try:
+                    res = await client(GetForumTopicsByIDRequest(peer=peer, topics=_chunk))
+                    _collect(getattr(res, "topics", []))
+                except Exception:
+                    for _single in _chunk:
+                        try:
+                            res = await client(GetForumTopicsByIDRequest(peer=peer, topics=[_single]))
+                            _collect(getattr(res, "topics", []))
+                        except Exception:
+                            pass
+            return out
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+    except Exception:
+        return {}
+
+
+def _get_channel_topic_ids(canon_ch):
+    """IDs de topic distintos en el cache de mensajes de un canal (central)."""
+    try:
+        from tvcat.gateway import get_db_connection as _gdb
+        _c = _gdb()
+        try:
+            _ch = str(canon_ch)
+            _vars = [_ch]
+            if _ch.isdigit():
+                _vars.append("-100" + _ch)
+            _ph = ",".join("?" * len(_vars))
+            rows = _c.execute("SELECT DISTINCT topic_id FROM telegram_message_cache WHERE channel_id IN (%s)" % _ph, tuple(_vars)).fetchall()
+        finally:
+            try:
+                _c.close()
+            except Exception:
+                pass
+        out = set()
+        for _r in rows or []:
+            try:
+                _t = int(_r[0])
+                if _t:
+                    out.add(_t)
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return set()
+
+
+def _migrate_topic_subcat_keys(mapping):
+    """Renombra claves '... - Tema #N' a '... - Titulo' en visibility/access/available.
+
+    Preserva los valores (intencion del usuario). Idempotente."""
+    try:
+        clean = {}
+        for _k, _v in (mapping or {}).items():
+            try:
+                _tid = int(_k)
+                _ti = (" ".join(str(_v or "").split()))[:60]
+                if _tid and _ti:
+                    clean[_tid] = _ti
+            except Exception:
+                pass
+        if not clean:
+            return 0
+        import json as _json
+        from tvcat.gateway import get_db_connection as _gdb
+        _c = _gdb()
+        try:
+            rows = _c.execute("SELECT key, value FROM tvcat_settings").fetchall()
+        except Exception:
+            try:
+                _c.close()
+            except Exception:
+                pass
+            return 0
+        moved = 0
+        for _row in rows or []:
+            try:
+                _k = _row[0]
+                if not _k.startswith(("visibility_", "access_", "available_")):
+                    continue
+                data = _json.loads(_row[1])
+            except Exception:
+                continue
+            subs = data.get("subcategories")
+            if not isinstance(subs, dict):
+                continue
+            changed = False
+            for _tid, _title in clean.items():
+                for _sep in (" — ", " - "):
+                    _old_sfx = _sep + "Tema #" + str(_tid)
+                    _new_sfx = _sep + _title
+                    for _sk in [k for k in list(subs.keys()) if k.endswith(_old_sfx)]:
+                        _nk = _sk[:-len(_old_sfx)] + _new_sfx
+                        if _nk not in subs:
+                            subs[_nk] = subs[_sk]
+                        try:
+                            del subs[_sk]
+                        except Exception:
+                            pass
+                        changed = True
+                        moved += 1
+            if changed:
+                try:
+                    _c.execute("UPDATE tvcat_settings SET value=? WHERE key=?", (_json.dumps(data, ensure_ascii=False), _k))
+                except Exception:
+                    pass
+        try:
+            _c.commit()
+        except Exception:
+            pass
+        try:
+            _c.close()
+        except Exception:
+            pass
+        return moved
+    except Exception:
+        return 0
+
+
+def insert_scanned_item(title, subcategory, category, description, telegram_msg_id, telegram_link, files, source=None, alt_titles=None, group_title=None, season_number=None, season_display=None, metadata=None, conn=None, tg_user_id=None, is_collection=0, collection_raw=""):
+    """Inserta o actualiza un título en unified_catalog + item_episodes.
+    Colecciones (is_collection=1): sin episodios; collection_raw guarda el texto
+    íntegro de la lista. Auto-detecta el tag en ítems sin ficheros."""
     should_close = False
     if conn is None:
         from tvcat.gateway import get_db_connection
         conn = get_db_connection()
         should_close = True
-        
+
     cursor = conn.cursor()
 
-    # Migración: asegurar columna tg_user_id (anterior a cualquier UPDATE/INSERT que la referencie)
-    try:
-        cursor.execute("ALTER TABLE unified_catalog ADD COLUMN tg_user_id INTEGER")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE item_episodes ADD COLUMN tg_user_id INTEGER")
-    except:
-        pass
-    for col, typ in [("prepared_by_tghirayi", "INTEGER DEFAULT 0"), ("tghirayi_version", "TEXT DEFAULT ''"),
-                     ("video_codec", "TEXT DEFAULT ''"), ("is_mkv", "INTEGER DEFAULT 0")]:
-        try:
-            cursor.execute(f"ALTER TABLE item_episodes ADD COLUMN {col} {typ}")
-        except:
-            pass
-    try:
-        cursor.execute("ALTER TABLE unified_catalog ADD COLUMN has_mkv INTEGER DEFAULT 0")
-    except:
-        pass
+    # Extraer orden recomendado desde el cover
+    rorder = _extract_rorder(description or "")
+
+    # Esquema (columnas + indices): se crea una sola vez por proceso.
+    if not _SCHEMA_READY:
+        _ensure_plugin_schema(conn)
+
+
+    # Colecciones: solo ítems sin ficheros. El tag dentro de un título CON
+    # episodios se ignora (evita marcar títulos normales que citen el tag).
+    if not is_collection and not files and _is_collection_text((description or "") + "\n" + (title or "")):
+        is_collection = 1
+    is_collection = 1 if is_collection else 0
+    if is_collection and not collection_raw:
+        collection_raw = description or ""
 
     effective_group = group_title or title
     group_title_flat = re.sub(r"[^a-zA-Z0-9]", "", effective_group).lower()
@@ -169,18 +550,19 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
                     actual_title = f"Título {cat_id}"
         if source is not None:
             cursor.execute(
-                "UPDATE unified_catalog SET title=?, description=?, telegram_link=?, subcategory=?, source=?, info_messages=?, alt_titles=?, group_title=?, group_title_flat=?, season_number=?, season_display=?, tg_user_id=COALESCE(?, tg_user_id) WHERE id=?",
-                (actual_title, description, telegram_link, subcategory, source, info, alt_json, effective_group, group_title_flat, season_number, season_display, tg_user_id, cat_id),
+                "UPDATE unified_catalog SET title=?, description=?, telegram_link=?, subcategory=?, source=?, info_messages=?, alt_titles=?, group_title=?, group_title_flat=?, season_number=?, season_display=?, tg_user_id=COALESCE(?, tg_user_id), rorder=COALESCE(?, rorder), is_collection=?, collection_raw=? WHERE id=?",
+                (actual_title, description, telegram_link, subcategory, source, info, alt_json, effective_group, group_title_flat, season_number, season_display, tg_user_id, rorder, is_collection, collection_raw, cat_id),
             )
         else:
             cursor.execute(
-                "UPDATE unified_catalog SET title=?, description=?, telegram_link=?, subcategory=?, info_messages=?, alt_titles=?, group_title=?, group_title_flat=?, season_number=?, season_display=?, tg_user_id=COALESCE(?, tg_user_id) WHERE id=?",
-                (actual_title, description, telegram_link, subcategory, info, alt_json, effective_group, group_title_flat, season_number, season_display, tg_user_id, cat_id),
+                "UPDATE unified_catalog SET title=?, description=?, telegram_link=?, subcategory=?, info_messages=?, alt_titles=?, group_title=?, group_title_flat=?, season_number=?, season_display=?, tg_user_id=COALESCE(?, tg_user_id), rorder=COALESCE(?, rorder), is_collection=?, collection_raw=? WHERE id=?",
+                (actual_title, description, telegram_link, subcategory, info, alt_json, effective_group, group_title_flat, season_number, season_display, tg_user_id, rorder, is_collection, collection_raw, cat_id),
             )
     else:
-        columns = ["item_id", "title", "category", "subcategory", "description", "telegram_msg_id", "telegram_link", "group_title", "group_title_flat", "info_messages", "alt_titles", "season_number", "season_display"]
+        # INSERT OR REPLACE sobre item_id (UNIQUE) - sin SELECT de deduplicación
+        columns = ["item_id", "title", "category", "subcategory", "description", "telegram_msg_id", "telegram_link", "group_title", "group_title_flat", "info_messages", "alt_titles", "season_number", "season_display", "is_collection", "collection_raw"]
         placeholders = ["?"] * len(columns)
-        values = [item_id, title, category, subcategory, description, telegram_msg_id, telegram_link, effective_group, group_title_flat, info, alt_json, season_number, season_display]
+        values = [item_id, title, category, subcategory, description, telegram_msg_id, telegram_link, effective_group, group_title_flat, info, alt_json, season_number, season_display, is_collection, collection_raw]
         if tg_user_id is not None:
             columns.append("tg_user_id")
             placeholders.append("?")
@@ -189,8 +571,11 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
             columns.append("source")
             placeholders.append("?")
             values.append(source)
+        columns.append("rorder")
+        placeholders.append("?")
+        values.append(rorder)
         cursor.execute(
-            f"INSERT INTO unified_catalog ({', '.join(columns)}) VALUES ({', '.join(placeholders)})",
+            f"INSERT OR REPLACE INTO unified_catalog ({', '.join(columns)}) VALUES ({', '.join(placeholders)})",
             values,
         )
         cat_id = cursor.lastrowid
@@ -220,12 +605,12 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
                 (actual_title, effective_group, group_title_flat, cat_id)
             )
 
-    cursor.execute("SELECT MAX(episode_number) FROM item_episodes WHERE item_id = ? OR item_id = ?", (item_id, str(cat_id)))
-    max_ep_row = cursor.fetchone()
-    max_ep = max_ep_row[0] if max_ep_row and max_ep_row[0] is not None else 0
+    # Contador de episodios en memoria (como en tvcat1)
+    episode_counter = 0
 
     for idx, msg in enumerate(files):
-        cursor.execute("SELECT id FROM item_episodes WHERE (item_id = ? OR item_id = ?) AND telegram_msg_id = ?", (item_id, str(cat_id), msg.id))
+        # Verificar si ya existe este episodio para este ítem
+        cursor.execute("SELECT id FROM item_episodes WHERE (item_id = ? OR item_id = ?) AND telegram_msg_id = ?", (cat_id, item_id, msg.id))
         if cursor.fetchone():
             continue
 
@@ -257,19 +642,18 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
             except Exception:
                 pass
 
-        ep_title = (msg.text or file_name or f"Episodio {max_ep + 1}").split("\n")[0][:80]
+        episode_counter += 1
+        ep_title = (msg.text or file_name or f"Episodio {episode_counter}").split("\n")[0][:80]
         ep_link = (
             f"https://t.me/c/{str(msg.chat_id).replace('-100', '')}/{msg.id}"
             if hasattr(msg, "chat_id")
             else telegram_link
         )
-
-        max_ep += 1
         cursor.execute(
             """INSERT INTO item_episodes
                (item_id, episode_number, season_number, title, telegram_msg_id, telegram_link, duration, file_size, file_name, caption, tg_user_id, is_mkv)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (item_id, max_ep, 1, ep_title, msg.id, ep_link, duration, file_size, file_name, msg.text or "", tg_user_id,
+            (cat_id, episode_counter, 1, ep_title, msg.id, ep_link, duration, file_size, file_name, msg.text or "", tg_user_id,
              1 if (file_name or "").lower().endswith(".mkv") else 0),
         )
 
@@ -393,6 +777,62 @@ def _group_messages_topo4(tmsgs_sorted):
     return title_groups, (pending_cover.id if pending_cover else None)
 
 
+def _parse_collection_items(msgs, entity_id_str, source_tag, subcat, category, conn):
+    """Crea/actualiza un ítem por cada mensaje con tag TVCatCollection.
+    Cover = imagen precedente más cercana (o el propio mensaje si trae foto).
+    Sin episodios. Upsert por item_id: idempotente en re-escaneos."""
+    count = 0
+    ordered = sorted(msgs, key=lambda x: x.id)
+    for m in ordered:
+        try:
+            txt = getattr(m, "text", "") or ""
+        except Exception:
+            continue
+        if not _is_collection_text(txt):
+            continue
+        entries = _parse_collection_entries(txt)
+        if not entries:
+            continue
+        cover_msg = None
+        try:
+            if _msg_has_image(m):
+                cover_msg = m
+            else:
+                for prev in reversed(ordered):
+                    if prev.id >= m.id:
+                        continue
+                    if _msg_has_image(prev):
+                        cover_msg = prev
+                        break
+        except Exception:
+            cover_msg = None
+        block = {"images": [cover_msg] if cover_msg else [], "texts": [m], "files": []}
+        try:
+            title, desc, alt_titles, grp, sn, sd, md = _parse_block_title_desc(
+                block, fallback_title=f"Colección {m.id}")
+        except Exception:
+            title, desc, alt_titles, grp, sn, sd, md = f"Colección {m.id}", txt, [], None, None, None, {}
+        if not title or (_is_collection_text(title) and len(title.strip()) <= 20):
+            # Sin cover con texto: titular con la primera entrada (legible en sidebar)
+            try:
+                title = f"Colección: {entries[0]['title'][:80]}"
+            except Exception:
+                title = f"Colección {m.id}"
+        cover_id = cover_msg.id if cover_msg else m.id
+        link = f"https://t.me/c/{entity_id_str}/{cover_id}"
+        try:
+            insert_scanned_item(title, subcat, category, desc, cover_id, link, [],
+                                source=source_tag, alt_titles=alt_titles, group_title=grp,
+                                season_number=sn, season_display=sd, metadata=md,
+                                conn=conn, is_collection=1, collection_raw=txt)
+            count += 1
+        except Exception as e:
+            add_log(f"  ❌ Error insertando colección '{title}': {e}")
+    if count:
+        add_log(f"  📚 Colecciones: {count} detectadas en '{source_tag}'")
+    return count
+
+
 def _segment_blocks(msgs):
     """Heurística file->image: segmenta mensajes en bloques {images, texts, files}.
     Frontera entre títulos = imagen (foto o documento-imagen) tras ficheros, o texto
@@ -419,7 +859,7 @@ def _segment_blocks(msgs):
             # anterior cuando su cover va 'texto antes que imagen' (link-preview sin
             # foto detectable, p. ej. MessageMediaWebPage).
             is_webpage = bool(getattr(msg, "is_webpage", False)) or bool((getattr(msg, "_raw_media", {}) or {}).get("webpage"))
-            if current["files"] and (is_webpage or _looks_like_cover_text(msg.text)):
+            if current["files"] and (is_webpage or _looks_like_cover_text(msg.text) or _is_collection_text(msg.text)):
                 blocks.append(current)
                 current = {"images": [], "texts": [msg], "files": []}
             else:
@@ -874,6 +1314,13 @@ async def parse_topology(scan_id, stop_event=None):
         # configurada (antes la pisaba siempre y el árbol mostraba otro valor).
         if topic_only and not (custom_sub and custom_sub.strip()):
             topic_name = (ch.get("topic_name") or "").strip()
+            if not topic_name and topic_id is not None:
+                try:
+                    from services.cache_keys import canon_channel as _cc_sn
+                    _sn_titles = _get_forum_topic_titles(_cc_sn(ch.get("channel_id")))
+                    topic_name = _sn_titles.get(int(topic_id), "")
+                except Exception:
+                    topic_name = ""
             if topic_name:
                 subcat = topic_name
         category_map = {"media": "media", "ebook": "kiosko", "audiolibro": "media", "game": "game"}
@@ -981,6 +1428,11 @@ async def parse_topology(scan_id, stop_event=None):
 
         # Normalizar para enlaces t.me/c/X: quitar -100 y signo, usar ID positivo limpio
         entity_id_str = scan_channel_id.replace("-100", "").lstrip("-") if scan_channel_id else "0"
+        try:
+            from services.cache_keys import canon_channel as _cc_tp
+            _topic_titles = _get_forum_topic_titles(_cc_tp(scan_channel_id))
+        except Exception:
+            _topic_titles = {}
         new_count = 0
 
         # 2. Optimización: conexión única a la base de datos del PLUGIN y una transacción global
@@ -989,12 +1441,15 @@ async def parse_topology(scan_id, stop_event=None):
         conn_central = _sqlite3.connect(_db_path, timeout=30)
         conn_central.row_factory = _sqlite3.Row
         conn_central.execute("PRAGMA busy_timeout=30000")
+        _ensure_plugin_schema(conn_central)
         conn_central.execute("BEGIN IMMEDIATE")
         try:
             # ---- TOPOLOGÍA 1 (plano) ----
             if topo == 1:
                 blocks = _segment_blocks(msgs)
                 for i, b in enumerate(blocks):
+                    if i % 25 == 0:
+                        _parse_prog(i, len(blocks), "bloques")
                     # Si el bloque actual tiene cover pero no ficheros, y el siguiente bloque sí tiene,
                     # pasar los ficheros del siguiente para que el fallback de título pueda usarlos
                     block_files = b["files"]
@@ -1026,7 +1481,15 @@ async def parse_topology(scan_id, stop_event=None):
                     # 2026-09-04: sufijo por topic solo si el scan abarca VARIOS
                     # topics (con topic_only a un topic concreto es ruido).
                     _multi = len(groups_to_process) > 1
-                    current_subcat = subcat if (not has_topics or tid == 0 or not _multi) else f"{subcat} — Tema #{tid}"
+                    _t4name = _topic_titles.get(tid)
+                    if not _t4name:
+                        for _pm in tmsgs_sorted:
+                                _pt = (getattr(_pm, "text", "") or "").strip().split("\n")[0].strip()[:50]
+                                if _pt:
+                                    _t4name = _pt
+                                    break
+                    _t4name = _t4name or f"Tema #{tid}"
+                    current_subcat = subcat if (not has_topics or tid == 0 or not _multi) else f"{subcat} - {_t4name}"
                     title_groups, pending_final = _group_messages_topo4(tmsgs_sorted)
                     add_log(f"  📦 Topo4 topic {tid}: {len(title_groups)} grupos (msgs {len(tmsgs_sorted)}, pending_final={pending_final})")
                     for _gi, g in enumerate(title_groups):
@@ -1113,9 +1576,11 @@ async def parse_topology(scan_id, stop_event=None):
 
             # ---- TOPOLOGÍA 2 (topics = categorías, múltiples títulos por topic) ----
             elif topo == 2:
-                if topic_id is not None:
+                if topic_only and topic_id is not None:
                     blocks = _segment_blocks(msgs)
-                    for b in blocks:
+                    for _bi, b in enumerate(blocks):
+                        if _bi % 25 == 0:
+                            _parse_prog(_bi, len(blocks), "bloques")
                         title, desc, alt_titles, grp, sn, sd, md = _parse_block_title_desc(b)
                         first_photo = b["images"][0].id if b["images"] else None
                         cover_id = first_photo if first_photo else (b["files"][0].id if b["files"] else 0)
@@ -1127,10 +1592,22 @@ async def parse_topology(scan_id, stop_event=None):
                     for m in msgs:
                         tid = m._topic_id or m.id
                         topic_groups.setdefault(tid, []).append(m)
-                    for tid, tmsgs in topic_groups.items():
+                    _t2t = list(topic_groups.items())
+                    for _t2i, (tid, tmsgs) in enumerate(_t2t):
+                        if _t2i % 10 == 0:
+                            _parse_prog(_t2i, len(_t2t), "topics")
                         blocks = _segment_blocks(tmsgs)
-                        tname = f"Tema #{tid}"
-                        for b in blocks:
+                        tname = _topic_titles.get(tid)
+                        if not tname:
+                            for _pm in tmsgs:
+                                _pt = (getattr(_pm, "text", "") or "").strip().split("\n")[0].strip()[:50]
+                                if _pt:
+                                    tname = _pt
+                                    break
+                        tname = tname or f"Tema #{tid}"
+                        for _bj, b in enumerate(blocks):
+                            if _bj % 25 == 0:
+                                _parse_prog(_bj, len(blocks), f"bloques t{tid}")
                             title, desc, alt_titles, grp, sn, sd, md = _parse_block_title_desc(b, fallback_title=tname)
                             first_photo = b["images"][0].id if b["images"] else None
                             cover_id = first_photo if first_photo else (b["files"][0].id if b["files"] else 0)
@@ -1138,7 +1615,15 @@ async def parse_topology(scan_id, stop_event=None):
                             link = f"https://t.me/c/{entity_id_str}/{cover_id}"
                             cat_id = insert_scanned_item(title, current_subcat, category, desc, cover_id, link, b["files"], source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
                             new_count += 1
-            
+
+            # ---- COLECCIONES TVCatCollection (todas las topologías) ----
+            # Los mensajes colección nunca generan episodios; se parsean aquí como
+            # ítems especiales (cover precedente + lista). Idempotente por item_id.
+            try:
+                new_count += _parse_collection_items(msgs, entity_id_str, source_tag, subcat, category, conn_central)
+            except Exception as e:
+                add_log(f"  ⚠️ Colecciones: {e}")
+
             # 3. Purga de duplicados DESACTIVADA (2026-09-04): comía títulos buenos
             # por colisión de msg_id entre canales. Se reactivará con claves
             # channelid_msgid cuando el diseño esté cerrado. NO BORRAR este bloque.
@@ -1336,6 +1821,46 @@ async def _scan_channel(account_id, ch, idx, total):
     if not api_id or not api_hash or not session_string:
         add_log(f"❌ Credenciales no válidas para la cuenta #{account_id}.")
         return last_id, -1
+
+    # 2026-09-09: titulos de topics del foro (cache central, TTL 24h). Best-effort.
+    try:
+        from services.cache_keys import canon_channel as _cc_ft
+        _canon_ft = _cc_ft(raw_ch_id)
+    except Exception:
+        _canon_ft = str(raw_ch_id).replace("-100", "").lstrip("-")
+    try:
+        _ensure_forum_topics_table()
+        _want_ft = set()
+        try:
+            if topic_only and topic_id is not None:
+                _want_ft = {int(topic_id)}
+            else:
+                _want_ft = _get_channel_topic_ids(_canon_ft)
+        except Exception:
+            pass
+        import time as _time_ft
+        _need_ft = _forum_topics_stale(_canon_ft, _want_ft) if _want_ft else False
+        _fail_at = _FORUM_TOPICS_FAILED_AT.get(_canon_ft, 0)
+        if _fail_at and (int(_time_ft.time()) - int(_fail_at)) < _FORUM_TOPICS_TTL:
+            _need_ft = False
+        if _need_ft:
+            try:
+                _ft = await asyncio.wait_for(_fetch_forum_topics(raw_ch_id, session_string, api_id, api_hash, only_ids=_want_ft), timeout=60)
+            except Exception:
+                _ft = {}
+            if _ft:
+                _n_ft = _save_forum_topics(_canon_ft, _ft)
+                add_log(f"  Topics: {int(_n_ft)} titulos cacheados.")
+            else:
+                _FORUM_TOPICS_FAILED_AT[_canon_ft] = int(_time_ft.time())
+        try:
+            _mig_ft = _migrate_topic_subcat_keys(_get_forum_topic_titles(_canon_ft))
+            if _mig_ft:
+                add_log(f"  Topics: {int(_mig_ft)} filtros migrados a nombre real.")
+        except Exception:
+            pass
+    except Exception as _e_ft:
+        add_log(f"  (topics omitido: {_e_ft})")
 
     # 2026-09-04: resolver `hasta` con 1 sola llamada (fin cfg o último del canal).
     # Si hasta<=last y no hay saneados que re-traer: nada que hacer (ni fetch).
@@ -2205,18 +2730,7 @@ async def _process_periodic_cycle():
                     _sc3.close()
             except Exception:
                 pass
-            if not _needs_parse:
-                add_log(f"  ⏩ '{name}': sin mensajes nuevos, nada que parsear.")
-                try:
-                    for _pi in scanner_status.get("plan_items", []):
-                        if int(_pi.get("id", -1)) == int(channel_id):
-                            _pi["done"] = int(_pi.get("count", 0))
-                            break
-                except Exception:
-                    pass
-                await _update_channel_status(channel_id, "idle")
-                await asyncio.sleep(4.0)
-                continue
+            # parse siempre, incluso si no hay mensajes nuevos (topología puede haber cambiado)
 
             n, _ = await parse_topology(channel_id)
             if n > 0:
@@ -2251,12 +2765,6 @@ async def _process_periodic_cycle():
 
         await asyncio.sleep(4.0)
 
-    try:
-        scanner_status["regen_ids"] = []
-    except Exception:
-        pass
-    scanner_status.update({"status": "idle", "progress_percent": 100, "current_item": "Completado."})
-    add_log(f"✅ Ciclo Periódico de Escaneo #{_cycle_counter} finalizado.")
     # 2026-09-04 F4: sellar estado por item (channel_last + test_only=0).
     # 2026-09-06: solo con `to` real del plan; los skips conservan su C previo
     # (el fallback al máx. global clobberaba items cerrados ya completos).
@@ -2314,6 +2822,12 @@ async def _process_periodic_cycle():
             add_log(f"  ⚠️ reconcile: {(_rrec or {}).get('error', '')}")
     except Exception as e:
         print(f" [TGIndex] Aviso: reconcile final tras ciclo periódico: {e}")
+    try:
+        scanner_status["regen_ids"] = []
+    except Exception:
+        pass
+    scanner_status.update({"status": "idle", "progress_percent": 100, "current_item": "Completado."})
+    add_log(f"✅ Ciclo Periódico de Escaneo #{_cycle_counter} finalizado.")
 
 
 async def _sequential_worker_loop():

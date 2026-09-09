@@ -153,6 +153,26 @@
         } catch (e) {}
     }
 
+    // Last-wins: al seleccionar uno nuevo se desmarca cualquier otro (el mouseout
+    // no se dispara si el raton queda quieto y el mando mueve el foco).
+    function deselectOthers(except) {
+        try {
+            var grid = document.getElementById('catalog-grid');
+            if (!grid || !grid.querySelectorAll) return;
+            var sels = grid.querySelectorAll('.grid-item.card-selected');
+            for (var i = 0; i < sels.length; i++) {
+                var o = sels[i];
+                if (o === except) continue;
+                o.className = (' ' + o.className + ' ').split(' card-selected ').join(' ');
+                var ob = o.getAttribute('data-cf-border');
+                var oi = o.querySelector ? o.querySelector('.card-frame img') : null;
+                if (oi && ob) oi.src = imgUrl(ob, 'idle');
+                var os = o.querySelector ? o.querySelector('.card-shine') : null;
+                if (os) os.className = 'card-shine';
+            }
+        } catch (e) {}
+    }
+
     function decorateOne(el, item) {
         if (!_prefs.enabled) return;
         if (el.getAttribute('data-cf-done')) return;
@@ -179,6 +199,7 @@
         function select() {
             if (!_prefs.enabled) return;
             try {
+                deselectOthers(el);
                 el.className = (el.className + ' card-selected').replace(/\s+/g, ' ');
                 im.src = imgUrl(bid, 'selected');
                 if (sh) {

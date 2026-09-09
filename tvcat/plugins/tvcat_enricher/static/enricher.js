@@ -189,6 +189,8 @@
             function getTagMap(){
                 var d = selectedDetails || {};
                 var orig = original.description || '';
+                // rorder: valor original del cover si existe, sino season_number de la variante
+                var rorderVal = original.rorder || (original.season_number ? String(original.season_number) : '');
                 // tagtitle es sanitizado como en TGHirayi
                 var tagtitleVal = (d.api_title || '').toString().trim().replace(/\s+/g, ' ');
                 var m = {
@@ -217,7 +219,9 @@
                     'description': d.api_description || '',
                     'sinopsis': d.api_description || '',
                     'overview': d.api_description || '',
-                    'originalmsg': orig || ''
+                    'originalmsg': orig || '',
+                    'rorder': rorderVal,
+                    'roder': rorderVal
                 };
                 var FTAG_FORMATS = {
                     // ftagtitle no existe, solo ftitle
@@ -231,7 +235,9 @@
                     "rating_count": "Rating count: {value}",
                     "genres": "Genres: {value}",
                     "author": "Author: {value}",
-                    "originalmsg": "{value}"
+                    "originalmsg": "{value}",
+                    "rorder": "ROrder: {value}",
+                    "roder": "ROrder: {value}"
                 };
                 var fm = {};
                 for (var k in m) {
@@ -526,7 +532,7 @@
                     var y = c.year || c.api_year || '';
                     var prov = c.provider || '';
                     var poster = c.poster || (c.api_cover && c.api_cover[0]) || '';
-                    return '<div class="enricher-cand" data-idx="' + i + '" data-provider="' + (prov || '') + '" data-cid="' + (c.id || c.api_id || '') + '" data-poster="' + (poster || '').replace(/"/g, '&quot;') + '" style="padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent;display:flex;gap:8px;align-items:center;"><div style="width:16px;height:16px;border-radius:50%;border:1px solid #71717a;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><div class="enricher-cand-dot" style="width:8px;height:8px;border-radius:50%;background:#06b6d4;display:none;"></div></div><div style="width:28px;height:40px;background:#18181b;border-radius:4px;flex-shrink:0;overflow:hidden;">' + (poster ? '<img src="' + poster + '" style="width:100%;height:100%;object-fit:cover;">' : '') + '</div><div style="flex:1;min-width:0;"><div style="font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + '</div><div style="font-size:0.68rem;color:#71717a;">' + (y || '') + (prov ? ' · ' + prov : '') + '</div></div></div>';
+                    return '<div class="enricher-cand" data-idx="' + i + '" data-provider="' + (prov || '') + '" data-cid="' + (c.id || c.api_id || '') + '" data-media-type="' + (c.media_type || '') + '" data-poster="' + (poster || '').replace(/"/g, '&quot;') + '" style="padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent;display:flex;gap:8px;align-items:center;"><div style="width:16px;height:16px;border-radius:50%;border:1px solid #71717a;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><div class="enricher-cand-dot" style="width:8px;height:8px;border-radius:50%;background:#06b6d4;display:none;"></div></div><div style="width:28px;height:40px;background:#18181b;border-radius:4px;flex-shrink:0;overflow:hidden;">' + (poster ? '<img src="' + poster + '" style="width:100%;height:100%;object-fit:cover;">' : '') + '</div><div style="flex:1;min-width:0;"><div style="font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + '</div><div style="font-size:0.68rem;color:#71717a;">' + (y || '') + (prov ? ' · ' + prov : '') + '</div></div></div>';
                 }).join('');
                 if (cands.length > 10) box.innerHTML += '<div style="font-size:0.68rem;color:#71717a;margin-top:4px;">Hay mas (refina la busqueda)</div>';
                 setStatus(cands.length + ' candidatos · ' + (j.provider || '') + (cands.length===1 ? ' · auto-seleccionado' : ' · selecciona uno como fuente activa'));
@@ -540,6 +546,7 @@
                         setActiveCand(el);
                         var prov = el.getAttribute('data-provider') || 'tmdb';
                         var cid = el.getAttribute('data-cid');
+                        var mt = el.getAttribute('data-media-type') || '';
                         var posterUrl = el.getAttribute('data-poster');
                         if (!cid) return;
                         selectedProvider = prov; selectedId = cid;
@@ -548,7 +555,7 @@
                         fetch('/api/enricher/details', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ provider: prov, id: String(cid) })
+                            body: JSON.stringify({ provider: prov, id: String(cid), media_type: mt })
                         })
                         .then(function (r) { return r.json(); })
                         .then(function (det) {

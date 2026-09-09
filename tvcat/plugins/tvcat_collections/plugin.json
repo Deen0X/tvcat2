@@ -1,0 +1,10 @@
+{
+    "name": "tvcat_collections",
+    "displayName": "Colecciones",
+    "description": "Gestiona colecciones TVCatCollection: añadir títulos, reordenar y publicar en Telegram.",
+    "type": "heropage-action",
+    "version": "1.0.0",
+    "defaultEnabled": true,
+    "iconEmoji": "📚",
+    "js": ["collections.js"]
+}

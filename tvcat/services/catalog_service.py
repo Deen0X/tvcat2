@@ -46,6 +46,8 @@ def init_db():
             group_title TEXT,
             group_title_flat TEXT,
             telegram_link TEXT,
+            is_collection INTEGER DEFAULT 0,
+            collection_raw TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -246,7 +248,8 @@ def init_db():
     # Migraciones seguras
     for col, typ in [("telegram_msg_id", "INTEGER"), ("cover_url", "TEXT"), ("group_title", "TEXT"), ("group_title_flat", "TEXT"), ("telegram_link", "TEXT"), ("season_display", "TEXT"),
                      ("info_messages", "TEXT"), ("season_number", "TEXT"), ("api_year", "TEXT"), ("active_cover_idx", "INTEGER"), ("api_cover", "TEXT"),
-                     ("backdrop", "TEXT"), ("release_date", "TEXT"), ("sync_status", "TEXT"), ("source_channel_id", "TEXT"), ("client_type", "TEXT"), ("genres", "TEXT")]:
+                     ("backdrop", "TEXT"), ("release_date", "TEXT"), ("sync_status", "TEXT"), ("source_channel_id", "TEXT"), ("client_type", "TEXT"), ("genres", "TEXT"),
+                     ("is_collection", "INTEGER DEFAULT 0"), ("collection_raw", "TEXT DEFAULT ''")]:
         try:
             c.execute(f"ALTER TABLE unified_catalog ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -264,6 +267,10 @@ def init_db():
             pass
     try:
         c.execute("ALTER TABLE unified_catalog ADD COLUMN has_mkv INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE unified_catalog ADD COLUMN rorder INTEGER DEFAULT NULL")
     except sqlite3.OperationalError:
         pass
     # Tabla de metadata de pistas de audio/subtítulos por episodio (HLS multitrack).
@@ -348,6 +355,26 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_item_episodes_key ON item_episodes(item_id, episode_key)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_watch_progress_key ON watch_progress(profile_id, episode_key)")
 
+    # --- Comentarios globales por título (2026-09-08): un comentario por
+    # item_id, visible para todos los usuarios autenticados. El creador puede
+    # permitir edición colaborativa con editable_by_others. Solo admin/creador
+    # pueden eliminar (vía endpoints del gateway).
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tvcat_item_comments (
+            item_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            text TEXT NOT NULL DEFAULT '',
+            editable_by_others INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            edited INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    try:
+        c.execute("ALTER TABLE tvcat_item_comments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
     print(" [CATALOG] Base de datos inicializada")
@@ -356,6 +383,95 @@ def init_db():
         migrate_cache_keys()
     except Exception as e:
         print(f" [CATALOG] migrate_cache_keys omitida: {e}", flush=True)
+
+
+# --- Comentarios globales por título (2026-09-08) ---
+COMMENT_MAX_LEN = 500
+
+
+def get_item_comment(item_id):
+    """Devuelve el comentario global de un item_id con datos de autor para
+    visualización, o None si no existe. El autor se resuelve contra
+    tvcat_users + tvcat_user_prefs (display_name/avatar)."""
+    conn = get_conn()
+    try:
+        row = conn.execute("""
+            SELECT c.item_id, c.user_id, c.text, c.editable_by_others,
+                   c.created_at, c.updated_at, c.edited,
+                   u.username, p.display_name, p.avatar, p.avatar_url, p.color
+            FROM tvcat_item_comments c
+            LEFT JOIN tvcat_users u ON u.id = c.user_id
+            LEFT JOIN tvcat_user_prefs p ON p.user_id = c.user_id
+            WHERE c.item_id = ?
+        """, (item_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["editable_by_others"] = int(d.get("editable_by_others") or 0)
+        d["edited"] = bool(d.get("edited")) or (
+            str(d.get("updated_at") or "") != str(d.get("created_at") or ""))
+        return d
+    finally:
+        conn.close()
+
+
+def get_has_comment_map(item_ids):
+    """Batch: {item_id: True} para los ids que tienen comentario. Evita N+1
+    en listados (favoritos, continue, completed)."""
+    ids = [str(i) for i in (item_ids or []) if i]
+    if not ids:
+        return {}
+    conn = get_conn()
+    try:
+        out = {}
+        for a in range(0, len(ids), 500):
+            chunk = ids[a:a + 500]
+            ph = ",".join("?" for _ in chunk)
+            for r in conn.execute(
+                    f"SELECT item_id FROM tvcat_item_comments WHERE item_id IN ({ph})",
+                    chunk).fetchall():
+                out[str(r["item_id"])] = True
+        return out
+    finally:
+        conn.close()
+
+
+def set_item_comment(item_id, user_id, text, editable_by_others=False):
+    """Crea o sobrescribe el comentario de un item_id. El creador original
+    (user_id) se conserva en ediciones de terceros; el flag
+    editable_by_others solo lo cambia el creador o el admin (el gateway lo
+    garantiza pasando el valor ya resuelto). Retorna el comentario completo."""
+    text = (text or "").strip()[:COMMENT_MAX_LEN]
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT user_id, created_at FROM tvcat_item_comments WHERE item_id = ?",
+                           (item_id,)).fetchone()
+        if row:
+            conn.execute("""UPDATE tvcat_item_comments
+                            SET text = ?, editable_by_others = ?,
+                                updated_at = CURRENT_TIMESTAMP, edited = 1
+                            WHERE item_id = ?""",
+                         (text, 1 if editable_by_others else 0, item_id))
+        else:
+            conn.execute("""INSERT INTO tvcat_item_comments
+                            (item_id, user_id, text, editable_by_others)
+                            VALUES (?, ?, ?, ?)""",
+                         (item_id, user_id, text, 1 if editable_by_others else 0))
+        conn.commit()
+    finally:
+        conn.close()
+    return get_item_comment(item_id)
+
+
+def delete_item_comment(item_id):
+    """Elimina el comentario de un item_id. Retorna True si existía."""
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM tvcat_item_comments WHERE item_id = ?", (item_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
 
 
 def _seed_tag_dictionary(conn):
@@ -680,8 +796,8 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 (item_id, title, category, subcategory, source, origin_depth,
                  description, year, rating, alt_titles, metadata_json, cover_url,
                  telegram_msg_id, group_title, group_title_flat, telegram_link,
-                 season_display, info_messages, genres)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 season_display, info_messages, genres, is_collection, collection_raw)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 item_id,
                 d.get("title"),
@@ -701,7 +817,9 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 d.get("telegram_link"),
                 d.get("season_display"),
                 info,
-                genres
+                genres,
+                int(d.get("is_collection", 0) or 0),
+                d.get("collection_raw", "")
             ))
             items_inserted += 1
 
@@ -884,14 +1002,15 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
                 (item_id, title, category, subcategory, source, origin_depth,
                  description, year, rating, alt_titles, metadata_json, cover_url,
                  telegram_msg_id, group_title, group_title_flat, telegram_link,
-                 season_display, info_messages, genres)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 season_display, info_messages, genres, is_collection, collection_raw)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 item_id, d.get("title"), d.get("category", ""), d.get("subcategory", ""),
                 plugin_name, 0, d.get("description", ""), d.get("year", ""), d.get("rating", 0),
                 d.get("alt_titles", "[]"), "{}", f"/api/cover/{item_id}",
                 d.get("telegram_msg_id"), d.get("group_title"), d.get("group_title_flat"),
-                d.get("telegram_link"), d.get("season_display"), info, genres
+                d.get("telegram_link"), d.get("season_display"), info, genres,
+                int(d.get("is_collection", 0) or 0), d.get("collection_raw", "")
             ))
             items_inserted += 1
 
@@ -1140,7 +1259,8 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
     total = c.fetchone()[0]
 
     c.execute(f"""
-        SELECT * FROM unified_catalog
+        SELECT *, EXISTS(SELECT 1 FROM tvcat_item_comments c WHERE c.item_id = unified_catalog.item_id) AS has_comment
+        FROM unified_catalog
         WHERE id IN (
             SELECT MIN(id)
             FROM unified_catalog
@@ -1166,6 +1286,8 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
             "rating": d.get("rating", 0),
             "cover_url": d.get("cover_url", ""),
             "has_mkv": d.get("has_mkv", 0),
+            "has_comment": 1 if d.get("has_comment") else 0,
+            "is_collection": int(d.get("is_collection", 0) or 0),
         })
 
     conn.close()

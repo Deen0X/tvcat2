@@ -1,0 +1,46 @@
+/* TVCat Ambient BG — capas de fondo + velo. Fallbacks estáticos (TV vieja). */
+#amb-bg-a, #amb-bg-b {
+    position: fixed;
+    top: 0; right: 0; bottom: 0; left: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0;
+    background-color: #000;
+    background-size: cover;
+    background-position: center center;
+    background-repeat: no-repeat;
+    transition: opacity 0.35s ease-in-out;
+    overflow: hidden;
+}
+#amb-veil {
+    position: fixed;
+    top: 0; right: 0; bottom: 0; left: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: #000;
+    opacity: 0.55;
+    transition: opacity 0.35s ease-in-out;
+}
+/* El contenido del catálogo por encima del fondo. El .navbar NO se toca:
+   es position:fixed con z-index:100 y ya queda por encima de las capas. */
+#catalog-container {
+    position: relative;
+    z-index: 1;
+}
+/* Deriva lava: solo transform (GPU). La duración la pone el JS. */
+.amb-lava-drift {
+    position: absolute;
+    top: -12%; right: -12%; bottom: -12%; left: -12%;
+    animation-name: amb-drift;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite;
+    animation-direction: alternate;
+}
+@keyframes amb-drift {
+    0% { transform: translate3d(-4%, -2%, 0) scale(1.05); }
+    50% { transform: translate3d(3%, 3%, 0) scale(1.15); }
+    100% { transform: translate3d(-2%, 4%, 0) scale(1.08); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .amb-lava-drift { animation: none; }
+}

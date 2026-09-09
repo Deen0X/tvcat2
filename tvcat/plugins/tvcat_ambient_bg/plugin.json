@@ -1,0 +1,24 @@
+{
+  "name": "tvcat_ambient_bg",
+  "version": "1.0.0",
+  "type": "grid-decorator",
+  "displayName": "Fondo ambiental",
+  "description": "Tiñe el fondo del catálogo con el cover difuminado del título seleccionado (o lava con su paleta), con fundido. Prefs en servidor por usuario-dispositivo.",
+  "iconEmoji": "🔮",
+  "defaultEnabled": true,
+  "priority": 60,
+  "js": ["ambient_bg.js?v=1.0.0"],
+  "css": ["ambient_bg.css?v=1.0.2"],
+  "has_interface": true,
+  "settings_ui": "/plugin-static/tvcat_ambient_bg/config.html",
+  "tray": [
+    {
+      "id": "ambientbg",
+      "label": "Fondo ambiental",
+      "iconEmoji": "🔮",
+      "color": "#8b5cf6",
+      "action": "toggle-plugin"
+    }
+  ],
+  "access": { "admin": true, "user": true, "child": false }
+}
