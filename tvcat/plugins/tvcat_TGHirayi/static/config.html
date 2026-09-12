@@ -110,6 +110,21 @@
 </div>
 
 <div class="card">
+    <div style="margin-bottom:8px;"><b>Omitir si existe en destino (solo topolog&iacute;a 3)</b></div>
+    <label style="display:block;margin:6px 0;">
+        <input type="checkbox" id="skip-exists-topo3">
+        <span>Omitir subida si el topic ya existe en el destino</span>
+    </label>
+    <div class="muted" style="margin-top:2px;">Al procesar, verifica los destinos de topolog&iacute;a 3: si ya existe un topic con el nombre del t&iacute;tulo, se salta la subida de episodios (el cover s&iacute; se sube, puede estar editado). La verificaci&oacute;n usa cach&eacute; de topics.</div>
+    <div style="margin-top:8px;">
+        <label style="justify-content:space-between;">TTL cach&eacute; topics (min)
+            <input type="number" id="topics-cache-ttl" min="5" max="1440" style="width:90px;">
+        </label>
+        <div class="muted" style="margin-top:2px;">Cada hora (por defecto 60) se refresca la lista completa; mientras tanto solo se piden los &uacute;ltimos 100.</div>
+    </div>
+</div>
+
+<div class="card">
     <label>
         <input type="checkbox" id="normalize-mp4">
         <span>Normalizar v&iacute;deos a MP4 (compatible con stream de Telegram)</span>
@@ -292,6 +307,10 @@ function loadConfig() {
             rcr.checked = cfg.real_copy_rest || false;
             updateRealCopyGating();
         }
+        var skp = document.getElementById('skip-exists-topo3');
+        if (skp) skp.checked = cfg.skip_if_exists_topo3 || false;
+        var ttl = document.getElementById('topics-cache-ttl');
+        if (ttl) ttl.value = String(cfg.topics_cache_ttl_min || 60);
         // Opción oculta: forward directo de terceros (5 clics en el aviso). Sin checkbox visible.
         window._forwardThirdParty = !!cfg.forward_third_party;
         updateForwardWarningUI(window._forwardThirdParty);
@@ -423,6 +442,8 @@ function saveConfig(silent) {
     var ap = document.getElementById('archive-passwords');
     var szp = document.getElementById('seven-zip-path');
     var urp = document.getElementById('unrar-path');
+    var skp = document.getElementById('skip-exists-topo3');
+    var ttl = document.getElementById('topics-cache-ttl');
     var passwords = ap ? ap.value.split(/\n+/).map(function(s) { return s.trim(); }).filter(Boolean) : [];
     api(API + '/config', { method: 'POST', data: {
         credential_name: sel ? sel.value : '',
@@ -445,6 +466,8 @@ function saveConfig(silent) {
         archive_passwords: passwords,
         seven_zip_path: szp ? szp.value.trim() : '',
         unrar_path: urp ? urp.value.trim() : '',
+        skip_if_exists_topo3: skp ? skp.checked : false,
+        topics_cache_ttl_min: ttl ? parseInt(ttl.value) || 60 : 60,
     }}, function(r) {
         if (silent) return;
         if (r && r.ok) showToast('Configuraci\u00f3n guardada');

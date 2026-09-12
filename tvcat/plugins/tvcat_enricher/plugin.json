@@ -8,7 +8,7 @@
     "icon": "static/plugin_icon.png",
     "iconEmoji": "✨",
     "js": [
-        "enricher.js"
+        "enricher.js?v=20260912"
     ],
     "settings_ui": "/plugin-static/tvcat_enricher/config.html"
 }

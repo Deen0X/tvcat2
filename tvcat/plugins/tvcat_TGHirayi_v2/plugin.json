@@ -1,18 +1,18 @@
 {
-  "name": "tvcat_TGHirayi",
-  "displayName": "TGHirayi (Enviar a Canal Telegram)",
+  "name": "tvcat_TGHirayi_v2",
+  "displayName": "TGHirayi v2 (Enviar a Canal Telegram)",
   "description": "Copia t\u00edtulos completos (cover + episodios) a canales Telegram destino, descargando y re-subiendo para generar nuevos file_ids. Soporta m\u00faltiples destinos, topolog\u00edas 1/2/3 y forward opcional entre canales.",
   "type": "player",
   "version": "1.0.0",
-  "defaultEnabled": true,
+  "defaultEnabled": false,
   "icon": "static/plugin_icon.png",
   "action_category": "playback",
   "single_button": true,
   "priority": 20,
-  "js": ["TGHirayi.js?v=20260912"],
+  "js": ["TGHirayi_v2.js?v=20260912"],
   "css": [],
   "applies_to": ["*"],
-  "settings_ui": "/plugin-static/tvcat_TGHirayi/config.html",
+  "settings_ui": "/plugin-static/tvcat_TGHirayi_v2/config.html",
   "tray": [
     {
       "id": "queue",

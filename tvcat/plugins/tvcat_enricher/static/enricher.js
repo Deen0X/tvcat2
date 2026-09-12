@@ -46,9 +46,10 @@
         }];
     }
 
-    function openEnricher(itemData) {
+    function openEnricher(itemData, opts) {
         try { console.log('[Enricher] open', itemData); } catch(e) {}
         var itemId = itemData.item_id;
+        var _opts = opts || {};
         // Fetch estado + authorship en paralelo
         Promise.all([
             fetch('/api/enricher/item/' + encodeURIComponent(itemId)).then(function (r) { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).catch(function (e) { try { console.error('[Enricher] /item err', e); } catch(ex) {} return null; }),
@@ -57,11 +58,12 @@
             var data = vals[0];
             var auth = vals[1] || { is_mine: false, author_user_id: null, reason: '' };
             if (!data) { alert('No se pudo cargar el item (¿gateway reiniciado?)'); return; }
-            buildModal(data, auth, itemData);
+            buildModal(data, auth, itemData, _opts);
         }).catch(function(e){ try { console.error('[Enricher] open err', e); } catch(ex) {} alert('Error: '+e); });
     }
 
-    function buildModal(data, auth, itemData) {
+    function buildModal(data, auth, itemData, opts) {
+        opts = opts || {};
         var itemId = data.item_id;
         var original = data.original || {};
         var enriched = data.enriched || null;
@@ -622,6 +624,28 @@
             .then(function (res) {
                 if (!res.ok) { setStatus((res.j && (res.j.detail || res.j.error)) || 'Error', true); return; }
                 setStatus(applyTelegram ? 'Aplicado en Telegram y guardado local' : 'Guardado local');
+                // Llamada externa (p.ej. cola TGHirayi): devolver el resultado al
+                // callback en vez de reabrir la hero. El guardado en el registry
+                // compartido ya se ha hecho (propaga a catálogo).
+                if (opts && typeof opts.onDone === 'function') {
+                    var _donePayload = { item_id: itemId, cover_text: text,
+                        catalog_title: null, title_applied: false };
+                    try {
+                        var _rj3 = res.j || {};
+                        _donePayload.title_applied = !!_rj3.title_applied;
+                        _donePayload.catalog_title = _rj3.catalog_title || null;
+                    } catch (_e3) {}
+                    try { opts.onDone(_donePayload); } catch (_e4) {}
+                    try { overlay.remove(); } catch (_e5) {}
+                    setTimeout(function () {
+                        try {
+                            var v = Date.now();
+                            var gridImg = document.querySelector('.grid-item[data-id="' + itemId + '"] img');
+                            if (gridImg) gridImg.src = '/api/cover/' + encodeURIComponent(itemId) + '?v=' + v;
+                        } catch (_e6) {}
+                    }, 1500);
+                    return;
+                }
                 setTimeout(function () { overlay.remove(); location.reload(); }, 900);
             })
             .catch(function () { setStatus('Error de red', true); });
@@ -636,6 +660,12 @@
                 .catch(function () { setStatus('Error al revertir', true); });
         }
     }
+
+    // API pública: permite abrir el mismo editor desde otras vistas
+    // (p.ej. cola TGHirayi). opts.onDone({item_id, cover_text, catalog_title,
+    // title_applied}) se llama tras guardar, en vez de reabrir la hero.
+    window.Enricher = window.Enricher || {};
+    window.Enricher.open = openEnricher;
 
     window.pluginSystem.registerPlugin({
         name: 'tvcat_enricher',

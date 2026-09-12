@@ -1,8 +1,8 @@
 (function() {
     if (!window.pluginSystem) return;
 
-    var API = '/api/telegram-copy';
-    var LS_KEY = 'TGHirayi_last_destinations';
+    var API = '/api/telegram-copy-v2';
+    var LS_KEY = 'TGHirayi_v2_last_destinations';
     // Referencia al modal de cola abierto (para refrescar tras acciones)
     var _queue_modal = null;
 
@@ -55,7 +55,7 @@
             var dests = (res && res.destinations) || [];
 
             if (dests.length === 0) {
-                alert('No hay destinos configurados. Ve a Configuraci\u00f3n del plugin TGHirayi para a\u00f1adir destinos.');
+                alert('No hay destinos configurados. Ve a Configuraci\u00f3n del plugin TGHirayi_v2 para a\u00f1adir destinos.');
                 return;
             }
 
@@ -78,13 +78,13 @@
                         var d = dests[i];
                         var checked = lastSel[d.id] ? 'checked' : '';
                         html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;cursor:pointer;">' +
-                            '<input type="checkbox" class="tgcopy-dest-cb" value="' + d.id + '" ' + checked + ' style="accent-color:#22c55e;">' +
+                            '<input type="checkbox" class="tgcopy2-dest-cb" value="' + d.id + '" ' + checked + ' style="accent-color:#22c55e;">' +
                             '<span style="flex:1;">' + d.name + '</span>' +
                             '<span style="font-size:11px;color:#a1a1aa;">' + (d.channel_title || '') + '</span>' +
                             '</label>';
                     }
                     html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:8px 0 0 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
-                        '<input type="checkbox" class="tgcopy-skip-cb" ' + (skipDef ? 'checked' : '') + ' style="accent-color:#eab308;">' +
+                        '<input type="checkbox" class="tgcopy2-skip-cb" ' + (skipDef ? 'checked' : '') + ' style="accent-color:#eab308;">' +
                         '<span style="flex:1;font-size:12px;">Omitir subida si el topic ya existe en el destino</span></label>';
                     var btnRow = document.createElement('div');
                     btnRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
@@ -94,13 +94,13 @@
                     enqueue.style.cssText = 'flex:1;padding:8px;background:#22c55e;border:none;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;';
                     enqueue.onclick = function() {
                         var ids = [];
-                        var boxes = content.querySelectorAll('.tgcopy-dest-cb:checked');
+                        var boxes = content.querySelectorAll('.tgcopy2-dest-cb:checked');
                         for (var j = 0; j < boxes.length; j++) ids.push(boxes[j].value);
                         if (ids.length === 0) { alert('Selecciona al menos un destino.'); return; }
                         var sel = {};
                         for (var k = 0; k < dests.length; k++) sel[dests[k].id] = ids.indexOf(dests[k].id) >= 0;
                         localStorage.setItem(LS_KEY, JSON.stringify(sel));
-                        var skipBox = content.querySelector('.tgcopy-skip-cb');
+                        var skipBox = content.querySelector('.tgcopy2-skip-cb');
                         doEnqueue(item, ids, !!(skipBox && skipBox.checked));
                         overlay.remove();
                     };
@@ -150,12 +150,12 @@
             }
             api(API + '/destinations', {}, function(res) {
                 var dests = (res && res.destinations) || [];
-                if (!dests.length) { alert('No hay destinos configurados. Ve a Configuración del plugin TGHirayi para añadir destinos.'); return; }
+                if (!dests.length) { alert('No hay destinos configurados. Ve a Configuración del plugin TGHirayi_v2 para añadir destinos.'); return; }
                 openModal(titleOverride || ('Enviar todos a Canal Telegram (' + items.length + ')'), function(content, overlay) {
                     var html = '<div style="display:flex;gap:8px;margin-bottom:8px;">' +
-                        '<button class="tgcopy-bulk-all" style="flex:1;padding:6px;background:#27272a;border:1px solid #3f3f46;color:#fff;border-radius:6px;cursor:pointer;">Marcar todo</button>' +
-                        '<button class="tgcopy-bulk-none" style="flex:1;padding:6px;background:none;border:1px solid #3f3f46;color:rgba(255,255,255,0.6);border-radius:6px;cursor:pointer;">Desmarcar todo</button></div>' +
-                        '<div class="tgcopy-bulk-list" style="max-height:50vh;overflow-y:auto;">';
+                        '<button class="tgcopy2-bulk-all" style="flex:1;padding:6px;background:#27272a;border:1px solid #3f3f46;color:#fff;border-radius:6px;cursor:pointer;">Marcar todo</button>' +
+                        '<button class="tgcopy2-bulk-none" style="flex:1;padding:6px;background:none;border:1px solid #3f3f46;color:rgba(255,255,255,0.6);border-radius:6px;cursor:pointer;">Desmarcar todo</button></div>' +
+                        '<div class="tgcopy2-bulk-list" style="max-height:50vh;overflow-y:auto;">';
                     for (var i = 0; i < items.length; i++) {
                         var it = items[i];
                         var iid = String(it.item_id || it.id || '');
@@ -163,7 +163,7 @@
                         var cover = it.cover_url || ('/api/cover/' + encodeURIComponent(iid));
                         var t = escHtml(it.title || it.name || iid);
                         html += '<label style="display:flex;align-items:center;gap:8px;padding:6px;margin:4px 0;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;cursor:pointer;">' +
-                            '<input type="checkbox" class="tgcopy-bulk-cb" value="' + iid + '" data-idx="' + i + '" ' + checked + ' style="accent-color:#22c55e;">' +
+                            '<input type="checkbox" class="tgcopy2-bulk-cb" value="' + iid + '" data-idx="' + i + '" ' + checked + ' style="accent-color:#22c55e;">' +
                             '<img src="' + cover + '" style="width:32px;height:48px;object-fit:cover;border-radius:4px;background:#18181b;" onerror="this.style.display=\'none\';">' +
                             '<span style="flex:1;font-size:13px;">' + t +
                             (it._isCollection ? ' <span title="Se copiará la colección (cover + mensaje)" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3);border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">📚 Colección</span>' : '') +
@@ -175,15 +175,15 @@
                     content.innerHTML = html;
                     var btnRow = document.createElement('div');
                     btnRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
-                    var btnAll = content.querySelector('.tgcopy-bulk-all');
-                    var btnNone = content.querySelector('.tgcopy-bulk-none');
-                    if (btnAll) btnAll.onclick = function() { var cbs = content.querySelectorAll('.tgcopy-bulk-cb'); for (var a = 0; a < cbs.length; a++) cbs[a].checked = true; };
-                    if (btnNone) btnNone.onclick = function() { var cbs = content.querySelectorAll('.tgcopy-bulk-cb'); for (var a = 0; a < cbs.length; a++) cbs[a].checked = false; };
+                    var btnAll = content.querySelector('.tgcopy2-bulk-all');
+                    var btnNone = content.querySelector('.tgcopy2-bulk-none');
+                    if (btnAll) btnAll.onclick = function() { var cbs = content.querySelectorAll('.tgcopy2-bulk-cb'); for (var a = 0; a < cbs.length; a++) cbs[a].checked = true; };
+                    if (btnNone) btnNone.onclick = function() { var cbs = content.querySelectorAll('.tgcopy2-bulk-cb'); for (var a = 0; a < cbs.length; a++) cbs[a].checked = false; };
                     var send = document.createElement('button');
                     send.textContent = 'Enviar';
                     send.style.cssText = 'flex:1;padding:8px;background:#22c55e;border:none;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;';
                     send.onclick = function() {
-                        var boxes = content.querySelectorAll('.tgcopy-bulk-cb:checked');
+                        var boxes = content.querySelectorAll('.tgcopy2-bulk-cb:checked');
                         if (!boxes.length) { alert('Selecciona al menos un elemento.'); return; }
                         var sel = [];
                         for (var j = 0; j < boxes.length; j++) {
@@ -212,43 +212,43 @@
             var lastSel = {};
             try { lastSel = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch(e) {}
             openModal('Enviar ' + items.length + ' títulos a Canal Telegram', function(content, overlay) {
-                var html = '<div class="muted" style="margin-bottom:8px;font-size:12px;color:#a1a1aa;">Se añadirán ' + items.length + ' títulos a la cola con los mismos destinos.</div>';
-                for (var i = 0; i < dests.length; i++) {
-                    var d = dests[i];
-                    var checked = lastSel[d.id] ? 'checked' : '';
-                    html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;cursor:pointer;">' +
-                        '<input type="checkbox" class="tgcopy-dest-cb" value="' + d.id + '" ' + checked + ' style="accent-color:#22c55e;">' +
-                        '<span style="flex:1;">' + d.name + '</span>' +
-                        '<span style="font-size:11px;color:#a1a1aa;">' + (d.channel_title || '') + '</span></label>';
-                }
-                html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:8px 0 0 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
-                    '<input type="checkbox" class="tgcopy-skip-cb" ' + (skipDef ? 'checked' : '') + ' style="accent-color:#eab308;">' +
-                    '<span style="flex:1;font-size:12px;">Omitir subida si el topic ya existe en el destino</span></label>';
-                content.innerHTML = html;
-                var btnRow = document.createElement('div');
-                btnRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
-                var enqueue = document.createElement('button');
-                enqueue.textContent = 'Añadir a la cola';
-                enqueue.style.cssText = 'flex:1;padding:8px;background:#22c55e;border:none;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;';
-                enqueue.onclick = function() {
-                    var ids = [];
-                    var boxes = content.querySelectorAll('.tgcopy-dest-cb:checked');
-                    for (var j = 0; j < boxes.length; j++) ids.push(boxes[j].value);
-                    if (!ids.length) { alert('Selecciona al menos un destino.'); return; }
-                    var sel = {};
-                    for (var k = 0; k < dests.length; k++) sel[dests[k].id] = ids.indexOf(dests[k].id) >= 0;
-                    localStorage.setItem(LS_KEY, JSON.stringify(sel));
-                    overlay.remove();
-                    var skipBox = content.querySelector('.tgcopy-skip-cb');
-                    bulkEnqueue(items, ids, !!(skipBox && skipBox.checked));
-                };
-                var cancel = document.createElement('button');
-                cancel.textContent = 'Cancelar';
-                cancel.style.cssText = 'padding:8px 14px;background:none;border:1px solid #3f3f46;color:rgba(255,255,255,0.6);border-radius:6px;cursor:pointer;';
-                cancel.onclick = function() { overlay.remove(); };
-                btnRow.appendChild(enqueue);
-                btnRow.appendChild(cancel);
-                content.appendChild(btnRow);
+            var html = '<div class="muted" style="margin-bottom:8px;font-size:12px;color:#a1a1aa;">Se añadirán ' + items.length + ' títulos a la cola con los mismos destinos.</div>';
+            for (var i = 0; i < dests.length; i++) {
+                var d = dests[i];
+                var checked = lastSel[d.id] ? 'checked' : '';
+                html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;cursor:pointer;">' +
+                    '<input type="checkbox" class="tgcopy2-dest-cb" value="' + d.id + '" ' + checked + ' style="accent-color:#22c55e;">' +
+                    '<span style="flex:1;">' + d.name + '</span>' +
+                    '<span style="font-size:11px;color:#a1a1aa;">' + (d.channel_title || '') + '</span></label>';
+            }
+            html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:8px 0 0 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
+                '<input type="checkbox" class="tgcopy2-skip-cb" ' + (skipDef ? 'checked' : '') + ' style="accent-color:#eab308;">' +
+                '<span style="flex:1;font-size:12px;">Omitir subida si el topic ya existe en el destino</span></label>';
+            content.innerHTML = html;
+            var btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
+            var enqueue = document.createElement('button');
+            enqueue.textContent = 'Añadir a la cola';
+            enqueue.style.cssText = 'flex:1;padding:8px;background:#22c55e;border:none;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;';
+            enqueue.onclick = function() {
+                var ids = [];
+                var boxes = content.querySelectorAll('.tgcopy2-dest-cb:checked');
+                for (var j = 0; j < boxes.length; j++) ids.push(boxes[j].value);
+                if (!ids.length) { alert('Selecciona al menos un destino.'); return; }
+                var sel = {};
+                for (var k = 0; k < dests.length; k++) sel[dests[k].id] = ids.indexOf(dests[k].id) >= 0;
+                localStorage.setItem(LS_KEY, JSON.stringify(sel));
+                overlay.remove();
+                var skipBox2 = content.querySelector('.tgcopy2-skip-cb');
+                bulkEnqueue(items, ids, !!(skipBox2 && skipBox2.checked));
+            };
+            var cancel = document.createElement('button');
+            cancel.textContent = 'Cancelar';
+            cancel.style.cssText = 'padding:8px 14px;background:none;border:1px solid #3f3f46;color:rgba(255,255,255,0.6);border-radius:6px;cursor:pointer;';
+            cancel.onclick = function() { overlay.remove(); };
+            btnRow.appendChild(enqueue);
+            btnRow.appendChild(cancel);
+            content.appendChild(btnRow);
             });
         });
     }
@@ -290,16 +290,16 @@
         var overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:999999;background:rgba(0,0,0,0.85);display:block;text-align:center;overflow-y:auto;padding:4vh 0;display:flex;align-items:center;justify-content:center;';
         var panel = document.createElement('div');
-        panel.id = 'tgcopy-queue-panel';
+        panel.id = 'tgcopy2-queue-panel';
         panel.style.cssText = 'background:#0d0d0f;border:1px solid #3f3f46;border-radius:10px;padding:16px;width:95vw;max-width:640px;max-height:90vh;overflow-y:auto;color:#f4f4f5;position:relative;display:inline-block;text-align:left;vertical-align:middle;margin:0 auto;';
         // Feedback de pulsación para todos los botones del modal de cola
         var pressCss = document.createElement('style');
-        pressCss.textContent = '#tgcopy-queue-panel button{transition:transform .06s ease,box-shadow .06s ease,border-color .06s ease,background .12s ease,color .12s ease;}'
-            + '#tgcopy-queue-panel button:active{transform:scale(.94);box-shadow:inset 0 0 0 2px rgba(250,204,21,.85);}'
-            + '#tgcopy-queue-panel button.tgcopy-loading{opacity:.85;transform:scale(.97);}'
-            + '#tgcopy-queue-panel .tgcopy-presskey:active{border-color:#facc15;color:#facc15;}';
+        pressCss.textContent = '#tgcopy2-queue-panel button{transition:transform .06s ease,box-shadow .06s ease,border-color .06s ease,background .12s ease,color .12s ease;}'
+            + '#tgcopy2-queue-panel button:active{transform:scale(.94);box-shadow:inset 0 0 0 2px rgba(250,204,21,.85);}'
+            + '#tgcopy2-queue-panel button.tgcopy2-loading{opacity:.85;transform:scale(.97);}'
+            + '#tgcopy2-queue-panel .tgcopy2-presskey:active{border-color:#facc15;color:#facc15;}';
         panel.appendChild(pressCss);
-        panel.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-right:40px;"><span style="font-weight:600;font-size:15px;flex:1;">Cola de copia (TGHirayi)</span></div>' +
+        panel.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-right:40px;"><span style="font-weight:600;font-size:15px;flex:1;">Cola de copia (TGHirayi_v2)</span></div>' +
             '<span class="close-btn" style="top:12px;right:12px;" title="Cerrar" onclick="var o=this.parentNode.parentNode; o.parentNode.removeChild(o)">&times;</span>';
         var content = document.createElement('div');
         panel.appendChild(content);
@@ -314,16 +314,16 @@
         });
 
         _queue_modal = { content: content, overlay: overlay };
-        window._tgcopyRefreshQueue = function() {
+        window._tgcopy2RefreshQueue = function() {
             if (_queue_modal && _queue_modal.overlay && _queue_modal.overlay.parentNode) {
                 refreshQueue2(_queue_modal.content, _queue_modal.overlay);
             }
         };
 
         // Datalist de códigos de idioma (audio/subs) para los combotext
-        if (!document.getElementById('tgcopy-langs')) {
+        if (!document.getElementById('tgcopy2-langs')) {
             var dl = document.createElement('datalist');
-            dl.id = 'tgcopy-langs';
+            dl.id = 'tgcopy2-langs';
             var langs = ['spa','eng','jpn','kor','chi','fra','deu','ita','por','rus','ara','hin','tur','pol','nld','swe','nor','dan','fin','ces','ell','hun','heb','tha','vie','ind','zho'];
             for (var i = 0; i < langs.length; i++) {
                 var opt = document.createElement('option');
@@ -342,7 +342,7 @@
             // para no pisar su escritura (el refresh cada 2.5s reconstruiría el input).
             var activeEl = document.activeElement;
             if (activeEl && activeEl.classList &&
-                (activeEl.classList.contains('tgcopy-next-input') || activeEl.classList.contains('tgcopy-norm-input'))) {
+                (activeEl.classList.contains('tgcopy2-next-input') || activeEl.classList.contains('tgcopy2-norm-input'))) {
                 if (overlay && overlay.parentNode) {
                     setTimeout(function() { refreshQueue2(content, overlay); }, 2500);
                 }
@@ -357,7 +357,7 @@
             html += '<div style="display:flex;align-items:center;gap:8px;padding:8px;background:rgba(255,255,255,0.04);border-radius:6px;margin-bottom:8px;">';
             html += '<span style="width:10px;height:10px;border-radius:50%;background:' + (paused ? '#eab308' : '#22c55e') + ';"></span>';
             html += '<span style="flex:1;font-size:13px;">Worker: ' + (paused ? 'Pausado' : 'Activo') + '</span>';
-            html += '<button onclick="window._tgcopyToggleWorker()" style="padding:4px 10px;background:' + (paused ? '#22c55e' : '#eab308') + ';border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;">' + (paused ? 'Reanudar' : 'Pausar') + '</button>';
+            html += '<button onclick="window._tgcopy2ToggleWorker()" style="padding:4px 10px;background:' + (paused ? '#22c55e' : '#eab308') + ';border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;">' + (paused ? 'Reanudar' : 'Pausar') + '</button>';
             html += '</div>';
             // ─── Estado de archives (procesado en paralelo) ───
             var pArch = res.pending_archives || 0;
@@ -454,7 +454,7 @@
                     if (encMeta.length) html += '<span style="font-size:10px;color:#a1a1aa;white-space:nowrap;">(' + encMeta.join(' · ') + ')</span>';
                     html += '<span style="flex:1;"></span>';
                     if (res.encode_active && res.encode_job_id && String(res.encode_job_id) === String(current.id)) {
-                        html += '<button onclick="window._tgcopyKillEncode(\'' + current.id + '\')" title="Mata el proceso ffmpeg actual. Se descarta el pase en curso y luego se re-encoda." style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:10px;padding:2px 8px;white-space:nowrap;">✕ Matar encode</button>';
+                        html += '<button onclick="window._tgcopy2KillEncode(\'' + current.id + '\')" title="Mata el proceso ffmpeg actual. Se descarta el pase en curso y luego se re-encoda." style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:10px;padding:2px 8px;white-space:nowrap;">✕ Matar encode</button>';
                     }
                     html += '</div>';
                     html += '<div style="background:#27272a;border-radius:3px;height:6px;overflow:hidden;margin-bottom:8px;">';
@@ -534,11 +534,11 @@ html += '</div>';
 
             // Finalizados (collapsible, estado persistente entre refrescos)
             if (done.length > 0) {
-                var doneId = 'tgcopy-done-list';
+                var doneId = 'tgcopy2-done-list';
                 var doneOpen = window._queue_done_expanded;
                 html += '<div style="margin-top:8px;cursor:pointer;font-size:12px;color:#a1a1aa;display:flex;align-items:center;gap:4px;" onclick="var d=document.getElementById(\'' + doneId + '\');var open=(d.style.display==\'none\');d.style.display=open?\'block\':\'none\';var s=this.querySelector(\'span\');s.textContent=open?\'\u25BC \':\'\u25B6 \';window._queue_done_expanded=open;">';
                 html += '<span>' + (doneOpen ? '&#x25BC; ' : '&#x25B6; ') + '</span>Finalizados (' + done.length + ')</div>';
-                html += '<div style="text-align:right;margin:2px 0 4px;"><button onclick="window._tgcopyCleanCompleted()" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:11px;padding:3px 8px;">Limpiar finalizados</button></div>';
+                html += '<div style="text-align:right;margin:2px 0 4px;"><button onclick="window._tgcopy2CleanCompleted()" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:11px;padding:3px 8px;">Limpiar finalizados</button></div>';
                 html += '<div id="' + doneId + '" style="display:' + (doneOpen ? 'block' : 'none') + ';">';
                 for (var i = 0; i < done.length; i++) {
                     html += renderJobRow(done[i], current, true);
@@ -577,10 +577,10 @@ html += '</div>';
 
         if (!isDone) {
             h += '<div style="display:flex;flex-direction:column;gap:1px;flex-shrink:0;">';
-            h += '<button onclick="window._tgcopyMove(\'' + j.id + '\',\'top\')" title="Al inicio" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9650;&#9650;</button>';
-            h += '<button onclick="window._tgcopyMove(\'' + j.id + '\',\'up\')" title="Subir" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9650;</button>';
-            h += '<button onclick="window._tgcopyMove(\'' + j.id + '\',\'down\')" title="Bajar" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9660;</button>';
-            h += '<button onclick="window._tgcopyMove(\'' + j.id + '\',\'bottom\')" title="Al final" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9660;&#9660;</button>';
+            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'top\')" title="Al inicio" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9650;&#9650;</button>';
+            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'up\')" title="Subir" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9650;</button>';
+            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'down\')" title="Bajar" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9660;</button>';
+            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'bottom\')" title="Al final" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9660;&#9660;</button>';
             h += '</div>';
         }
 
@@ -588,7 +588,7 @@ html += '</div>';
         h += '<div style="display:flex;align-items:center;gap:6px;font-size:13px;">';
         h += '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">' + jobTitleHtml(j) + '</span>';
         if ((j.total_episodes || 0) > 1) {
-            h += '<span onclick="window._tgcopyEpisodes(\'' + j.id + '\')" title="Ver episodios y elegir cuáles copiar" style="cursor:pointer;font-size:11px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;">🎞️ ' + j.total_episodes + '</span>';
+            h += '<span onclick="window._tgcopy2Episodes(\'' + j.id + '\')" title="Ver episodios y elegir cuáles copiar" style="cursor:pointer;font-size:11px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;">🎞️ ' + j.total_episodes + '</span>';
         }
         if (j.is_archive) {
             h += '<span title="Job de archives comprimidos" style="background:rgba(251,191,36,0.15);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">\uD83D\uDCE6 Archive</span>';
@@ -602,7 +602,7 @@ html += '</div>';
             }
         }
         if (!isDone) {
-            h += '<button onclick="window._tgcopyEditCover(\'' + j.id + '\')" title="Editar cover" class="tgcopy-presskey" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:10px;padding:1px 5px;white-space:nowrap;">Cover</button>';
+            h += '<button onclick="window._tgcopy2EditCover(\'' + j.id + '\')" title="Editar cover" class="tgcopy2-presskey" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:10px;padding:1px 5px;white-space:nowrap;">Cover</button>';
         }
         h += '</div>';
         if (j.progress > 0 && j.progress < 100) {
@@ -633,11 +633,11 @@ html += '</div>';
         h += '<span>·</span>';
         h += '<span>Procesados: ' + processed + '</span>';
         h += '<span>·</span>';
-        h += '<label title="Omitir subida si el topic ya existe en el destino" style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" ' + (j.skip_if_exists_topo3 ? 'checked' : '') + ' onchange="window._tgcopySetSkip(\'' + j.id + '\',this.checked)" style="accent-color:#eab308;"><span>Omitir si existe</span></label>';
+        h += '<label title="Omitir subida si el topic ya existe en el destino" style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" ' + (j.skip_if_exists_topo3 ? 'checked' : '') + ' onchange="window._tgcopy2SetSkip(\'' + j.id + '\',this.checked)" style="accent-color:#eab308;"><span>Omitir si existe</span></label>';
         if (!isDone) {
             var nextVal = (typeof j.next_episode === 'number' && j.next_episode > 0) ? j.next_episode : 'auto';
             h += '<span>·</span><span>Siguiente:</span>';
-            h += '<input type="text" class="tgcopy-next-input" value="' + nextVal + '" onfocus="this.select()" onchange="window._tgcopySetNext(\'' + j.id + '\',this.value)" onkeydown="if(event.key===\'Enter\'){this.blur();return false;}" style="width:52px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
+            h += '<input type="text" class="tgcopy2-next-input" value="' + nextVal + '" onfocus="this.select()" onchange="window._tgcopy2SetNext(\'' + j.id + '\',this.value)" onkeydown="if(event.key===\'Enter\'){this.blur();return false;}" style="width:52px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
         }
         h += '</div>';
 
@@ -646,38 +646,38 @@ html += '</div>';
             var audioVal = j.audio_lang || '';
             var subVal = j.sub_lang || '';
             h += '<div style="display:flex;align-items:center;gap:6px;margin-top:3px;font-size:11px;color:#a1a1aa;">';
-            h += '<span>Audio:</span><input type="text" list="tgcopy-langs" class="tgcopy-norm-input" value="' + audioVal + '" placeholder="original" onchange="window._tgcopySetNorm(\'' + j.id + '\',\'audio_lang\',this.value)" style="width:64px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
-            h += '<span>Subs:</span><input type="text" list="tgcopy-langs" class="tgcopy-norm-input" value="' + subVal + '" placeholder="ninguno" onchange="window._tgcopySetNorm(\'' + j.id + '\',\'sub_lang\',this.value)" style="width:64px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
+            h += '<span>Audio:</span><input type="text" list="tgcopy2-langs" class="tgcopy2-norm-input" value="' + audioVal + '" placeholder="original" onchange="window._tgcopy2SetNorm(\'' + j.id + '\',\'audio_lang\',this.value)" style="width:64px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
+            h += '<span>Subs:</span><input type="text" list="tgcopy2-langs" class="tgcopy2-norm-input" value="' + subVal + '" placeholder="ninguno" onchange="window._tgcopy2SetNorm(\'' + j.id + '\',\'sub_lang\',this.value)" style="width:64px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
             h += '</div>';
         }
         // Archive protegido con contraseña: campo password + reintentar
         if (j.status === 'awaiting_password') {
             h += '<div style="display:flex;align-items:center;gap:6px;margin-top:3px;font-size:11px;color:#fbbf24;">';
             h += '<span>Contrase&ntilde;a:</span>';
-            h += '<input type="text" class="tgcopy-pwd-input" placeholder="contrase&ntilde;a" onchange="window._tgcopySetPassword(\'' + j.id + '\',this.value)" style="flex:1;background:#18181b;border:1px solid #fbbf24;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
-            h += '<button onclick="window._tgcopyRetryPassword(\'' + j.id + '\')" title="Reintentar con la contrase&ntilde;a" style="background:none;border:1px solid #fbbf24;color:#fbbf24;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">Reintentar</button>';
+            h += '<input type="text" class="tgcopy2-pwd-input" placeholder="contrase&ntilde;a" onchange="window._tgcopy2SetPassword(\'' + j.id + '\',this.value)" style="flex:1;background:#18181b;border:1px solid #fbbf24;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
+            h += '<button onclick="window._tgcopy2RetryPassword(\'' + j.id + '\')" title="Reintentar con la contrase&ntilde;a" style="background:none;border:1px solid #fbbf24;color:#fbbf24;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">Reintentar</button>';
             h += '</div>';
         }
         h += '</div>';
 
         if (!isDone) {
             var dCount = (j.destination_ids || []).length;
-            h += '<span onclick="window._tgcopyShowDestinos(\'' + j.id + '\')" title="Ver/editar destinos" style="font-size:11px;color:#a1a1aa;cursor:pointer;padding:2px 6px;border:1px solid #3f3f46;border-radius:4px;white-space:nowrap;">' + dCount + ' dest</span>';
+            h += '<span onclick="window._tgcopy2ShowDestinos(\'' + j.id + '\')" title="Ver/editar destinos" style="font-size:11px;color:#a1a1aa;cursor:pointer;padding:2px 6px;border:1px solid #3f3f46;border-radius:4px;white-space:nowrap;">' + dCount + ' dest</span>';
             if (j.paused) h += '<span style="font-size:10px;color:#eab308;font-weight:600;">PAUSADO</span>';
-            if (j.archive_phase === 'processing') h += '<button onclick="window._tgcopyKillEncode(\'' + j.id + '\')" title="Matar el ffmpeg en curso y re-encodar" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:10px;padding:2px 6px;white-space:nowrap;">✕ Kill</button>';
-            h += '<button onclick="window._tgcopyTogglePause(\'' + j.id + '\',' + (!j.paused) + ')" title="' + (j.paused ? 'Reanudar' : 'Pausar') + '" style="background:none;border:1px solid #3f3f46;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">' + (j.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
+            if (j.archive_phase === 'processing') h += '<button onclick="window._tgcopy2KillEncode(\'' + j.id + '\')" title="Matar el ffmpeg en curso y re-encodar" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:10px;padding:2px 6px;white-space:nowrap;">✕ Kill</button>';
+            h += '<button onclick="window._tgcopy2TogglePause(\'' + j.id + '\',' + (!j.paused) + ')" title="' + (j.paused ? 'Reanudar' : 'Pausar') + '" style="background:none;border:1px solid #3f3f46;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">' + (j.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
         }
         if (isDone) {
-            h += '<button onclick="window._tgcopyRequeue(\'' + j.id + '\')" title="Volver a meter en la cola" style="background:none;border:1px solid #22c55e;color:#22c55e;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#8635;</button>';
+            h += '<button onclick="window._tgcopy2Requeue(\'' + j.id + '\')" title="Volver a meter en la cola" style="background:none;border:1px solid #22c55e;color:#22c55e;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#8635;</button>';
         }
         if (j.is_archive) {
-            h += '<button onclick="window._tgcopyOpenLog(\'' + j.id + '\')" title="Ver el log (terminal) del reprocesamiento del archive" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#8981; Log</button>';
+            h += '<button onclick="window._tgcopy2OpenLog(\'' + j.id + '\')" title="Ver el log (terminal) del reprocesamiento del archive" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#8981; Log</button>';
         }
-        h += '<button onclick="window._tgcopyRemove(\'' + j.id + '\')" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#10005;</button>';
+        h += '<button onclick="window._tgcopy2Remove(\'' + j.id + '\')" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#10005;</button>';
         h += '</div>';
         return h;
     }
-    window._tgcopyShowDestinos = function(jobId) {
+    window._tgcopy2ShowDestinos = function(jobId) {
         api(API + '/queue', {}, function(res) {
             var queue = (res && res.queue) || [];
             var job = null;
@@ -693,11 +693,11 @@ html += '</div>';
                     var d = allDests[i];
                     var checked = ids.indexOf(d.id) >= 0 ? 'checked' : '';
                     html += '<label style="display:flex;align-items:center;gap:8px;padding:6px;margin:2px 0;background:rgba(255,255,255,0.04);border-radius:4px;cursor:pointer;">' +
-                        '<input type="checkbox" class="tgcopy-jobdest-cb" value="' + d.id + '" ' + checked + ' style="accent-color:#22c55e;">' +
+                        '<input type="checkbox" class="tgcopy2-jobdest-cb" value="' + d.id + '" ' + checked + ' style="accent-color:#22c55e;">' +
                         '<span style="flex:1;font-size:13px;">' + d.name + '</span>' +
                         '</label>';
                 }
-                html += '<button onclick="window._tgcopySaveJobDestinos(\'' + jobId + '\')" style="margin-top:8px;padding:6px 14px;background:#22c55e;border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:13px;width:100%;">Guardar</button>';
+                html += '<button onclick="window._tgcopy2SaveJobDestinos(\'' + jobId + '\')" style="margin-top:8px;padding:6px 14px;background:#22c55e;border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:13px;width:100%;">Guardar</button>';
                 var overlay = document.createElement('div');
                 overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:999999;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;';
                 var panel = document.createElement('div');
@@ -714,9 +714,9 @@ html += '</div>';
         });
     };
 
-    window._tgcopySaveJobDestinos = function(jobId) {
+    window._tgcopy2SaveJobDestinos = function(jobId) {
         var ids = [];
-        var boxes = document.querySelectorAll('.tgcopy-jobdest-cb:checked');
+        var boxes = document.querySelectorAll('.tgcopy2-jobdest-cb:checked');
         for (var i = 0; i < boxes.length; i++) ids.push(boxes[i].value);
         api(API + '/queue/' + jobId + '/destinations', { method: 'PUT', data: { destination_ids: ids } }, function(r) {
             if (r && r.ok) showToast('Destinos actualizados');
@@ -724,48 +724,48 @@ html += '</div>';
     };
 
     // ─── Funciones globales para botones inline ───
-    window._tgcopyToggleWorker = function() {
+    window._tgcopy2ToggleWorker = function() {
         api(API + '/worker/toggle', { method: 'POST' }, function() {});
     };
 
-    window._tgcopyMove = function(jobId, dir) {
+    window._tgcopy2Move = function(jobId, dir) {
         api(API + '/queue/' + jobId + '/move', { method: 'PUT', data: { direction: dir } }, function() {});
     };
 
-    window._tgcopyTogglePause = function(jobId, paused) {
+    window._tgcopy2TogglePause = function(jobId, paused) {
         api(API + '/queue/' + jobId + '/pause', { method: 'PUT', data: { paused: paused } }, function() {});
     };
 
     // Matar el ffmpeg en curso de un job (solo admin; exige confirmación)
-    window._tgcopyKillEncode = function(jobId) {
+    window._tgcopy2KillEncode = function(jobId) {
         var ok = confirm('¿Matar el proceso de recodificación del job #' + jobId + '?\n\nSe descarta el pase en curso (no se pierde nada persistido) y se volverá a encodar desde el inicio al retomar. Solo para problemas de rendimiento/cuelgues.');
         if (!ok) return;
         api(API + '/queue/' + jobId + '/kill-encode', { method: 'POST' }, function(r) {
             showToast((r && r.ok) ? 'Proceso ffmpeg terminado' : 'No había proceso activo para ese job');
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
-    window._tgcopyRemove = function(jobId) {
+    window._tgcopy2Remove = function(jobId) {
         api(API + '/queue/' + jobId, { method: 'DELETE' }, function() {
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
     // Ver el log (terminal) del reprocesamiento de un archive
-    window._tgcopyOpenLog = function(jobId) {
+    window._tgcopy2OpenLog = function(jobId) {
         var overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:999999;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;';
         var panel = document.createElement('div');
         panel.style.cssText = 'background:#0d0d0f;border:1px solid #3f3f46;border-radius:10px;padding:16px;min-width:360px;max-width:640px;width:90%;max-height:80vh;color:#f4f4f5;display:flex;flex-direction:column;';
         panel.innerHTML = '<div style="font-weight:600;margin-bottom:8px;">Log del job #' + jobId + '</div>' +
-            '<div id="tgcopy-log-content" style="flex:1;overflow-y:auto;background:#09090b;border:1px solid #27272a;border-radius:6px;padding:8px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;color:#a1f7a1;min-height:200px;max-height:60vh;">Cargando...</div>' +
+            '<div id="tgcopy2-log-content" style="flex:1;overflow-y:auto;background:#09090b;border:1px solid #27272a;border-radius:6px;padding:8px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;color:#a1f7a1;min-height:200px;max-height:60vh;">Cargando...</div>' +
             '<div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;">' +
             '<span style="font-size:10px;color:#71717a;">En memoria (últimas 800 líneas) &middot; se vacía al reiniciar el gateway</span>' +
-            '<button id="tgcopy-log-close" style="padding:4px 12px;background:#27272a;border:1px solid #3f3f46;color:#fff;border-radius:4px;cursor:pointer;">Cerrar</button></div>';
+            '<button id="tgcopy2-log-close" style="padding:4px 12px;background:#27272a;border:1px solid #3f3f46;color:#fff;border-radius:4px;cursor:pointer;">Cerrar</button></div>';
         overlay.appendChild(panel);
         document.body.appendChild(overlay);
-        var content = panel.querySelector('#tgcopy-log-content');
+        var content = panel.querySelector('#tgcopy2-log-content');
         var closed = false;
         var timer = setInterval(function() {
             if (closed) { clearInterval(timer); return; }
@@ -776,7 +776,7 @@ html += '</div>';
                 content.scrollTop = content.scrollHeight;
             });
         }, 2000);
-        panel.querySelector('#tgcopy-log-close').onclick = function() { closed = true; clearInterval(timer); overlay.remove(); };
+        panel.querySelector('#tgcopy2-log-close').onclick = function() { closed = true; clearInterval(timer); overlay.remove(); };
         overlay.onclick = function(e) { if (e.target === overlay) { closed = true; clearInterval(timer); overlay.remove(); } };
         api(API + '/queue/' + jobId + '/log', {}, function(r) {
             if (closed || !r) return;
@@ -787,25 +787,25 @@ html += '</div>';
     };
 
     // Guardar audio/sub de normalización de un job
-    window._tgcopySetNorm = function(jobId, field, value) {
+    window._tgcopy2SetNorm = function(jobId, field, value) {
         var v = String(value || '').trim();
         var data = {};
         data[field] = v;
         api(API + '/queue/' + jobId + '/normalize', { method: 'PUT', data: data }, function(r) {
             if (r && r.ok) showToast((field === 'audio_lang' ? 'Audio' : 'Subs') + ': ' + (v || 'original'));
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
-    window._tgcopySetSkip = function(jobId, value) {
+    window._tgcopy2SetSkip = function(jobId, value) {
         api(API + '/queue/' + jobId + '/skip-exists', { method: 'PUT', data: { skip_if_exists_topo3: !!value } }, function(r) {
             if (r && r.ok) showToast(value ? 'Omitir si existe: activado' : 'Omitir si existe: desactivado');
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
     // ─── Modal de episodios: ver, elegir cuáles copiar y cortar desde uno ───
-    window._tgcopyEpisodes = function(jobId) {
+    window._tgcopy2Episodes = function(jobId) {
         api(API + '/queue/' + jobId + '/episodes', {}, function(res) {
             if (!res || !res.ok) { showToast('No se pudieron cargar los episodios'); return; }
             var eps = res.episodes || [];
@@ -813,13 +813,13 @@ html += '</div>';
             var stateColor = { pendiente: '#a1a1aa', 'en curso': '#60a5fa', procesado: '#22c55e', omitido: '#eab308', fallido: '#ef4444' };
             var resumeFrom = parseInt(res.resume_from || 0, 10) || 0;
             var nextOv = parseInt(res.next_episode || 0, 10) || 0;
-            window._tgcopyEpModal = openModal('Episodios · ' + (res.title || ('Job #' + jobId)) + ' (' + eps.length + ')' + (nextOv > 0 ? ' · Reanuda desde ep. ' + nextOv : ''), function(content, overlay) {
+            window._tgcopy2EpModal = openModal('Episodios · ' + (res.title || ('Job #' + jobId)) + ' (' + eps.length + ')' + (nextOv > 0 ? ' · Reanuda desde ep. ' + nextOv : ''), function(content, overlay) {
                 var html = '<div style="max-height:50vh;overflow-y:auto;">';
                 for (var i = 0; i < eps.length; i++) {
                     var e = eps[i];
                     var cb = '';
                     if (!isArch) {
-                        cb = '<input type="checkbox" class="tgcopy-ep-cb" value="' + e.msg_id + '" ' + (e.in_scope ? 'checked' : '') + ' style="accent-color:#22c55e;">';
+                        cb = '<input type="checkbox" class="tgcopy2-ep-cb" value="' + e.msg_id + '" ' + (e.in_scope ? 'checked' : '') + ' style="accent-color:#22c55e;">';
                     }
                     var isPrev = resumeFrom > 0 && e.n < resumeFrom;
                     var dispState = isPrev ? '⏭ previo' : (e.state || '');
@@ -831,7 +831,7 @@ html += '</div>';
                         '<span style="flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(e.file_name || '') + '">' + escHtml(e.file_name || ('Episodio ' + e.n)) + '</span>' +
                         '<span style="font-size:11px;color:#a1a1aa;white-space:nowrap;">' + fmtBytes(e.file_size) + '</span>' +
                         '<span style="font-size:10px;color:' + dispColor + ';white-space:nowrap;"' + prevTitle + '>' + escHtml(dispState) + '</span>' +
-                        '<button title="Cortar desde aquí: crea job pausado al final con este episodio en adelante y lo quita de este" onclick="window._tgcopySplit(\'' + jobId + '\',' + e.msg_id + ',' + e.n + ')" style="background:none;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;white-space:nowrap;">✂️</button>' +
+                        '<button title="Cortar desde aquí: crea job pausado al final con este episodio en adelante y lo quita de este" onclick="window._tgcopy2Split(\'' + jobId + '\',' + e.msg_id + ',' + e.n + ')" style="background:none;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;white-space:nowrap;">✂️</button>' +
                         '</div>';
                 }
                 html += '</div>';
@@ -844,13 +844,13 @@ html += '</div>';
                     save.style.cssText = 'flex:1;padding:8px;background:#22c55e;border:none;color:#fff;border-radius:6px;cursor:pointer;font-weight:600;';
                     save.onclick = function() {
                         var ids = [];
-                        var boxes = content.querySelectorAll('.tgcopy-ep-cb:checked');
+                        var boxes = content.querySelectorAll('.tgcopy2-ep-cb:checked');
                         for (var j = 0; j < boxes.length; j++) ids.push(boxes[j].value);
                         api(API + '/queue/' + jobId + '/episodes', { method: 'PUT', data: { checked_msg_ids: ids } }, function(r) {
                             if (r && r.ok) showToast('Selección guardada');
                             else showToast('Error al guardar');
                             overlay.remove();
-                            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+                            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
                         });
                     };
                     btnRow.appendChild(save);
@@ -865,28 +865,28 @@ html += '</div>';
         });
     };
 
-    window._tgcopySplit = function(jobId, msgId, epNum) {
+    window._tgcopy2Split = function(jobId, msgId, epNum) {
         if (!confirm('Cortar desde el episodio ' + epNum + ':\ncrea un job pausado al final con ese episodio en adelante (título = primer fichero, cover genérico) y lo quita de este job.')) return;
         api(API + '/queue/' + jobId + '/split', { method: 'POST', data: { from_msg_id: msgId } }, function(r) {
             if (r && r.ok) showToast('Job #' + r.job_id + ' creado al final (pausado)');
             else showToast('Error al cortar: ' + ((r && r.detail) || 'desconocido'));
             try {
-                if (window._tgcopyEpModal && window._tgcopyEpModal.overlay && window._tgcopyEpModal.overlay.parentNode) {
-                    window._tgcopyEpModal.overlay.parentNode.removeChild(window._tgcopyEpModal.overlay);
+                if (window._tgcopy2EpModal && window._tgcopy2EpModal.overlay && window._tgcopy2EpModal.overlay.parentNode) {
+                    window._tgcopy2EpModal.overlay.parentNode.removeChild(window._tgcopy2EpModal.overlay);
                 }
-                window._tgcopyEpModal = null;
+                window._tgcopy2EpModal = null;
             } catch (e) {}
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
     // Editar cover de un job (modal con plantilla editable arriba y resultado resuelto abajo)
-    window._tgcopyEditCover = function(jobId) {
+    window._tgcopy2EditCover = function(jobId) {
         var btn = event && event.target;
         var clock = null;
         var secs = 0;
         if (btn && btn.tagName === 'BUTTON') {
-            btn.classList.add('tgcopy-loading');
+            btn.classList.add('tgcopy2-loading');
             btn.disabled = true;
             btn.textContent = 'Cover...';
             clock = setInterval(function() {
@@ -897,7 +897,7 @@ html += '</div>';
         var done = function() {
             if (clock) clearInterval(clock);
             if (btn && btn.parentNode) {
-                btn.classList.remove('tgcopy-loading');
+                btn.classList.remove('tgcopy2-loading');
                 btn.disabled = false;
                 btn.textContent = 'Cover';
             }
@@ -907,17 +907,17 @@ html += '</div>';
             if (!res) { showToast('No se pudo obtener el cover'); return; }
             // Mismo editor que el enriquecedor: propaga al registry compartido
             // (catálogo/hero) y al volver se deja snapshot en el job.
-            var _iid = res.item_id || '';
-            if (_iid && _iid.indexOf('COL-') !== 0 && window.Enricher && window.Enricher.open) {
+            var _iid2 = res.item_id || '';
+            if (_iid2 && _iid2.indexOf('COL-') !== 0 && window.Enricher && window.Enricher.open) {
                 window.Enricher.open(
-                    { item_id: _iid, category: res.category || '', subcategory: res.subcategory || '', title: res.title || '' },
+                    { item_id: _iid2, category: res.category || '', subcategory: res.subcategory || '', title: res.title || '' },
                     { onDone: function(r) {
                         var payload = { cover_text: (r && r.cover_text) || '' };
                         if (r && r.catalog_title) payload.title = r.catalog_title;
                         api(API + '/queue/' + jobId + '/cover', { method: 'PUT', data: payload }, function(rr) {
                             if (rr && rr.ok) showToast('Cover guardado' + (r && r.catalog_title ? '. Título: ' + r.catalog_title : ''));
                             else showToast('Error al guardar cover en el job');
-                            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+                            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
                         });
                     } }
                 );
@@ -968,7 +968,7 @@ html += '</div>';
 
             // Plantilla (editable, con tags)
             html += '<label style="font-size:0.75rem;color:#a1a1aa;margin-top:10px;display:block;">Plantilla</label>';
-            html += '<div style="font-size:0.7rem;color:#71717a;margin:2px 0 4px;">Tags: {title} {tagtitle} {episodes} {original_title} {title_es} {title_latam} {alt_titles} {cast} {director} · f-tags: {ftitle} {ftagtitle} {fyear} {frating} {fgenres} {fsinopsis} {fepisodes} {foriginal_title} {ftitle_es} {ftitle_latam} {falt_titles} {fcast} {fdirector} (solo si hay dato) · Enter para saltos de l&iacute;nea</div>';
+            html += '<div style="font-size:0.7rem;color:#71717a;margin:2px 0 4px;">Tags: {title} {tagtitle} {episodes} · f-tags: {ftitle} {ftagtitle} {fyear} {frating} {fgenres} {fsinopsis} {fepisodes} (solo si hay dato) · Enter para saltos de l&iacute;nea</div>';
             html += '<textarea id="cover-template" style="width:100%;height:120px;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;resize:vertical;">' + template + '</textarea>';
 
             // Resultado (resuelto en vivo, solo lectura)
@@ -1158,36 +1158,36 @@ html += '</div>';
     };
 
     // Guardar la contraseña de un job archive en espera
-    window._tgcopySetPassword = function(jobId, value) {
+    window._tgcopy2SetPassword = function(jobId, value) {
         api(API + '/queue/' + jobId + '/password', { method: 'PUT', data: { password: value || '' } }, function(r) {
             if (r && r.ok) showToast('Contraseña guardada. Pulsa Reintentar.');
             else showToast('Error guardando contraseña');
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
     // Reintentar un job archive con la contraseña guardada
-    window._tgcopyRetryPassword = function(jobId) {
+    window._tgcopy2RetryPassword = function(jobId) {
         api(API + '/queue/' + jobId + '/password/retry', { method: 'POST' }, function(r) {
             if (r && r.ok) showToast('Reintentando archive...');
             else showToast('Error al reintentar');
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
     // Definir el siguiente episodio a procesar (número) o 'auto'
-    window._tgcopySetNext = function(jobId, value) {
+    window._tgcopy2SetNext = function(jobId, value) {
         var v = String(value || '').trim();
         if (v === '' || v.toLowerCase() === 'auto') {
             api(API + '/queue/' + jobId + '/next-episode/auto', { method: 'PUT' }, function() {
-                if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+                if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
             });
             return;
         }
         var n = parseInt(v, 10);
         if (isNaN(n) || n < 1) {
             showToast('Valor inválido: usa un número o "auto"');
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
             return;
         }
         api(API + '/queue/' + jobId + '/next-episode', { method: 'PUT', data: { next_episode: n } }, function(r) {
@@ -1204,37 +1204,37 @@ html += '</div>';
                     }
                 } catch (e) {}
             });
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
     // Volver a meter un trabajo finalizado en la cola
-    window._tgcopyRequeue = function(jobId) {
+    window._tgcopy2Requeue = function(jobId) {
         api(API + '/queue/' + jobId + '/requeue', { method: 'POST' }, function(r) {
             if (r && r.ok) showToast('Re-encolado');
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
-    window._tgcopyCleanCompleted = function() {
+    window._tgcopy2CleanCompleted = function() {
         api(API + '/queue/completed/clean', { method: 'DELETE' }, function(r) {
             if (r && r.removed) showToast('Eliminados ' + r.removed + ' finalizados');
-            if (window._tgcopyRefreshQueue) window._tgcopyRefreshQueue();
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };
 
     // ─── Tray action handler ───
-    window._tgcopyTrayQueue = function() {
+    window._tgcopy2TrayQueue = function() {
         showQueueModal();
     };
 
-    // Interceptar handleTrayAction para TGHirayi (cola vs envío masivo)
+    // Interceptar handleTrayAction para TGHirayi_v2 (cola vs envío masivo)
     (function() {
         function setup() {
             if (typeof window.handleTrayAction === 'function') {
                 var orig = window.handleTrayAction;
                 window.handleTrayAction = function(pluginName, btnIndex, el) {
-                    if (pluginName === 'tvcat_TGHirayi') {
+                    if (pluginName === 'tvcat_TGHirayi_v2') {
                         if (btnIndex === 1) { showBulkSendModal(); } else { showQueueModal(); }
                         return;
                     }
@@ -1247,14 +1247,14 @@ html += '</div>';
         setup();
     })();
 
-    // Eliminar clase tray-active de los botones de TGHirayi (no es toggle)
+    // Eliminar clase tray-active de los botones de TGHirayi_v2 (no es toggle)
     (function() {
         function fixTray() {
             var tray = document.getElementById('plugin-tray-icons');
             if (tray) {
                 var btns = tray.querySelectorAll('button');
                 for (var i = 0; i < btns.length; i++) {
-                    if (btns[i].getAttribute('onclick') && btns[i].getAttribute('onclick').indexOf('tvcat_TGHirayi') >= 0) {
+                    if (btns[i].getAttribute('onclick') && btns[i].getAttribute('onclick').indexOf('tvcat_TGHirayi_v2') >= 0) {
                         btns[i].classList.remove('tray-active');
                     }
                 }
@@ -1293,10 +1293,10 @@ html += '</div>';
 
     // ─── Registrar plugin ───
     window.pluginSystem.registerPlugin({
-        name: 'tvcat_TGHirayi',
+        name: 'tvcat_TGHirayi_v2',
         type: 'heropage-action',
-        displayName: 'TGHirayi (Enviar a Canal Telegram)',
-        playerType: 'TGHirayi',
+        displayName: 'TGHirayi_v2 (Enviar a Canal Telegram)',
+        playerType: 'TGHirayi_v2',
         playLabel: 'Enviar a Canal',
         playIcon: '\uD83D\uDCE4',
         applies_to: ['*'],
@@ -1304,8 +1304,8 @@ html += '</div>';
         play: function(item) { showDestinationPicker(item); },
         getHeroButtons: function(itemData) {
             return [{
-                id: 'btn-tghirayi',
-                icon: '<img src="/plugin-static/tvcat_TGHirayi/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.onerror=null;this.src=\'/plugin-static/tvcat_TGHirayi/plugin_icon.png\';">',
+                id: 'btn-tghirayi-v2',
+                icon: '<img src="/plugin-static/tvcat_TGHirayi_v2/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.onerror=null;this.src=\'/plugin-static/tvcat_TGHirayi_v2/plugin_icon.png\';">',
                 tooltip: 'Enviar a Canal Telegram',
             label: '',
                 action: function() { showDestinationPicker(itemData); }
@@ -1313,8 +1313,8 @@ html += '</div>';
         },
         getCollectionButtons: function(colData) {
             return [{
-                id: 'btn-tghirayi-collection',
-                icon: '<img src="/plugin-static/tvcat_TGHirayi/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.onerror=null;this.src=\'/plugin-static/tvcat_TGHirayi/plugin_icon.png\';">',
+                id: 'btn-tghirayi-v2-collection',
+                icon: '<img src="/plugin-static/tvcat_TGHirayi_v2/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.onerror=null;this.src=\'/plugin-static/tvcat_TGHirayi_v2/plugin_icon.png\';">',
                 tooltip: 'Enviar títulos de la colección a Canal Telegram',
                 label: 'Enviar a Telegram',
                 action: function(ref) { showCollectionPicker(ref || colData); }
