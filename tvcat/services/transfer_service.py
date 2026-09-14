@@ -290,10 +290,12 @@ async def _run_upload(job: dict):
     if client is None:
         raise RuntimeError("No hay cliente Telegram disponible")
 
-    # Materializar bytes si es ruta
-    if isinstance(payload, str) and os.path.isfile(payload):
-        with open(payload, "rb") as f:
-            data = f.read()
+    # F2 FastDownload: si el payload ya es una ruta en disco, NO cargarla en RAM.
+    # Se sube directa desde disco (send_document Pyrofork o _parallel_upload
+    # Telethon leyendo el fichero), evitando el pico de memoria + doble I/O.
+    src_path = payload if (isinstance(payload, str) and os.path.isfile(payload)) else None
+    if src_path is not None:
+        data = b""
     elif isinstance(payload, (bytes, bytearray)):
         data = bytes(payload)
     else:
@@ -315,25 +317,41 @@ async def _run_upload(job: dict):
                 pass
         _save_persist(job)
 
-    msg_id = await _upload_data(client, ctype, job, data, file_name, caption, size, _cb, creds)
+    msg_id = await _upload_data(client, ctype, job, data, file_name, caption, size, _cb, creds,
+                              src_path=src_path)
     job["result"] = {"ok": True, "msg_id": msg_id, "size": size}
     _save_persist(job)
 
 
 async def _upload_data(client, ctype, job, data: bytes, file_name: str, caption: str,
-                       size: int, progress_callback, creds: dict) -> int:
-    """Sube bytes a un chat. Elige estrategia según tamaño (igual que TGHirayi)."""
+                       size: int, progress_callback, creds: dict, src_path: str = None) -> int:
+    """Sube bytes (o el fichero en disco si `src_path`) a un chat.
+
+    Elige estrategia según tamaño (igual que TGHirayi). F2 FastDownload: con
+    Pyrofork y ruta en disco se envía directo (`send_document(path)`), sin
+    pasar por RAM ni tmp intermedio. Con Telethon la ruta se usa como tmp
+    directa (solo lectura). `get_entity` solo se pide en ramas Telethon
+    (el cliente Pyrogram no tiene ese método)."""
     chat_id = int(job["chat"])
-    entity = await client.get_entity(chat_id)
 
     if size < BIG_UPLOAD_THRESHOLD:
-        # <10MB: send_file directo
+        # <10MB: envío directo (ruta o bytes según lo recibido)
+        if src_path is not None:
+            if ctype == "pyrogram":
+                m = await client.send_document(chat_id, src_path, caption=caption or None,
+                                               file_name=file_name)
+            else:
+                entity = await client.get_entity(chat_id)
+                m = await client.send_file(entity, src_path, caption=caption or None)
+            progress_callback(size, size)
+            return int(m.id)
         import io
         buf = io.BytesIO(data)
         buf.name = file_name
         if ctype == "pyrogram":
             m = await client.send_document(chat_id, buf, caption=caption or None, file_name=file_name)
         else:
+            entity = await client.get_entity(chat_id)
             m = await client.send_file(entity, buf, caption=caption or None)
         progress_callback(size, size)
         return int(m.id)
@@ -342,33 +360,70 @@ async def _upload_data(client, ctype, job, data: bytes, file_name: str, caption:
         # >1.9GB: Pyrofork
         if ctype != "pyrogram":
             raise RuntimeError("Fichero >1.9GB requiere sesión Pyrofork")
-        return await _upload_pyrofork(client, chat_id, data, file_name, caption, size, progress_callback, creds)
+        return await _upload_pyrofork(client, chat_id, data, file_name, caption, size,
+                                      progress_callback, creds, src_path=src_path)
 
-    # 10MB..1.9GB: parallel upload Telethon
+    if ctype == "pyrogram" and src_path is not None:
+        # F3: 10MB..1.9GB con ruta en disco → subida rápida (workers del ajuste
+        # global salvo override por creds), sin RAM ni tmp.
+        from services import fast_download as _fd
+        _uw = _fd.resolve_workers((creds or {}).get("upload_threads"),
+                                  "tg_fastul_workers", _fd.DEFAULT_WORKERS)
+
+        def _p(cur, tot):
+            progress_callback(cur, tot)
+
+        return await _fd.fast_send_media(client, chat_id, src_path, False,
+                                         file_name=file_name, caption=caption or None,
+                                         workers=_uw, progress=_p)
+
+    # 10MB..1.9GB sin ruta directa (bytes, o Telethon): parallel upload Telethon.
+    # Si src_path existe se usa como tmp de solo-lectura (sin copiar ni borrar).
     part_size_kb = 512
     threads = max(1, int(creds.get("upload_threads") or 4))
-    tmp_path = os.path.join(_DATA_DIR, f"_transfer_up_{uuid.uuid4().hex}.tmp")
+    if src_path is not None:
+        tmp_path = src_path
+        _is_temp = False
+    else:
+        tmp_path = os.path.join(_DATA_DIR, f"_transfer_up_{uuid.uuid4().hex}.tmp")
+        _is_temp = True
     try:
-        with open(tmp_path, "wb") as f:
-            f.write(data)
+        if _is_temp:
+            with open(tmp_path, "wb") as f:
+                f.write(data)
         input_file = await _parallel_upload(client, tmp_path, size, threads, part_size_kb,
                                             file_name=file_name, progress_callback=progress_callback)
+        entity = await client.get_entity(chat_id)
         m = await client.send_file(entity, input_file, caption=caption or None)
         return int(m.id)
     finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+        if _is_temp:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 
 async def _upload_pyrofork(client, chat_id, data: bytes, file_name: str, caption: str,
-                           size: int, progress_callback, creds: dict) -> int:
-    """Sube >1.9GB con Pyrofork (send_document) a un path temporal."""
+                           size: int, progress_callback, creds: dict, src_path: str = None) -> int:
+    """Sube >1.9GB con Pyrofork. Si `src_path` existe, subida rápida directa
+    desde disco (F3); si no, send_document clásico sobre tmp."""
+    if src_path is not None:
+        from services import fast_download as _fd
+        _uw = _fd.resolve_workers((creds or {}).get("upload_threads"),
+                                  "tg_fastul_workers", _fd.DEFAULT_WORKERS)
+
+        def _p(cur, tot):
+            progress_callback(cur, tot)
+
+        return await _fd.fast_send_media(client, chat_id, src_path, False,
+                                         file_name=file_name, caption=caption or None,
+                                         workers=_uw, progress=_p)
     tmp_path = os.path.join(_DATA_DIR, f"_transfer_up_{uuid.uuid4().hex}.tmp")
     try:
-        with open(tmp_path, "wb") as f:
-            f.write(data)
+        if _is_temp:
+            with open(tmp_path, "wb") as f:
+                f.write(data)
         workers = int(creds.get("pyro_workers") or 16)
 
         def _p(cur, tot):
@@ -378,10 +433,11 @@ async def _upload_pyrofork(client, chat_id, data: bytes, file_name: str, caption
                                        progress=_p, file_name=file_name)
         return int(m.id)
     finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+        if _is_temp:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 
 # ─── Descarga ─────────────────────────────────────────────────────
@@ -396,17 +452,32 @@ async def _run_download(job: dict):
     if client is None:
         raise RuntimeError("No hay cliente Telegram disponible")
 
-    entity = await client.get_entity(int(chat))
-    msg = await client.get_messages(entity, ids=msg_id)
-    if msg is None:
-        raise RuntimeError(f"Mensaje {msg_id} no encontrado")
+    # F2: el mensaje se lee según el tipo de cliente (las firmas de
+    # get_messages difieren entre Telethon y Pyrogram).
+    _pmsg = None
+    msg = None
+    if ctype == "pyrogram":
+        try:
+            _pmsg = await client.get_messages(int(chat), msg_id)
+        except Exception as e:
+            raise RuntimeError(f"No se pudo leer msg {msg_id}: {e}")
+        if _pmsg is None:
+            raise RuntimeError(f"Mensaje {msg_id} no encontrado")
+        size = _pyro_msg_file_size(_pmsg)
+        if not size:
+            raise RuntimeError(f"Mensaje {msg_id} no tiene documento")
+    else:
+        entity = await client.get_entity(int(chat))
+        msg = await client.get_messages(entity, ids=msg_id)
+        if msg is None:
+            raise RuntimeError(f"Mensaje {msg_id} no encontrado")
 
-    media = getattr(msg, 'media', None)
-    doc = getattr(media, 'document', None) if media else None
-    if not doc:
-        raise RuntimeError(f"Mensaje {msg_id} no tiene documento")
+        media = getattr(msg, 'media', None)
+        doc = getattr(media, 'document', None) if media else None
+        if not doc:
+            raise RuntimeError(f"Mensaje {msg_id} no tiene documento")
 
-    size = int(getattr(doc, 'size', 0) or 0)
+        size = int(getattr(doc, 'size', 0) or 0)
     job["total"] = size
     job["phase"] = "Descargando"
     _save_persist(job)
@@ -423,7 +494,30 @@ async def _run_download(job: dict):
         _save_persist(job)
 
     data = None
-    if size >= BIG_DOWNLOAD_THRESHOLD and ctype == "telethon":
+    if ctype == "pyrogram" and size > 0:
+        # F2 FastDownload: N GetFile concurrentes sobre 1 sola conexión
+        # (patrón Nanaki, 18-20 MB/s). Si no aplica o falla → fallback abajo.
+        from services import fast_download as _fd
+        _workers = _fd.resolve_workers((creds or {}).get("download_threads")
+                                       or (creds or {}).get("upload_threads"),
+                                       "tg_fastdl_workers", _fd.DEFAULT_WORKERS)
+        _tmp = dest_path or os.path.join(_DATA_DIR, f"_transfer_dl_{uuid.uuid4().hex}.tmp")
+        try:
+            got = await _fd.fast_download_media(client, _pmsg, _tmp,
+                                                workers=_workers, progress=_cb)
+            if got and os.path.isfile(got):
+                with open(got, "rb") as f:
+                    data = f.read()
+        except Exception as e:
+            _log(f"FastDownload falló, usando descarga normal: {e}")
+            data = None
+        finally:
+            if not dest_path and os.path.isfile(_tmp):
+                try:
+                    os.remove(_tmp)
+                except Exception:
+                    pass
+    if data is None and size >= BIG_DOWNLOAD_THRESHOLD and ctype == "telethon":
         # Descarga multi-conexión (>=20MB, solo Telethon)
         tmp_path = os.path.join(_DATA_DIR, f"_transfer_dl_{uuid.uuid4().hex}.tmp")
         try:
@@ -436,19 +530,19 @@ async def _run_download(job: dict):
                 os.remove(tmp_path)
             except Exception:
                 pass
-    else:
+    if data is None:
         # Descarga secuencial con progreso incremental (bytes)
         import io
         buf = io.BytesIO()
         try:
             if ctype == "pyrogram":
-                await client.download_media(msg, file=buf, progress=lambda c, t: _cb(c, t or size))
+                await client.download_media(_pmsg, file=buf, progress=lambda c, t: _cb(c, t or size))
             else:
                 await client.download_media(msg, file=buf, progress_callback=lambda c, t: _cb(c, t or size))
             data = buf.getvalue()
         except TypeError:
             # Firma sin callback de progreso (variante) → descarga directa
-            data = await client.download_media(msg, file=bytes)
+            data = await client.download_media(_pmsg if ctype == "pyrogram" else msg, file=bytes)
         if data is not None:
             _cb(len(data), size)
 
@@ -463,6 +557,24 @@ async def _run_download(job: dict):
         job["_downloaded"] = dest_path
     job["result"] = {"ok": True, "size": len(data)}
     _save_persist(job)
+
+
+def _pyro_msg_file_size(pmsg) -> int:
+    """Tamaño del fichero de un mensaje Pyrogram (document/video/audio/foto...)."""
+    for attr in ("document", "video", "audio", "animation", "voice", "video_note", "sticker"):
+        medium = getattr(pmsg, attr, None)
+        if medium is not None:
+            try:
+                return int(getattr(medium, "file_size", 0) or 0)
+            except Exception:
+                pass
+    photo = getattr(pmsg, "photo", None)
+    if photo is not None:
+        try:
+            return int(getattr(photo, "file_size", 0) or 0)
+        except Exception:
+            pass
+    return 0
 
 
 # ─── Cliente ──────────────────────────────────────────────────────
@@ -541,10 +653,15 @@ async def _parallel_download(client, msg, file_path: str, threads: int, progress
 
     CHUNK = 512 * 1024  # 512KB: límite máximo permitido por GetFileRequest
 
+    workers = secondary + [client]
+    # Rangos según workers REALES (si un secundario no conecta hay menos que
+    # 'threads'; indexar con 'threads' daría IndexError). Mismo fix que TGHirayi.
+    _nw = max(1, len(workers))
+
     def _ranges():
-        # Repartir el fichero en 'threads' rangos contiguos (no solapados).
+        # Repartir el fichero en rangos contiguos (no solapados).
         chunk_total = (file_size + CHUNK - 1) // CHUNK
-        per = max(1, (chunk_total + threads - 1) // threads)
+        per = max(1, (chunk_total + _nw - 1) // _nw)
         ranges = []
         for start in range(0, chunk_total, per):
             end = min(start + per, chunk_total)
@@ -553,8 +670,7 @@ async def _parallel_download(client, msg, file_path: str, threads: int, progress
         return ranges
 
     ranges = _ranges()
-    workers = secondary + [client]
-    writers = workers[:len(ranges)]
+    writers = workers
 
     progress = [0]
     lock = asyncio.Lock()

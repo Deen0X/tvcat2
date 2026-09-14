@@ -1,11 +1,11 @@
 """
-tvcat_card_frames — plugin grid-decorator de marcos PNG sobre el cover.
+tvcat_item_frames — plugin grid-decorator de marcos PNG sobre el cover.
 
 Modelo:
 - card_borders: pares idle/selected en BLOB (seed con Border1_Off/On.png).
 - card_sets: orden first-wins + categories/subcategories + border_id + enabled.
 - card_config: default_border_id.
-- Prefs por usuario-dispositivo en DB central (tvcat_settings, key cardframes_pref_{user_id}).
+- Prefs por usuario-dispositivo en DB central (tvcat_settings, key itemframes_pref_{user_id}).
 """
 
 import os
@@ -167,18 +167,35 @@ def _central_conn():
 
 
 def _pref_key(user_id) -> str:
-    return f"cardframes_pref_{user_id}"
+    return f"itemframes_pref_{user_id}"
 
 
 def _load_pref_map(user_id) -> dict:
     try:
         conn = _central_conn()
         row = conn.execute("SELECT value FROM tvcat_settings WHERE key=?", (_pref_key(user_id),)).fetchone()
-        conn.close()
         if row and row[0]:
             d = json.loads(row[0])
+            conn.close()
             if isinstance(d, dict):
                 return d
+        # Migración nombre anterior (cardframes_pref_*) → itemframes_pref_* (una vez).
+        old = conn.execute("SELECT value FROM tvcat_settings WHERE key=?", (f"cardframes_pref_{user_id}",)).fetchone()
+        if old and old[0]:
+            try:
+                conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?,?)", (_pref_key(user_id), old[0]))
+                conn.execute("DELETE FROM tvcat_settings WHERE key=?", (f"cardframes_pref_{user_id}",))
+                conn.commit()
+            except Exception:
+                pass
+            try:
+                d = json.loads(old[0])
+                if isinstance(d, dict):
+                    conn.close()
+                    return d
+            except Exception:
+                pass
+        conn.close()
     except Exception:
         pass
     return {}
@@ -194,12 +211,12 @@ def _save_pref_map(user_id, data: dict):
     conn.close()
 
 
-_DEFAULT_PREF = {"enabled": True, "shine_enabled": True, "shine_delay_ms": 800, "shine_period_ms": 2600}
+_DEFAULT_PREF = {"enabled": False, "shine_enabled": True, "shine_delay_ms": 800, "shine_period_ms": 2600}
 
 
 # ---------- Lectura pública (requiere login) ----------
 
-@router.get("/api/cardframes/sets")
+@router.get("/api/itemframes/sets")
 async def list_sets(request: Request):
     _need_login(request)
     c = _conn()
@@ -223,7 +240,7 @@ async def list_sets(request: Request):
     return {"borders": borders, "sets": sets, "default_border_id": cfg["value"] if cfg else None, "v": v}
 
 
-@router.get("/api/cardframes/img/{border_id}/{kind}")
+@router.get("/api/itemframes/img/{border_id}/{kind}")
 async def serve_img(border_id: str, kind: str, request: Request):
     _need_login(request)
     col = "idle_blob" if kind == "idle" else "selected_blob" if kind == "selected" else None
@@ -250,7 +267,7 @@ class PrefBody(BaseModel):
     shine_period_ms: Optional[int] = None
 
 
-@router.get("/api/cardframes/prefs")
+@router.get("/api/itemframes/prefs")
 async def get_prefs(request: Request, device_id: str = ""):
     s = _need_login(request)
     uid = s.get("user_id") or s.get("id")
@@ -266,7 +283,7 @@ async def get_prefs(request: Request, device_id: str = ""):
     return {"device_id": device_id, "prefs": pref}
 
 
-@router.post("/api/cardframes/prefs")
+@router.post("/api/itemframes/prefs")
 async def save_prefs(body: PrefBody, request: Request):
     s = _need_login(request)
     uid = s.get("user_id") or s.get("id")
@@ -300,7 +317,7 @@ async def save_prefs(body: PrefBody, request: Request):
 
 # ---------- CRUD (solo admin) ----------
 
-@router.post("/api/cardframes/borders")
+@router.post("/api/itemframes/borders")
 async def create_border(
     request: Request,
     name: str = Form(""),
@@ -328,7 +345,7 @@ async def create_border(
     return {"ok": True, "id": bid, "name": nm}
 
 
-@router.put("/api/cardframes/borders/{border_id}")
+@router.put("/api/itemframes/borders/{border_id}")
 async def update_border(
     border_id: str, request: Request,
     name: str = Form(""),
@@ -359,7 +376,7 @@ async def update_border(
     return {"ok": True, "id": border_id}
 
 
-@router.delete("/api/cardframes/borders/{border_id}")
+@router.delete("/api/itemframes/borders/{border_id}")
 async def delete_border(border_id: str, request: Request):
     _need_admin(request)
     c = _conn()
@@ -386,7 +403,7 @@ class SetBody(BaseModel):
     enabled: Optional[int] = 1
 
 
-@router.post("/api/cardframes/sets")
+@router.post("/api/itemframes/sets")
 async def create_set(body: SetBody, request: Request):
     _need_admin(request)
     if not body.border_id:
@@ -409,7 +426,7 @@ async def create_set(body: SetBody, request: Request):
     return {"ok": True, "id": sid}
 
 
-@router.put("/api/cardframes/sets/{set_id}")
+@router.put("/api/itemframes/sets/{set_id}")
 async def update_set(set_id: str, body: SetBody, request: Request):
     _need_admin(request)
     c = _conn()
@@ -434,7 +451,7 @@ async def update_set(set_id: str, body: SetBody, request: Request):
     return {"ok": True, "id": set_id}
 
 
-@router.delete("/api/cardframes/sets/{set_id}")
+@router.delete("/api/itemframes/sets/{set_id}")
 async def delete_set(set_id: str, request: Request):
     _need_admin(request)
     c = _conn()
@@ -448,7 +465,7 @@ class ReorderBody(BaseModel):
     ids: list = []
 
 
-@router.post("/api/cardframes/reorder")
+@router.post("/api/itemframes/reorder")
 async def reorder_sets(body: ReorderBody, request: Request):
     _need_admin(request)
     c = _conn()
@@ -463,7 +480,7 @@ class DefaultBody(BaseModel):
     border_id: str = ""
 
 
-@router.post("/api/cardframes/default")
+@router.post("/api/itemframes/default")
 async def set_default(body: DefaultBody, request: Request):
     _need_admin(request)
     c = _conn()

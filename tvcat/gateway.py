@@ -265,6 +265,41 @@ try:
 except Exception as e:
     print(f" [LOG] No se pudo configurar log a disco: {e}", flush=True)
 
+try:
+    # Silenciar ruido huérfano de pyrofork: revive sesiones muertas con
+    # create_task(restart()) y el traceback 'closed database' es esperado tras
+    # un reconnect (el pool ya descartó esas sesiones). Filtro estrecho: solo
+    # ese caso, el resto de errores sigue visible.
+    import asyncio as _aio_log
+
+    def _tvcat_exc_handler(loop, context):
+        try:
+            _exc = context.get("exception")
+            _msg = str(context.get("message", ""))
+            _task = context.get("task")
+            _coro = ""
+            try:
+                _coro = str(getattr(getattr(_task, "_coro", None), "__qualname__", ""))
+            except Exception:
+                pass
+            if ("Task exception was never retrieved" in _msg
+                    and "Session.restart" in _coro
+                    and _exc is not None
+                    and "closed database" in str(_exc)):
+                return
+        except Exception:
+            pass
+        try:
+            loop.default_exception_handler(context)
+        except Exception:
+            pass
+    try:
+        _aio_log.get_event_loop().set_exception_handler(_tvcat_exc_handler)
+    except RuntimeError:
+        pass  # sin loop aún; uvicorn crea el suyo (ruido menor en arranque)
+except Exception:
+    pass
+
 # --- printLog centralizado: colapso in-place en consola, definitivo en fichero ---
 _HLS_LOG_LAST = None
 _HLS_LOG_COUNT = 0
@@ -360,6 +395,25 @@ __version__ = "2.0.0"
 
 from services.translate_service import xTranslate, load_translations
 load_translations()
+
+# Canonicalizar servicios: `services.X` y `tvcat.services.X` deben ser el MISMO
+# objeto (ambas raíces están en sys.path y Python los duplicaría: singletons,
+# pools de clientes y gates partidos — p. ej. el worker del servicio central
+# arrancaba en una instancia y los plugins encolaban en la otra, colgando todo).
+# Se importan canónicamente TODOS los módulos usados vía `tvcat.services.*` en
+# el repo y se aliasan ANTES de cargar plugins.
+import services.auth_service  # noqa: F401
+import services.catalog_service  # noqa: F401
+import services.text_norm  # noqa: F401
+import services.userbot_service  # noqa: F401
+import services.telegram_service  # noqa: F401
+import services.file_transfer  # noqa: F401
+import services.fast_download  # noqa: F401
+import services.download_service  # noqa: F401
+for _modname in [m for m in list(sys.modules)
+                 if m == "services" or m.startswith("services.")]:
+    sys.modules.setdefault("tvcat." + _modname, sys.modules[_modname])
+del _modname
 
 from plugin_loader import PluginLoader
 _plugin_loader = PluginLoader(plugins_dir=PLUGINS_DIR)
@@ -1369,6 +1423,21 @@ def _filter_items(items, search: str = "", fields: Optional[str] = None, year_fr
         filtered.append(it)
     return filtered
 
+def _enrich_has_comment(items):
+    """Añade has_comment (0/1) a listas de items que no pasan por
+    get_random_items (favoritos, continue, completed). Una sola query."""
+    if not items:
+        return items
+    try:
+        from services.catalog_service import get_has_comment_map
+        cmap = get_has_comment_map([it.get("item_id") for it in items if isinstance(it, dict)])
+        for it in items:
+            if isinstance(it, dict):
+                it["has_comment"] = 1 if cmap.get(str(it.get("item_id"))) else 0
+    except Exception:
+        pass
+    return items
+
 @app.get(api_url("/api/catalog/continue"))
 async def catalog_continue(request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = ""):
     from services.favorites_service import get_continue_watching
@@ -1380,6 +1449,7 @@ async def catalog_continue(request: Request, search: str = "", limit: int = 200,
     # limitar tras filtrar si se pidió search (mantener límite)
     if search or year_from or year_to or genres:
         items = items[:min(limit,200)]
+    _enrich_has_comment(items)
     return {"items": items, "count": len(items)}
 
 @app.get(api_url("/api/catalog/completed"))
@@ -1392,6 +1462,7 @@ async def catalog_completed(request: Request, search: str = "", limit: int = 200
     items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
     if search or year_from or year_to or genres:
         items = items[:min(limit,200)]
+    _enrich_has_comment(items)
     return {"items": items, "count": len(items)}
 
 @app.get(api_url("/api/catalog/visibility"))
@@ -1443,11 +1514,30 @@ async def get_catalog(category: str, request: Request, search: str = "", limit: 
             items = [dict(r) for r in fav_rows]
             for item in items:
                 item["fav"] = True
+            # Colecciones locales (COL-) en favoritos: fusionar (no están en unified).
+            try:
+                _fav_ids = {str(_r["item_id"]) for _r in conn.execute(
+                    "SELECT item_id FROM tvcat_favorites WHERE profile_id=?", (profile_id,)).fetchall()}
+                from services.catalog_service import list_local_collections as _llc
+                for _loc in _llc(_conn=conn):
+                    if str(_loc.get("item_id") or "") not in _fav_ids:
+                        continue
+                    items.append({
+                        "item_id": _loc.get("item_id"), "title": _loc.get("name") or "Colección",
+                        "category": "", "subcategory": "", "source": "collections_local",
+                        "description": _loc.get("description") or "", "year": "", "rating": 0,
+                        "cover_url": "/api/cover/%s" % _loc.get("item_id"),
+                        "is_collection": 1, "local": 1, "fav": True,
+                    })
+                items.sort(key=lambda _i: str(_i.get("title") or ""))
+            except Exception:
+                pass
             conn.close()
             # aplicar filtros de catálogo (si hay búsqueda/filtros activos)
             if search or yf is not None or yt is not None or exclude_genres:
                 items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
                 items = items[:min(limit,200)]
+            _enrich_has_comment(items)
             return {"items": items, "count": len(items)}
         except Exception as e:
             try: conn.close()
@@ -1563,14 +1653,17 @@ async def get_genres():
     return {"genres": sorted(raw), "terms": ordered}
 
 def _sort_variants(variants: list) -> list:
-    """Ordena variantes: primero temporadas numeradas, luego especiales/OVAs."""
+    """Ordena variantes: primero por rorder si existe, luego por season_number/título."""
     def _weight(v):
+        ro = v.get("rorder")
+        if ro is not None:
+            return (0, ro, 0, v.get("season_number") or 0, v.get("title") or "")
         label = (v.get("season_display") or v.get("title") or "").lower()
         is_special = 1 if any(x in label for x in ("ova","pelicula","movie","especial","special")) else 0
         import re
         m = re.search(r"(\d+)", label)
         num = int(m.group(1)) if m else (999 if is_special else 500)
-        return (is_special, num, label)
+        return (1, num, is_special, v.get("season_number") or 0, v.get("title") or "")
     seen = set()
     result = []
     for v in variants:
@@ -1645,7 +1738,7 @@ def _get_variants_and_rep(conn, item_id: str):
     if not gtf:
         return [], item_id
     rows = conn.execute(
-        "SELECT id, item_id, title, group_title FROM unified_catalog WHERE group_title_flat=? AND COALESCE(subcategory,'')=? ORDER BY id ASC",
+        "SELECT id, item_id, title, group_title, rorder FROM unified_catalog WHERE group_title_flat=? AND COALESCE(subcategory,'')=? ORDER BY id ASC",
         (gtf, subcat)
     ).fetchall()
     variants = []
@@ -1654,7 +1747,7 @@ def _get_variants_and_rep(conn, item_id: str):
     for r in rows:
         vid = r["item_id"]
         sd = _variant_label(r["title"], r["group_title"] or "")
-        v = {"id": vid, "title": r["title"], "season_display": sd}
+        v = {"id": vid, "title": r["title"], "season_display": sd, "rorder": r["rorder"]}
         variants.append(v)
         if r["id"] < (min_id or float('inf')):
             min_id = r["id"]
@@ -1706,7 +1799,17 @@ async def _do_stream(ubot, chat_entity, msg_id, range_header=None, tag="STREAM",
         if hasattr(msg, 'document') and msg.document:
             doc = msg.document
             print(f" [{tag}] Fuente: msg.document (Pyrogram)")
-        elif hasattr(msg, 'media') and msg.media:
+        else:
+            # Pyrogram pone vídeos/audios en msg.video/msg.audio (no en document)
+            try:
+                from services.userbot_service import pyro_media as _pyro_media
+                _pm = _pyro_media(msg)
+                if _pm is not None and _pm is not getattr(msg, 'document', None):
+                    doc = _pm
+                    print(f" [{tag}] Fuente: msg.{type(_pm).__name__} (Pyrogram)")
+            except Exception:
+                pass
+        if doc is None and hasattr(msg, 'media') and msg.media:
             if hasattr(msg.media, 'document') and msg.media.document:
                 doc = msg.media.document
                 print(f" [{tag}] Fuente: msg.media.document")
@@ -2783,12 +2886,20 @@ def _hls_patch_stco(moov_data: bytes, delta: int) -> bytes:
 
 
 def _hls_is_mp4(msg):
-    """Detecta si el documento es MP4/MOV (soporta FakeMP4). Si no, usará remux genérico."""
+    """Detecta si el documento es MP4/MOV (soporta FakeMP4). Si no, usará remux genérico.
+    Vale para mensajes Telethon y Pyrogram (vídeo en msg.video)."""
     try:
+        try:
+            from services.userbot_service import pyro_media as _pyro_media0
+            _pm0 = _pyro_media0(msg)
+        except Exception:
+            _pm0 = None
         media = getattr(msg, 'media', None)
         doc = getattr(media, 'document', None) if media else None
         if not doc:
             doc = getattr(msg, 'document', None)
+        if _pm0 is not None and doc is None:
+            doc = _pm0
         if not doc:
             return True
         mime = getattr(doc, 'mime_type', '') or ''
@@ -2944,6 +3055,12 @@ async def _hls_ensure_header_cache(ubot, msg, dc_id, file_size, episode_key):
         _doc2 = getattr(_media2, 'document', None) if _media2 else None
         if not _doc2:
             _doc2 = getattr(msg, 'document', None)
+        if _doc2 is None:
+            try:
+                from services.userbot_service import pyro_media as _pyro_media_h
+                _doc2 = _pyro_media_h(msg)
+            except Exception:
+                _doc2 = None
         if _doc2:
             _cont = getattr(_doc2, 'mime_type', '') or ''
             if not _cont:
@@ -3118,57 +3235,33 @@ async def _hls_ensure_header_cache(ubot, msg, dc_id, file_size, episode_key):
 
 
 async def _hls_download_bytes_parallel(ubot, msg, offset, length, threads):
-    """Descarga [offset, offset+length) a bytes con UNA sola conexión (secuencial).
-    Se usa para el moov: la multi-conexión dispara flood 429 de Telegram."""
-    from telethon.tl.functions.upload import GetFileRequest
-    from telethon.tl.types import InputDocumentFileLocation
-    client = getattr(ubot, '_client', ubot)
-    media = getattr(msg, 'media', None)
-    doc = getattr(media, 'document', None) if media else None
-    if not doc:
-        doc = getattr(msg, 'document', None)
-    if not doc:
+    """Descarga [offset, offset+length) a bytes vía servicio central
+    (file_transfer.download_range). Sin librerías directas: el central
+    despacha Telethon/Pyrofork según el cliente. Se usa para el moov."""
+    try:
+        from services import file_transfer as _ft
+        chat_id, mid = None, getattr(msg, 'id', None)
+        _chat = getattr(msg, 'chat', None)
+        if _chat is not None and getattr(_chat, 'id', None) is not None:
+            chat_id = int(_chat.id)
+        else:
+            _peer = getattr(msg, 'peer_id', None)
+            if _peer is not None:
+                _cid = getattr(_peer, 'channel_id', None) or getattr(_peer, 'chat_id', None)
+                if _cid is not None:
+                    chat_id = int("-100" + str(_cid)) if int(_cid) > 0 else int(_cid)
+            if chat_id is None:
+                chat_id = getattr(msg, 'chat_id', None)
+        if not chat_id or not mid:
+            return b""
+        client = getattr(ubot, '_client', ubot)
+        ctype = getattr(ubot, '_type', None)
+        data = await _ft.download_range(client, int(chat_id), int(mid), int(offset), int(length),
+                                        client_type=ctype, pre_msg=msg)
+        return bytes(data or b"")
+    except Exception as e:
+        print(f" [HLS-DL] bytes_parallel vía central falló: {e}", flush=True)
         return b""
-    CHUNK = 512 * 1024
-    # GetFileRequest exige offset divisible por 1024 y limit divisible por 4096.
-    # Alineamos el offset hacia abajo a múltiplo de CHUNK y descargamos un poco
-    # más, para luego recortar el prefijo sobrante y devolver EXACTAMENTE
-    # [offset, offset+length) como espera el caller.
-    aligned_offset = (offset // CHUNK) * CHUNK
-    skip = offset - aligned_offset
-    padded_len = ((skip + length + CHUNK - 1) // CHUNK) * CHUNK
-    location = InputDocumentFileLocation(
-        id=doc.id, access_hash=doc.access_hash,
-        file_reference=doc.file_reference, thumb_size=''
-    )
-    total_chunks = (padded_len + CHUNK - 1) // CHUNK
-    buf = bytearray(padded_len)
-    REQ_TIMEOUT = 90
-
-    for i in range(total_chunks):
-        abs_off = aligned_offset + i * CHUNK
-        data = None
-        for attempt in range(1, 4):
-            try:
-                req = GetFileRequest(location=location, offset=abs_off, limit=CHUNK)
-                result = await asyncio.wait_for(client(req), timeout=REQ_TIMEOUT)
-                data = bytes(result.bytes)
-                if data:
-                    break
-            except asyncio.TimeoutError:
-                data = None
-            except Exception:
-                data = None
-            if attempt < 3:
-                await asyncio.sleep(0.5 * attempt)
-        if data is None:
-            print(f" [HLS-DLB] chunk {i} (off={abs_off}) falló tras reintentos")
-            continue
-        start = i * CHUNK
-        buf[start:start + len(data)] = data
-
-    return bytes(buf[skip:skip + length])
-
 async def _hls_resolve_episode(episode_key):
     """Resuelve episodio por episode_key (channelid_msgid) → (msg, chat_entity, file_size, dc_id)."""
     if episode_key in _HLS_SEG_CACHE and _HLS_SEG_CACHE[episode_key].get("msg_obj"):
@@ -3239,9 +3332,12 @@ async def _hls_resolve_episode(episode_key):
     file_size = 0
     dc_id = None
     doc = None
-    if hasattr(msg, 'document') and msg.document:
-        doc = msg.document
-    elif hasattr(msg, 'media') and msg.media:
+    try:
+        from services.userbot_service import pyro_media as _pyro_media2
+        doc = _pyro_media2(msg)
+    except Exception:
+        doc = None
+    if doc is None and hasattr(msg, 'media') and msg.media:
         for attr_name in ['document', 'video']:
             candidate = getattr(msg.media, attr_name, None)
             if candidate and hasattr(candidate, 'size'):
@@ -3270,7 +3366,22 @@ async def _hls_resolve_episode(episode_key):
                     print(f" [HLS] doc attr[{i}]: {type(attr).__name__} = {attr}")
             except Exception as e:
                 print(f" [HLS] doc log error: {e}")
-        # Extracción robusta: solo desde document.attributes (único fiable)
+        # Extracción robusta: atributos Telethon (document.attributes) o
+        # duración directa de Pyrogram (video.duration).
+        try:
+            _dur = getattr(msg.document, 'duration', 0) if getattr(msg, 'document', None) else 0
+        except Exception:
+            _dur = 0
+        if not _dur:
+            try:
+                from services.userbot_service import pyro_media as _pyro_media3
+                _pm3 = _pyro_media3(msg)
+                _dur = getattr(_pm3, 'duration', 0) if _pm3 is not None else 0
+            except Exception:
+                _dur = 0
+        if _dur:
+            duration = float(_dur)
+            print(f" [HLS] Duración desde Telegram: {duration}s")
         if msg.document and getattr(msg.document,'attributes',None):
             for attr in (msg.document.attributes or []):
                 try:
@@ -4414,11 +4525,11 @@ async def hls_leave_get(episode_key: str):
 @app.post(api_url("/api/hls_seq/{episode_key}/leave"))
 @app.get(api_url("/api/hls_seq/{episode_key}/leave"))
 async def hls_seq_leave(episode_key: str):
-    """SEQ: pausar descarga central al salir."""
+    """SEQ: cancelar descarga central al salir (reanuda al entrar)."""
     try:
-        from services.download_service import _jobs
-        _jobs.pop(episode_key, None)
-    except:
+        from services import download_service as _ds
+        _ds.cancel(episode_key)
+    except Exception:
         pass
     state = _HLS_SPARSE.get(episode_key)
     if state is not None:
@@ -4545,10 +4656,21 @@ async def hls_subs_embed_playlist(episode_key: str, idx: int):
     info = _HLS_SEG_CACHE.get(episode_key, {})
     duration = info.get("duration", 0)
     if duration <= 0:
-        msg, _, _, _ = await _hls_resolve_episode(episode_key)
+        msg, _, file_size, _ = await _hls_resolve_episode(episode_key)
         if not msg:
             raise HTTPException(404, "Episodio no encontrado")
-        duration = 3600
+        try:
+            for attr in getattr(getattr(msg, 'document', None), 'attributes', []) or []:
+                d = getattr(attr, 'duration', None)
+                if d:
+                    duration = float(d)
+                    break
+        except Exception:
+            pass
+        if duration <= 0 and file_size > 0:
+            duration = file_size / (2.56 * 1024 * 1024 / 8)
+        if duration <= 0:
+            duration = 3600
     total = max(1, int(duration / _HLS_SEG_DURATION) + 1)
     lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{_HLS_SEG_DURATION}", "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"]
     for i in range(total):
@@ -4574,7 +4696,15 @@ async def hls_subs_embed_segment(episode_key: str, idx: int, n: int):
     if not ffmpeg:
         raise HTTPException(500, "ffmpeg no encontrado")
     sparse_path = _HLS_SPARSE.get(episode_key, {}).get("path")
+    _via = "registry"
     if not sparse_path or not os.path.isfile(sparse_path):
+        # Fallback SEQ: download_service escribe el sparse sin registro clásico.
+        _seq_path = _hls_sparse_path(episode_key)
+        if os.path.isfile(_seq_path):
+            sparse_path = _seq_path
+            _via = "seq-fallback"
+    if not sparse_path or not os.path.isfile(sparse_path):
+        print(f" [HLS-SUBS] {episode_key} idx={idx} seg={n}: sin sparse (503)")
         raise HTTPException(503, "Cache no disponible aún")
 
     # Cache del WebVTT completo por (episode_key, idx) para no re-extraer en cada segmento
@@ -4587,9 +4717,43 @@ async def hls_subs_embed_segment(episode_key: str, idx: int, n: int):
         stream_idx = subs[idx].get("stream_index", idx)
     vtt_full = _vtt_cache.get(idx)
     _sparse_size = os.path.getsize(sparse_path) if os.path.isfile(sparse_path) else 0
+    # Bytes REALMENTE descargados (el tamaño lógico está pre-asignado y no cambia;
+    # medir crecimiento con getsize congela las re-extracciones para siempre).
+    _dl_bytes = 0
+    try:
+        from services.download_service import get_status as _ds_status
+        _ds = _ds_status(episode_key) or {}
+        _dl_bytes = int(_ds.get("bytes_done", 0) or 0)
+    except Exception:
+        _dl_bytes = 0
+    if _dl_bytes <= 0:
+        try:
+            _bm = _HLS_SPARSE.get(episode_key, {}).get("bitmap") or set()
+            _dl_bytes = len(_bm) * _HLS_BLOCK_SIZE
+        except Exception:
+            _dl_bytes = 0
+    if _dl_bytes <= 0:
+        _dl_bytes = _sparse_size  # último recurso: comportamiento anterior
     _prev_sparse_size = _vtt_cache.get(f"_sparse_size_{idx}", 0)
-    # Re-extraer si: no hay cache, o estaba vacío y el sparse ha crecido (datos nuevos)
-    if vtt_full is None or (vtt_full == "" and _sparse_size > _prev_sparse_size + 1024*1024):
+    # Cobertura del cache: fin máximo de cue conocido (ffmpeg sobre sparse con huecos
+    # extrae un VTT truncado; si se cachea tal cual, los segmentos tardíos salen vacíos).
+    _cached_max = 0
+    try:
+        if vtt_full:
+            for _cs, _ce, _ct in _parse_vtt_cues(vtt_full):
+                if _ce > _cached_max:
+                    _cached_max = _ce
+    except Exception:
+        pass
+    _grown = _dl_bytes > _prev_sparse_size + 1024*1024
+    if file_size > 0 and _prev_sparse_size >= file_size and (not _cached_max or seg_end > _cached_max):
+        # Escala antigua guardada (tamaño lógico): recalibrar para no bloquear re-extracciones.
+        _prev_sparse_size = 0
+        _grown = _dl_bytes > 1024*1024
+    if vtt_full is not None and _cached_max and seg_end > _cached_max and _grown:
+        print(f" [HLS-SUBS] {episode_key} idx={idx} cobertura {int(_cached_max)}s < seg {int(seg_start)}-{int(seg_end)}s, re-extrayendo")
+    # Re-extraer si: no hay cache, estaba vacío y creció, o no cubre el segmento y creció.
+    if vtt_full is None or (not _cached_max and _grown) or (_cached_max and seg_end > _cached_max and _grown):
         import tempfile
         fd, tmp_vtt = tempfile.mkstemp(suffix=".vtt")
         os.close(fd)
@@ -4597,13 +4761,16 @@ async def hls_subs_embed_segment(episode_key: str, idx: int, n: int):
         cmd = [ffmpeg, "-y", "-i", sparse_path, "-map", f"0:{stream_idx}", "-f", "webvtt", tmp_vtt]
         try:
             proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            await proc.communicate()
+            _, _stderr = await proc.communicate()
             if os.path.isfile(tmp_vtt) and os.path.getsize(tmp_vtt) > 0:
                 vtt_full = open(tmp_vtt, 'r', encoding='utf-8', errors='replace').read()
             else:
                 vtt_full = ""
-        except Exception:
+                _err = (_stderr.decode(errors="replace")[-300:] if _stderr else "")
+                print(f" [HLS-SUBS] {episode_key} idx={idx} stream={stream_idx} via={_via} sparse={_sparse_size}B VTT vacío rc={proc.returncode} err={_err}")
+        except Exception as e:
             vtt_full = ""
+            print(f" [HLS-SUBS] {episode_key} idx={idx} excepción: {e}")
         finally:
             try: os.remove(tmp_vtt)
             except: pass
@@ -4613,7 +4780,7 @@ async def hls_subs_embed_segment(episode_key: str, idx: int, n: int):
         else:
             # No cachear vacío: reintentar en la próxima petición si el sparse creció
             _vtt_cache.pop(idx, None)
-        _vtt_cache[f"_sparse_size_{idx}"] = _sparse_size
+        _vtt_cache[f"_sparse_size_{idx}"] = _dl_bytes
 
     cues = _parse_vtt_cues(vtt_full)
     # Recortar al intervalo y re-anclar a 0 con X-TIMESTAMP-MAP para sincronía correcta
@@ -4754,8 +4921,26 @@ async def _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, prefer_bl
     # Si ya está descargando pero el usuario busca otra zona, re-priorizar en caliente
     if st.get("status") == "downloading" and prefer_block is not None:
         try:
-            set_prefer(episode_key, prefer_block)
-            print(f" [HLS-SEQ] Re-priorizando bloque {prefer_block} para {episode_key}")
+            from services.download_service import reprioritize
+            cur = st.get("prefer_block", None)
+            # Solo relanzar si el seek es lejos (>8MB) y la zona pedida no está:
+            # si no, el worker en curso la alcanzará solo.
+            _far = (cur is None) or (abs(int(prefer_block) - int(cur)) > 16)
+            _missing = True
+            try:
+                if os.path.isfile(sparse) and file_size > 0:
+                    _b0 = max(0, min(int(prefer_block) * 512 * 1024, file_size - 64))
+                    with open(sparse, 'rb') as _sf:
+                        _sf.seek(_b0)
+                        _missing = (_sf.read(64) == b'\x00' * 64)
+            except Exception:
+                _missing = True
+            if _far and _missing:
+                set_prefer(episode_key, prefer_block)
+                await reprioritize(episode_key, file_size, msg, dc_id, prefer_block=prefer_block)
+            else:
+                set_prefer(episode_key, prefer_block)
+                print(f" [HLS-SEQ] Re-priorizando bloque {prefer_block} para {episode_key}")
         except Exception:
             pass
         return
@@ -4769,11 +4954,59 @@ async def _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, prefer_bl
             print(f" [HLS-SEQ] No se pudo iniciar descarga: {e}")
 
 
+async def _hls_ensure_tail(episode_key, sparse, file_size, msg, dc_id, nbytes, label):
+    """Descarga los últimos `nbytes` al sparse (Cues MKV o moov MP4 al final).
+    Devuelve True si la cola quedó disponible."""
+    try:
+        from services.userbot_service import get_active_client
+        # Mismo cliente que el mensaje (global): si msg es Pyrogram y se
+        # fuerza Telethon, falla con "Cannot cast Message to InputFileLocation".
+        ubot2 = await get_active_client()
+        if not ubot2:
+            return False
+        # Si ya está el rango COMPLETO pedido, no re-descargar (mirar el inicio
+        # del rango, no solo los últimos 64KB: otro fetch menor puede haber
+        # rellenado la cola y faltar MB intermedios).
+        try:
+            with open(sparse, 'rb') as _cf:
+                _cf.seek(max(0, file_size - nbytes))
+                if _cf.read(65536) != b'\x00' * 65536:
+                    return True
+        except Exception:
+            pass
+        tmp = await _hls_download_range(ubot2, msg, dc_id, max(0, file_size - nbytes), nbytes)
+        if tmp and os.path.isfile(tmp):
+            with open(tmp, 'rb') as tf:
+                tail_data = tf.read()
+            tail_start = max(0, file_size - len(tail_data))
+            with open(sparse, 'r+b') as sf:
+                sf.seek(tail_start)
+                sf.write(tail_data)
+            try:
+                st = _hls_sparse_load(episode_key, file_size)
+                for off in range(tail_start, file_size, 512*1024):
+                    st["bitmap"].add(off // (512*1024))
+                _hls_cache_save(episode_key, sparse, file_size, st["total_blocks"], _hls_bitmap_serialize(st["bitmap"]))
+            except Exception:
+                pass
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            print(f" [HLS-SEQ] {label} descargados ({len(tail_data)} bytes) desde offset {tail_start}")
+            return True
+    except Exception as e:
+        print(f" [HLS-SEQ] No se pudo asegurar {label}: {e}")
+    return False
+
+
 @app.get(api_url("/api/hls_seq/{episode_key}/playlist.m3u8"))
-async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0):
+async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0, audio: int = 0):
     """Playlist HLS SEQ: segmentos de 6s desde `start` segundos.
     Usa el sparse descargado (download_service). No espera fichero completo:
-    genera segmentos de la zona ya descargada."""
+    genera segmentos de la zona ya descargada.
+    `audio` viaja a la variante media para que el cambio de pista recargue el
+    MASTER (conserva los grupos SUBTITLES) en vez de la media (que los pierde)."""
     from services import stream_packager
     from services.download_service import get_status
 
@@ -4793,35 +5026,21 @@ async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0
         cues = fakemkv.parse_mkv_cues_from_file(sparse)
         if not cues:
             print(f" [HLS-SEQ] Cues no disponibles, descargando final 2MB para {episode_key}")
-            # Descargar los últimos 2MB (donde están Cues en 2706959249)
-            from services.userbot_service import get_active_client
-            ubot2 = await get_active_client("telethon")
-            if ubot2:
-                client2 = getattr(ubot2, '_client', ubot2)
-                # Usar el mismo patrón que _hls_ensure_header_cache pero para el final
-                tmp = await _hls_download_range(ubot2, msg, dc_id, max(0, file_size - 2*1024*1024), 2*1024*1024)
-                if tmp and os.path.isfile(tmp):
-                    with open(tmp, 'rb') as tf:
-                        tail_data = tf.read()
-                    tail_start = max(0, file_size - len(tail_data))
-                    with open(sparse, 'r+b') as sf:
-                        sf.seek(tail_start)
-                        sf.write(tail_data)
-                    # Actualizar bitmap para los bloques del final
-                    try:
-                        st = _hls_sparse_load(episode_key, file_size)
-                        for off in range(tail_start, file_size, 512*1024):
-                            st["bitmap"].add(off // (512*1024))
-                        _hls_cache_save(episode_key, sparse, file_size, st["total_blocks"], _hls_bitmap_serialize(st["bitmap"]))
-                    except Exception:
-                        pass
-                    try:
-                        os.remove(tmp)
-                    except:
-                        pass
-                    print(f" [HLS-SEQ] Cues descargados ({len(tail_data)} bytes) desde offset {tail_start}")
+            await _hls_ensure_tail(episode_key, sparse, file_size, msg, dc_id, 2*1024*1024, "Cues")
     except Exception as e:
         print(f" [HLS-SEQ] No se pudo asegurar Cues: {e}")
+
+    # Para MP4 con moov al FINAL: asegurarlo (últimos 5MB) o ffmpeg no parsea.
+    # Los TGHirayi salen con faststart (moov delante), pero los de origen no.
+    try:
+        if os.path.isfile(sparse) and file_size > 0:
+            with open(sparse, 'rb') as _hf:
+                _head = _hf.read(2*1024*1024)
+            if b'ftyp' in _head[:64] and b'moov' not in _head:
+                print(f" [HLS-SEQ] MP4 sin moov inicial para {episode_key}, descargando final 5MB")
+                await _hls_ensure_tail(episode_key, sparse, file_size, msg, dc_id, 5*1024*1024, "moov")
+    except Exception as e:
+        print(f" [HLS-SEQ] No se pudo asegurar moov: {e}")
 
     # Duración: desde Telegram o ffprobe
     duration = 0
@@ -4872,7 +5091,8 @@ async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0
     if has_subs:
         extra += ',SUBTITLES="subs"'
     lines.append(f'#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS="avc1.64001f,mp4a.40.2"{extra}')
-    lines.append(f"/api/hls_seq/{episode_key}/media.m3u8?start={start}")
+    audio_q = max(0, int(audio or 0))
+    lines.append(f"/api/hls_seq/{episode_key}/media.m3u8?audio={audio_q}&start={start}")
 
     from fastapi.responses import Response
     return Response(content="\n".join(lines), media_type="application/vnd.apple.mpegurl",
@@ -4975,6 +5195,39 @@ async def hls_seq_segment(episode_key: str, n: int, audio: int = 0):
             raise HTTPException(503, "Zona no descargada aún")
     # Sin Cues (descarga incompleta), dejamos que ffmpeg lo intente directamente
     # Si la zona inicial no está descargada, ffmpeg fallará y se retornará 503/500 y hls.js reintentará
+    # Sonda rápida: si la zona estimada del segmento está vacía (hueco sparse) y la
+    # descarga no terminó, 503 directo sin quemar ffmpeg (vacío = "Output file is empty").
+    if cluster_off is None and duration > 0 and file_size > 0:
+        try:
+            from services.download_service import get_status as _ds_status
+            _st = _ds_status(episode_key)
+            if _st.get("status") != "completed":
+                _e0 = int((target_time / duration) * file_size)
+                _e0 = max(0, min(_e0, file_size - 16))
+                with open(sparse, 'rb') as _pf:
+                    _pf.seek(_e0)
+                    if _pf.read(16) == b'\x00' * 16:
+                        raise HTTPException(503, "Zona no descargada aún")
+                # MP4 con moov al final: sin cola no hay parseo aunque la zona esté.
+                if target_time < 60:
+                    with open(sparse, 'rb') as _pf:
+                        _head = _pf.read(2*1024*1024)
+                    if b'ftyp' in _head[:64] and b'moov' not in _head:
+                        with open(sparse, 'rb') as _pf:
+                            _pf.seek(max(0, file_size - 65536))
+                            if _pf.read(65536) == b'\x00' * 65536:
+                                # Traer la cola AHORA (la playlist solo lo hace una
+                                # vez; si falló o llegó tarde, el segmento la pide).
+                                await _hls_ensure_tail(episode_key, sparse, file_size,
+                                                       msg, dc_id, 5*1024*1024, "moov")
+                                with open(sparse, 'rb') as _pf2:
+                                    _pf2.seek(max(0, file_size - 65536))
+                                    if _pf2.read(65536) == b'\x00' * 65536:
+                                        raise HTTPException(503, "moov final no descargado aún")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
 
     # Rango [target_time, target_time+Δ]: Δ = ventana generosa (60s) para que
     # hls.js tenga margen, o hasta el próximo cue si es menor.
@@ -4987,6 +5240,11 @@ async def hls_seq_segment(episode_key: str, n: int, audio: int = 0):
     _audio_tracks = [t for t in _all_tracks if t.get("type") == "audio"]
     if _audio_tracks and audio_idx >= len(_audio_tracks):
         audio_idx = 0
+    # Si piden audio>0 sin tracks conocidos, NO generar con el audio por defecto
+    # (quedaría cacheado como _aN con contenido erróneo): 503 para que hls.js reintente.
+    if audio_idx > 0 and not _audio_tracks:
+        print(f" [HLS-SEQ] seg={n} audio={audio_idx} sin tracks conocidos, 503")
+        raise HTTPException(503, "Pistas de audio aún no resueltas")
     seg_suffix = f"_a{audio_idx}" if audio_idx else ""
 
     # Remux directo del sparse con ffmpeg -ss (funciona si la zona está contigua)
@@ -5163,10 +5421,668 @@ def _find_episode_by_id_in_plugin_dbs(episode_id):
     return None
 
 
+def _collection_user_filters(conn, user_id):
+    """Cláusulas de visibilidad de 3 niveles (§18) para colecciones: una colección
+    nunca muestra lo que el usuario no puede ver."""
+    where, params = [], []
+    if not user_id:
+        return where, params
+    try:
+        urow = conn.execute("SELECT role, profile_id FROM tvcat_users WHERE id=?", (user_id,)).fetchone()
+        role = urow["role"] if urow else "user"
+        profile_id = urow["profile_id"] if urow else None
+    except Exception:
+        role, profile_id = "user", None
+    try:
+        from services.catalog_service import _apply_content_layer
+        _apply_content_layer(conn, where, params, f"visibility_{user_id}")
+        _apply_content_layer(conn, where, params, f"available_{user_id}")
+        if role != "admin" and profile_id:
+            _apply_content_layer(conn, where, params, f"access_{profile_id}")
+    except Exception:
+        pass
+    return where, params
+
+
+def _mark_favs(conn, profile_id, items):
+    try:
+        fav_rows = conn.execute("SELECT item_id FROM tvcat_favorites WHERE profile_id=?", (profile_id,)).fetchall()
+        fav_set = {str(r["item_id"]) for r in fav_rows}
+        for it in items:
+            it["fav"] = str(it.get("item_id", "")) in fav_set
+    except Exception:
+        pass
+    return items
+
+
+def _collection_key(name, serial):
+    """Clave de conciliación local<->escaneado: (nombre normalizado, serial)."""
+    try:
+        from services.text_norm import normalize_title as _nt
+        return (_nt(name or ""), (serial or "").strip())
+    except Exception:
+        return ((name or "").strip().lower(), (serial or "").strip())
+
+
+def _build_collection_index(conn, user_id):
+    """Índice de candidatos (no-colecciones visibles) para matching."""
+    import json as _json
+    from services.text_norm import normalize_title
+    where, params = _collection_user_filters(conn, user_id)
+    where.append("COALESCE(is_collection,0) = 0")
+    cands = conn.execute(
+        "SELECT item_id, title, year, alt_titles, cover_url, category, subcategory,"
+        " telegram_link"
+        " FROM unified_catalog WHERE %s ORDER BY id DESC" % (" AND ".join(where) if where else "1=1"),
+        params).fetchall()
+    norm_index, lit_index = {}, {}
+    cand_list = []
+    for c in cands:
+        cd = dict(c)
+        cand_list.append(cd)
+        names = [cd.get("title") or ""]
+        try:
+            for a in (_json.loads(cd.get("alt_titles") or "[]") or []):
+                if a:
+                    names.append(str(a))
+        except Exception:
+            pass
+        for nm in names:
+            lit_index.setdefault(nm, []).append(cd)
+            nn = normalize_title(nm)
+            if nn:
+                norm_index.setdefault(nn, []).append(cd)
+    _extend_index_with_enricher(norm_index, lit_index, cand_list)
+    return norm_index, lit_index
+
+
+def _extend_index_with_enricher(norm_index, lit_index, candidates):
+    """Añade al índice los tags del enriquecedor (Original Title, Title ES /
+    Latam, Alt Titles) leídos en bloque de `enrich_details`, por
+    channelid_msgid. Complementa `alt_titles` (que ya los trae cuando el
+    enriquecido propagó variantes al guardar): cubre títulos enriquecidos
+    cuyo cover_text no trae —o ya no trae— esos tags."""
+    import json as _json
+    import os as _os
+    try:
+        from services.cache_keys import key_from_link
+        from services.text_norm import normalize_title
+    except Exception:
+        return
+    try:
+        from services.catalog_service import BASE_DIR as _bd
+        import sqlite3 as _sq
+        _pdb = _os.path.join(_bd, "plugins", "tvcat_enricher", "data", "tvcat.db")
+        if not _os.path.isfile(_pdb):
+            return
+        _pc = _sq.connect(_pdb, timeout=10)
+        _pc.row_factory = _sq.Row
+        _rows = _pc.execute("SELECT channelid_msgid, enrich_details FROM enriched_covers").fetchall()
+        _pc.close()
+    except Exception:
+        return
+    _by_key = {}
+    for _r in _rows:
+        try:
+            _d = dict(_r)
+            _det = _json.loads(_d.get("enrich_details") or "{}") or {}
+        except Exception:
+            continue
+        if not isinstance(_det, dict):
+            continue
+        _names = []
+        for _k in ("api_original_title", "api_title_es", "api_title_latam"):
+            _v = _det.get(_k) or ""
+            if isinstance(_v, str) and _v.strip():
+                _names.append(_v.strip())
+        _alts = _det.get("api_alt_titles")
+        if isinstance(_alts, str):
+            try:
+                _alts = _json.loads(_alts)
+            except Exception:
+                _alts = [_alts]
+        if isinstance(_alts, list):
+            for _a in _alts:
+                if _a and str(_a).strip():
+                    _names.append(str(_a).strip())
+        if _names and (_d.get("channelid_msgid") or ""):
+            _by_key[_d.get("channelid_msgid")] = _names
+    if not _by_key:
+        return
+    for _cd in candidates or []:
+        try:
+            _key = key_from_link(_cd.get("telegram_link") or "")
+        except Exception:
+            continue
+        _names = _by_key.get(_key)
+        if not _names:
+            continue
+        for _nm in _names:
+            lit_index.setdefault(_nm, []).append(_cd)
+            _nn = normalize_title(_nm)
+            if _nn:
+                norm_index.setdefault(_nn, []).append(_cd)
+
+
+def _title_year_hint(text):
+    """Año embebido en el propio título ('Vaiana (2016)' -> '2016').
+    El year de unified_catalog casi nunca está relleno; el título suele
+    traerlo entre paréntesis. None si no hay año extraíble."""
+    import re as _re
+    try:
+        m = _re.search(r"\((19|20)\d{2}\)", text or "")
+        if m:
+            return m.group(0)[1:-1]
+        m = _re.search(r"\b((?:19|20)\d{2})\b", text or "")
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def _cover_tag_year(text):
+    """Año del tag Year del texto del cover ('Year: 1966', 'Año: 1989').
+    None si no hay tag de año."""
+    import re as _re
+    try:
+        m = _re.search(r"(?im)^\s*(?:year|año|ano|release[\s_]*year)\s*[:=\-–]?\s*((?:19|20)\d{2})\b", text or "")
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def _cover_year_hint(link, memo):
+    """Año de los metadatos del propio cover (tags), sin llamadas externas:
+    1) cover_text de edición local (enriched_covers), 2) mensaje ancla en
+    caché (telegram_message_cache). memo es dict por resolución."""
+    import re as _re2
+    try:
+        _m = _re2.search(r"t\.me/c/(\d+)/(?:(\d+)/)?(\d+)", link or "")
+        if not _m:
+            return None
+        _key = "%s_%s" % (_m.group(1), _m.group(3))
+    except Exception:
+        return None
+    if _key in memo:
+        return memo[_key]
+    _yy = None
+    try:
+        from services.catalog_service import BASE_DIR as _bd
+        import os as _os, sqlite3 as _sq
+        _pdb = _os.path.join(_bd, "plugins", "tvcat_enricher", "data", "tvcat.db")
+        if _os.path.isfile(_pdb):
+            _pc = _sq.connect(_pdb, timeout=10)
+            try:
+                _r = _pc.execute("SELECT cover_text FROM enriched_covers WHERE channelid_msgid=?", (_key,)).fetchone()
+            finally:
+                _pc.close()
+            if _r and _r[0]:
+                _yy = _cover_tag_year(_r[0])
+    except Exception:
+        pass
+    if not _yy:
+        try:
+            from services.catalog_service import get_conn as _gcc
+            _cc = _gcc()
+            try:
+                _raw = _cc.execute(
+                    "SELECT message FROM telegram_message_cache WHERE channel_id=? AND msg_id=?",
+                    (_m.group(1), int(_m.group(3)))).fetchone()
+            finally:
+                _cc.close()
+            if _raw and _raw[0]:
+                import json as _js
+                _txt = (_js.loads(_raw[0]) or {}).get("message") or ""
+                _yy = _cover_tag_year(_txt)
+        except Exception:
+            pass
+    memo[_key] = _yy
+    return _yy
+
+
+def _match_collection_entries(entries, norm_index, lit_index):
+    """Resuelve entradas ordenadas contra el índice. Devuelve (items, missing).
+    Título: igualdad normalizada O el candidato contiene la entrada
+    ('Vaiana' casa con 'Vaiana (2016)') — el literal sigue siendo exacto.
+    Año: si la entrada lo trae, el candidato gana con año exacto (columna o
+    embebido en su título); si el candidato no tiene año en ningún sitio se
+    acepta por título (leniente); si lo tiene y difiere, se descarta.
+    Desempate: con entrada con año y mejor leniente, se revisan los metadatos
+    del propio cover (tag Year, edición local o mensaje ancla en caché).
+    Sin duplicados: un item ya añadido no se reutiliza en otra entrada."""
+    from services.text_norm import normalize_title
+
+    def _score(cd):
+        cy = str(cd.get("year") or "").strip()[:4]
+        if not cy:
+            cy = _title_year_hint(cd.get("title") or "")
+        if ey:
+            if cy and cy == ey:
+                return 2
+            if cy:
+                return -1
+            return 1
+        return 2 if not cy else 1
+
+    def _best(pool):
+        best, best_score = None, -1
+        for cd in pool or []:
+            s = _score(cd)
+            if s < 0:
+                continue
+            if s > best_score:
+                best, best_score = cd, s
+        return best, best_score
+
+    items, missing = [], []
+    used = set()
+    _cover_memo = {}
+    for pos, e in enumerate(entries or []):
+        et, ey = (e or {}).get("title", ""), (e or {}).get("year")
+        if ey:
+            ey = str(ey).strip()[:4]
+            if not ey.isdigit():
+                ey = None
+        hit = None
+        try:
+            raw_pool = []
+            if (e or {}).get("literal"):
+                raw_pool = list(lit_index.get(et, []) or [])
+            else:
+                net = normalize_title(et)
+                for cd in (norm_index.get(net, []) or []):
+                    if cd not in raw_pool:
+                        raw_pool.append(cd)
+            pool = [cd for cd in raw_pool if cd.get("item_id") not in used]
+            best, best_score = _best(pool)
+            if not (e or {}).get("literal"):
+                # Sin confirmación exacta (o sin candidatos): el candidato
+                # puede contener la entrada ('Vaiana' en 'Vaiana (2016)').
+                if best is None or (ey and best_score < 2):
+                    if net:
+                        for _k, _lst in (norm_index or {}).items():
+                            if _k != net and net in _k:
+                                for _cd in (_lst or []):
+                                    if _cd not in raw_pool:
+                                        raw_pool.append(_cd)
+                                        if _cd.get("item_id") not in used and _cd not in pool:
+                                            pool.append(_cd)
+                    best, best_score = _best(pool)
+            # Desempate por metadatos del cover: la entrada trae año y el
+            # mejor es leniente (candidatos sin año) → Year del tag del cover.
+            if ey and best is not None and best_score == 1:
+                _resc = []
+                for cd in pool:
+                    s = _score(cd)
+                    if s < 0:
+                        continue
+                    if s == 1:
+                        _cyy = _cover_year_hint(cd.get("telegram_link") or "", _cover_memo)
+                        if _cyy:
+                            s = 2 if _cyy == ey else -1
+                            if s < 0:
+                                continue
+                    _resc.append((cd, s))
+                if _resc:
+                    _resc.sort(key=lambda x: x[1], reverse=True)
+                    best, best_score = _resc[0]
+                else:
+                    best, best_score = None, -1
+            # El año exacto ya está cogido por otra entrada → coger un resto
+            # sin mirar el año antes que dejar hueco.
+            if best is None and ey:
+                for cd in raw_pool:
+                    if cd.get("item_id") in used:
+                        _cy = str(cd.get("year") or "").strip()[:4] or _title_year_hint(cd.get("title") or "")
+                        if not _cy:
+                            _cy = _cover_year_hint(cd.get("telegram_link") or "", _cover_memo)
+                        if _cy and _cy == ey:
+                            for cd2 in pool:
+                                best, best_score = cd2, 0
+                                break
+                            break
+            hit = best
+        except Exception:
+            hit = None
+        if hit:
+            used.add(hit.get("item_id"))
+            items.append({
+                "item_id": hit.get("item_id"), "title": hit.get("title"),
+                "category": hit.get("category", ""), "subcategory": hit.get("subcategory", ""),
+                "year": hit.get("year", ""), "cover_url": hit.get("cover_url", ""),
+                "position": pos,
+            })
+        else:
+            missing.append(et)
+    return items, missing
+
+
+@app.get(api_url("/api/collections"))
+async def list_collections(request: Request, limit: int = 200, search: str = "", fields: str = "title"):
+    """Lista colecciones visibles: escaneadas + locales fusionadas.
+    Reglas 2026-09-09: (a) solo se muestra la que resuelve >=1 título;
+    (b) mismo (nombre, serial) en ambos lados => gana la más nueva
+    (fecha msg escaneado vs updated_at local).
+    `search` filtra como el resto de secciones (título/títulos
+    alternativos/descripción según `fields`, case-insensitive)."""
+    import json as _json
+    from services.catalog_service import get_conn
+    from services.auth_service import get_session
+    from services.text_norm import parse_collection_entries
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s:
+        raise HTTPException(401)
+    user_id = s.get("user_id")
+    conn = get_conn()
+    try:
+        norm_index, lit_index = _build_collection_index(conn, user_id)
+        winners = {}
+        # Escaneadas
+        try:
+            where, params = _collection_user_filters(conn, user_id)
+            where.append("COALESCE(is_collection,0) = 1")
+            rows = conn.execute(
+                "SELECT item_id, title, category, subcategory, source, description, year, rating,"
+                " cover_url, collection_raw, collection_name, collection_serial, collection_msg_date,"
+                " alt_titles"
+                " FROM unified_catalog WHERE %s ORDER BY title ASC LIMIT ?" % " AND ".join(where),
+                params + [min(limit, 200)]).fetchall()
+        except Exception:
+            rows = []
+        # Colapso escaneado-vs-escaneado PRIMERO (misma identidad =>
+        # solo la más nueva; las re-subidas no duplican tarjeta).
+        newest = {}
+        for r in rows:
+            d = dict(r)
+            nm = (d.get("collection_name") or "").strip() or (d.get("title") or "")
+            key = _collection_key(nm, d.get("collection_serial") or "")
+            try:
+                date = int(d.get("collection_msg_date") or 0)
+            except Exception:
+                date = 0
+            prev = newest.get(key)
+            if prev is None or date > prev[0]:
+                newest[key] = (date, d)
+        for key, (date, d) in newest.items():
+            try:
+                entries = parse_collection_entries(d.get("collection_raw") or "")
+            except Exception:
+                entries = []
+            items, missing = _match_collection_entries(entries, norm_index, lit_index)
+            if not items:
+                continue
+            payload = dict(d)
+            payload["is_collection"] = 1
+            payload["local"] = 0
+            payload["resolved_count"] = len(items)
+            payload["missing_count"] = len(missing)
+            prev = winners.get(key)
+            if prev is None or date > prev[0]:
+                winners[key] = (date, payload)
+        # Locales (tabla CORE, globales)
+        try:
+            from services.catalog_service import list_local_collections
+            locals_rows = list_local_collections(_conn=conn)
+        except Exception:
+            locals_rows = []
+        for loc in locals_rows:
+            try:
+                entries = _json.loads(loc.get("entries_json") or "[]") or []
+            except Exception:
+                entries = []
+            items, missing = _match_collection_entries(entries, norm_index, lit_index)
+            if not items:
+                continue
+            key = _collection_key(loc.get("name") or "", loc.get("serial") or "")
+            try:
+                date = int(loc.get("updated_at") or 0)
+            except Exception:
+                date = 0
+            payload = {
+                "item_id": loc.get("item_id"), "title": loc.get("name") or "Colección",
+                "category": "", "subcategory": "", "source": "collections_local",
+                "description": loc.get("description") or "", "year": "", "rating": 0,
+                "cover_url": "/api/cover/%s" % loc.get("item_id"),
+                "collection_name": loc.get("name") or "",
+                "collection_serial": loc.get("serial") or "",
+                "is_collection": 1, "local": 1,
+                "resolved_count": len(items), "missing_count": len(missing),
+            }
+            prev = winners.get(key)
+            if prev is None or date > prev[0]:
+                winners[key] = (date, payload)
+        items = [p for _, p in sorted(winners.values(), key=lambda t: str(t[1].get("title") or ""))][:min(limit, 200)]
+        # Filtro de búsqueda (igual que el resto de secciones).
+        q = (search or "").strip().lower()
+        if q:
+            import json as _js2
+            wanted = {w.strip().lower() for w in str(fields or "title").split(",") if w.strip()} or {"title"}
+            kept = []
+            for it in items:
+                hay = []
+                if "title" in wanted:
+                    hay.append(str(it.get("title") or ""))
+                if "alt_titles" in wanted and not it.get("local"):
+                    try:
+                        for _a in (_js2.loads(it.get("alt_titles") or "[]") or []):
+                            if _a:
+                                hay.append(str(_a))
+                    except Exception:
+                        pass
+                if "description" in wanted:
+                    hay.append(str(it.get("description") or ""))
+                if any(q in (h or "").lower() for h in hay):
+                    kept.append(it)
+            items = kept
+        _mark_favs(conn, s.get("profile_id") or user_id, items)
+        return {"items": items, "count": len(items)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.get(api_url("/api/collection/resolve"))
+async def resolve_collection(item_id: str, request: Request):
+    """Resuelve una colección a sus títulos en orden. Omite los no encontrados
+    (missing_count). Busca en title + alt_titles, con año si se indicó.
+    Acepta escaneadas (unified_catalog) y locales (COL-, collections_local)."""
+    import json as _json
+    from services.catalog_service import get_conn
+    from services.auth_service import get_session
+    from services.text_norm import parse_collection_entries
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s:
+        raise HTTPException(401)
+    user_id = s.get("user_id")
+    conn = get_conn()
+    try:
+        if (item_id or "").startswith("COL-"):
+            from services.catalog_service import get_local_collection
+            loc = get_local_collection(item_id, _conn=conn)
+            if not loc:
+                raise HTTPException(404)
+            try:
+                entries = _json.loads(loc.get("entries_json") or "[]") or []
+            except Exception:
+                entries = []
+            col_title = loc.get("name") or "Colección"
+            col_desc = loc.get("description") or ""
+        else:
+            row = conn.execute("SELECT * FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+            if not row:
+                raise HTTPException(404)
+            col = dict(row)
+            if not int(col.get("is_collection", 0) or 0):
+                raise HTTPException(400, "No es una colección")
+            entries = parse_collection_entries(col.get("collection_raw") or "")
+            col_title = col.get("title", "")
+            # Descripción = caption del cover sin la línea `Title:`.
+            col_desc = col.get("description") or ""
+            try:
+                import re as _re2
+                _lines = col_desc.split("\n")
+                if _lines and _re2.match(r"(?i)^\s*(t[ií]tulo|titulo|title|nombre)\s*[:=\-]?", _lines[0].strip()):
+                    col_desc = "\n".join(_lines[1:]).strip()
+            except Exception:
+                pass
+        norm_index, lit_index = _build_collection_index(conn, user_id)
+        items, missing = _match_collection_entries(entries, norm_index, lit_index)
+        _mark_favs(conn, s.get("profile_id") or user_id, items)
+        return {"success": True,
+                "collection": {"item_id": item_id, "title": col_title,
+                               "description": col_desc, "cover_url": "/api/cover/%s" % item_id},
+                "items": items, "count": len(items),
+                "missing": missing, "missing_count": len(missing)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.get(api_url("/api/collections/containing"))
+async def collections_containing(item_id: str, request: Request):
+    """Colecciones (escaneadas + locales) que contienen al título: cada
+    colección se resuelve (mismo matching que al abrirla, título+año con `!`
+    literal) y se devuelve si el item resuelve dentro. Respeta visibilidad
+    §18. Orden por nombre, sin límite."""
+    import json as _json
+    from services.catalog_service import get_conn
+    from services.auth_service import get_session
+    from services.text_norm import parse_collection_entries, normalize_title
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s:
+        raise HTTPException(401)
+    user_id = s.get("user_id")
+    conn = get_conn()
+    try:
+        target = conn.execute("SELECT item_id, title, year FROM unified_catalog WHERE item_id=?",
+                              (item_id,)).fetchone()
+        if not target:
+            raise HTTPException(404)
+        target = dict(target)
+        t_norm = normalize_title(target.get("title") or "")
+        t_year = str(target.get("year") or "").strip()[:4]
+        if not t_year:
+            t_year = _title_year_hint(target.get("title") or "")
+        norm_index, lit_index = _build_collection_index(conn, user_id)
+        hits = []
+        seen = set()
+
+        def _collect(entries, payload):
+            try:
+                items, _m = _match_collection_entries(entries, norm_index, lit_index)
+            except Exception:
+                return
+            for it in items or []:
+                if str(it.get("item_id") or "") != str(item_id):
+                    continue
+                key = str(payload.get("item_id") or "")
+                if key in seen:
+                    return
+                seen.add(key)
+                hits.append(payload)
+                return
+
+        # Escaneadas visibles.
+        try:
+            where, params = _collection_user_filters(conn, user_id)
+            where.append("COALESCE(is_collection,0) = 1")
+            rows = conn.execute(
+                "SELECT item_id, title, description, cover_url, collection_raw,"
+                " collection_name, collection_serial"
+                " FROM unified_catalog WHERE %s ORDER BY title ASC" % " AND ".join(where),
+                params).fetchall()
+        except Exception:
+            rows = []
+        for r in rows:
+            d = dict(r)
+            try:
+                entries = parse_collection_entries(d.get("collection_raw") or "")
+            except Exception:
+                entries = []
+            if not entries:
+                continue
+            _collect(entries, {
+                "item_id": d.get("item_id"), "title": d.get("title") or "",
+                "description": d.get("description") or "",
+                "cover_url": "/api/cover/%s" % d.get("item_id"),
+                "local": 0,
+            })
+        # Locales (globales).
+        try:
+            from services.catalog_service import list_local_collections
+            locals_rows = list_local_collections(_conn=conn)
+        except Exception:
+            locals_rows = []
+        for loc in locals_rows:
+            try:
+                entries = _json.loads(loc.get("entries_json") or "[]") or []
+            except Exception:
+                entries = []
+            if not entries:
+                continue
+            _collect(entries, {
+                "item_id": loc.get("item_id"), "title": loc.get("name") or "Colección",
+                "description": loc.get("description") or "",
+                "cover_url": "/api/cover/%s" % loc.get("item_id"),
+                "local": 1,
+            })
+        hits.sort(key=lambda h: str(h.get("title") or "").lower())
+        return {"items": hits, "count": len(hits),
+                "title": target.get("title") or "", "item_id": item_id}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @app.get(api_url("/api/movie/{item_id}"))
 async def get_item_details(item_id: str, request: Request = None):
     from services.catalog_service import get_conn
     from services.auth_service import get_session
+    # Colección local/virtual (CORE, sin canal): detalle sintético equivalente.
+    if (item_id or "").startswith("COL-"):
+        import json as _jcol
+        from services.catalog_service import get_local_collection
+        from services.text_norm import build_collection_text
+        conn = get_conn()
+        try:
+            loc = get_local_collection(item_id, _conn=conn)
+            if not loc:
+                raise HTTPException(404)
+            try:
+                entries = _jcol.loads(loc.get("entries_json") or "[]") or []
+            except Exception:
+                entries = []
+            try:
+                text = build_collection_text(loc.get("name") or "", loc.get("serial") or "", entries)
+            except Exception:
+                text = ""
+            return {
+                "item_id": item_id, "title": loc.get("name") or "Colección",
+                "category": "", "subcategory": "", "source": "collections_local",
+                "description": loc.get("description") or text, "year": "", "rating": 0,
+                "cover_url": "/api/cover/%s" % item_id,
+                "telegram_msg_id": 0, "telegram_link": "",
+                "is_collection": 1, "local": 1,
+                "collection_name": loc.get("name") or "",
+                "collection_serial": loc.get("serial") or "",
+                "collection_raw": text,
+                "favorite": False, "episodes": [], "variants": [],
+                "representative_id": item_id,
+            }
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
     conn = get_conn()
     row = conn.execute("SELECT * FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
     if not row:
@@ -5191,6 +6107,15 @@ async def get_item_details(item_id: str, request: Request = None):
             fav_row = conn.execute("SELECT 1 FROM tvcat_favorites WHERE profile_id=? AND item_id=?", (profile_id, item_id)).fetchone()
             is_fav = fav_row is not None
     result["favorite"] = is_fav
+    # Comentario global del título (hero): payload con permisos para el frontal.
+    try:
+        if request:
+            _cs = _comment_session(request)
+            if _cs:
+                from services.catalog_service import get_item_comment as _gic
+                result["item_comment"] = _comment_payload(_gic(item_id), _cs)
+    except Exception:
+        pass
     # Buscar episodios por item_id TEXT o por id INTEGER (bug scanner: usa cat_id INTEGER)
     int_id_str = str(row["id"])
     raw_eps = [dict(e) for e in conn.execute(
@@ -5489,6 +6414,17 @@ async def hero_thumbs_status(item_id: str):
 # --- API: Cover ---
 @app.get(api_url("/api/cover/{item_id}"))
 async def get_cover(item_id: str, request: Request = None):
+    # Colección local: cover desde catalog_assets (channel sintético).
+    if (item_id or "").startswith("COL-"):
+        from services.catalog_service import get_conn as _gcc, get_local_cover
+        try:
+            _lid = int(str(item_id).split("-")[-1] or 0)
+        except Exception:
+            raise HTTPException(404)
+        _cov = get_local_cover(_lid)
+        if _cov and _cov.get("blob"):
+            return Response(content=_cov["blob"], media_type=_cov.get("mime") or "image/jpeg")
+        raise HTTPException(404)
     # 2026-09-04: ?cached=1 -> solo caché (enriquecido, assets, redirect api_cover,
     # genérico topo). Nunca JIT ni Telegram: 200/404 en ms, cero efectos laterales.
     # El frontal lo usa en fase 1 para pintar al instante lo disponible.
@@ -6592,6 +7528,87 @@ async def favorites_list(request: Request):
     if not session: raise HTTPException(401)
     items = get_favorites(session.get("profile_id") or session["user_id"])
     return {"items": items, "count": len(items)}
+
+# --- API: Comentarios globales por título (2026-09-08) ---
+# Un comentario por item_id, visible para todos los usuarios autenticados.
+# El creador puede abrirlo a edición colaborativa (editable_by_others).
+# Eliminar: solo creador o admin.
+def _comment_session(request: Request):
+    from services.auth_service import get_session
+    token = request.cookies.get("tvcat_session", "")
+    if not token:
+        ah = request.headers.get("Authorization", "")
+        if ah.startswith("Bearer "):
+            token = ah[7:]
+    return get_session(token) if token else None
+
+
+def _comment_payload(comment, session):
+    if not comment:
+        return {"has_comment": False, "comment": None, "can_edit": True, "can_delete": False}
+    uid = session.get("user_id")
+    is_admin = session.get("role") == "admin"
+    is_owner = str(comment.get("user_id")) == str(uid)
+    can_edit = bool(is_admin or is_owner or comment.get("editable_by_others"))
+    return {"has_comment": True, "comment": comment,
+            "can_edit": can_edit,
+            "can_delete": bool(is_admin or is_owner),
+            "is_owner": is_owner}
+
+@app.get(api_url("/api/item/{item_id}/comment"))
+async def get_item_comment(item_id: str, request: Request):
+    from services.catalog_service import get_item_comment as _get
+    session = _comment_session(request)
+    if not session: raise HTTPException(401)
+    return _comment_payload(_get(item_id), session)
+
+@app.put(api_url("/api/item/{item_id}/comment"))
+async def put_item_comment(item_id: str, request: Request):
+    from services.catalog_service import get_item_comment as _get, set_item_comment as _set
+    from services.catalog_service import COMMENT_MAX_LEN
+    session = _comment_session(request)
+    if not session: raise HTTPException(401)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "JSON inválido")
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "El comentario no puede estar vacío")
+    if len(text) > COMMENT_MAX_LEN:
+        raise HTTPException(400, f"Máximo {COMMENT_MAX_LEN} caracteres")
+    uid = session.get("user_id")
+    is_admin = session.get("role") == "admin"
+    existing = _get(item_id)
+    if existing:
+        is_owner = str(existing.get("user_id")) == str(uid)
+        if not (is_admin or is_owner or existing.get("editable_by_others")):
+            raise HTTPException(403, "Sin permiso de edición")
+        # El flag colaborativo solo lo toca el creador o el admin; los
+        # editores externos conservan el valor existente.
+        if is_admin or is_owner:
+            flag = bool(body.get("editable_by_others"))
+        else:
+            flag = bool(existing.get("editable_by_others"))
+    else:
+        # Crear: cualquier usuario autenticado; el flag lo decide el creador.
+        flag = bool(body.get("editable_by_others"))
+    saved = _set(item_id, existing["user_id"] if existing else uid, text, flag)
+    return _comment_payload(saved, session)
+
+@app.delete(api_url("/api/item/{item_id}/comment"))
+async def delete_item_comment(item_id: str, request: Request):
+    from services.catalog_service import get_item_comment as _get, delete_item_comment as _del
+    session = _comment_session(request)
+    if not session: raise HTTPException(401)
+    existing = _get(item_id)
+    if not existing:
+        raise HTTPException(404, "Sin comentario")
+    uid = session.get("user_id")
+    if not (session.get("role") == "admin" or str(existing.get("user_id")) == str(uid)):
+        raise HTTPException(403, "Solo el creador o el admin pueden eliminar")
+    _del(item_id)
+    return {"success": True}
 
 @app.get(api_url("/api/watch/history"))
 async def watch_history(request: Request):

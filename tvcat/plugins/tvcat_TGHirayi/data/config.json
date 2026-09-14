@@ -1,6 +1,6 @@
 {
   "delay_seconds": 3.0,
-  "resume_on_startup": false,
+  "resume_on_startup": true,
   "credential_name": "",
   "upload_threads": 16,
   "download_chunk_size_kb": 1024,
@@ -17,5 +17,6 @@
   "archive_parallel": true,
   "max_pending_archives": 5,
   "default_audio_lang": "",
-  "default_sub_lang": ""
+  "default_sub_lang": "",
+  "forward_third_party": false
 }

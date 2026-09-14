@@ -577,6 +577,9 @@ async def add_channel(payload: ChannelRequest):
         _category_map = {"media": "media", "ebook": "kiosko", "audiolibro": "media", "game": "game"}
         category = (payload.category or "").strip() or _category_map.get(content_type, "media")
         custom_sub = payload.custom_subcategory.strip() if payload.custom_subcategory else None
+        # Si no hay subcategoría personalizada, usar topic_name como subcategoría (incluyendo "General")
+        if not custom_sub:
+            custom_sub = (payload.topic_name or "").strip() or None
         auto_refresh = None  # Deshabilitado por ciclos de refresco
         enabled = payload.enabled if payload.enabled is not None else 1
         topic_only = (payload.topic_only or 0) and 1 or 0
@@ -650,7 +653,7 @@ async def add_channel(payload: ChannelRequest):
                 except Exception:
                     pass
                 source_tag = f"scan_{payload.id}"
-                effective_subcat = custom_sub if custom_sub else payload.display_name.strip()
+                effective_subcat = custom_sub if custom_sub else None
                 plugin_conn.execute(
                     "UPDATE unified_catalog SET subcategory = ?, category = ?, sync_timestamp = unixepoch() WHERE source = ?",
                     (effective_subcat, category, source_tag)
@@ -839,7 +842,7 @@ async def test_parse_channel(body: TestParseRequest):
     normal, no se desperdician), parsea en memoria con la topología indicada y devuelve
     conteo + muestra de títulos. NO guarda items ni toca la central."""
     try:
-        from .scanner import _resolve_account_creds, _rows_to_msgs, _group_messages_topo4, _segment_blocks, _parse_block_title_desc, _get_file_name_topo0
+        from .scanner import _resolve_account_creds, _rows_to_msgs, _group_messages_topo4, _segment_blocks, _parse_block_title_desc, _get_file_name_topo0, _is_collection_text, _parse_collection_entries
         from services.telegram_service import get_telegram_service
         from services.cache_keys import canon_channel
         from tvcat.gateway import get_db_connection
@@ -876,6 +879,16 @@ async def test_parse_channel(body: TestParseRequest):
         n_photo = sum(1 for m in msgs if m.photo is not None)
         n_file = sum(1 for m in msgs if m.document is not None)
         n_text = sum(1 for m in msgs if (m.text or "") and m.photo is None and m.document is None)
+        # Colecciones: mensajes con tag (no escriben nada, solo conteo + muestra)
+        _col_entries = []
+        n_collections = 0
+        for m in msgs:
+            try:
+                if _is_collection_text(getattr(m, "text", "") or ""):
+                    n_collections += 1
+                    _col_entries.extend(_parse_collection_entries(getattr(m, "text", "") or ""))
+            except Exception:
+                pass
         groups = 0
         sample = []
         try:
@@ -919,7 +932,9 @@ async def test_parse_channel(body: TestParseRequest):
         except Exception:
             pass
         return {"success": True, "messages": len(msgs), "photos": n_photo,
-                "files": n_file, "texts": n_text, "groups": groups, "sample": sample}
+                "files": n_file, "texts": n_text, "groups": groups, "sample": sample,
+                "collections": n_collections,
+                "collection_sample": [e.get("title", "") for e in _col_entries[:10]]}
     except HTTPException:
         raise
     except Exception as e:

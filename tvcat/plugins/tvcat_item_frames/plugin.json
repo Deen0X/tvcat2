@@ -1,0 +1,24 @@
+{
+  "name": "tvcat_item_frames",
+  "version": "1.0.0",
+  "type": "grid-decorator",
+  "displayName": "Item Frame",
+  "description": "Marcos PNG sobre el cover (par idle/selected), sets por categoría/subcategoría con default, shine global en el seleccionado. Prefs en servidor por usuario-dispositivo.",
+  "iconEmoji": "🖼️",
+  "defaultEnabled": true,
+  "priority": 50,
+  "js": ["item_frames.js?v=1.0.8"],
+  "css": ["item_frames.css?v=1.0.2"],
+  "has_interface": true,
+  "settings_ui": "/plugin-static/tvcat_item_frames/config.html",
+  "tray": [
+    {
+      "id": "itemframes",
+      "label": "Item Frame",
+      "iconEmoji": "🖼️",
+      "color": "#eab308",
+      "action": "toggle-effect"
+    }
+  ],
+  "access": { "admin": true, "user": true, "child": false }
+}

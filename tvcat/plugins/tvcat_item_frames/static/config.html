@@ -24,7 +24,7 @@
 </style>
 </head>
 <body>
-<h3>Marcos de carta 🖼️</h3>
+<h3>Item Frame 🖼️</h3>
 <div class="muted" style="margin-bottom:12px;">Bordes PNG sobre el cover (par idle/selected). El primer set que casa con la categoría/subcategoría gana; si ninguno, se usa el default. Solo admin puede subir y ordenar. Cada usuario guarda su on/off + shine por dispositivo en el servidor.</div>
 
 <div class="card">
@@ -102,20 +102,20 @@ function pokeCatalog() {
     // Refresca los marcos del catálogo abierto sin recargar la página (conserva scroll).
     try {
         if (parent && parent.window && parent.window.pluginSystem) {
-            var p = parent.window.pluginSystem.getPlugin('tvcat_card_frames');
-            if (p && p.refreshCardFrames) { p.refreshCardFrames(); return; }
+            var p = parent.window.pluginSystem.getPlugin('tvcat_item_frames');
+            if (p && p.refreshItemFrames) { p.refreshItemFrames(); return; }
         }
         if (parent && parent.Catalog) parent.Catalog.load(parent.Catalog.currentCategory || 'home');
     } catch (e) {}
 }
 
 function loadAll() {
-    xhr('GET', '/api/cardframes/sets', null, false, function(b, st) {
+    xhr('GET', '/api/itemframes/sets', null, false, function(b, st) {
         if (st !== 200) { document.getElementById('borders-list').textContent = 'Error cargando sets: HTTP ' + st + (st === 401 ? ' (sesión: reabre desde el catálogo logueado)' : st === 0 ? ' (petición abortada: recarga)' : ''); return; }
         _data = b;
         renderBorders(); renderSets(); fillBorderSelect(); renderPreview();
     });
-    xhr('GET', '/api/cardframes/prefs?device_id=' + encodeURIComponent(deviceId()), null, false, function(b) {
+    xhr('GET', '/api/itemframes/prefs?device_id=' + encodeURIComponent(deviceId()), null, false, function(b) {
         var p = (b && b.prefs) || {};
         document.getElementById('p-enabled').checked = p.enabled !== false;
         document.getElementById('p-shine').checked = p.shine_enabled !== false;
@@ -131,7 +131,7 @@ function savePrefs() {
         shine_delay_ms: parseInt(document.getElementById('p-delay').value || '800', 10),
         shine_period_ms: parseInt(document.getElementById('p-period').value || '2600', 10)
     };
-    xhr('POST', '/api/cardframes/prefs', body, false, function(b, st) {
+    xhr('POST', '/api/itemframes/prefs', body, false, function(b, st) {
         document.getElementById('prefs-status').textContent = st === 200 ? 'Guardado ✓' : 'Error ' + st;
         if (st === 200) pokeCatalog();
     });
@@ -145,7 +145,7 @@ function uploadBorder() {
     fd.append('name', nm);
     fd.append('idle', fi);
     fd.append('selected', fs);
-    xhr('POST', '/api/cardframes/borders', fd, true, function(b, st) {
+    xhr('POST', '/api/itemframes/borders', fd, true, function(b, st) {
         document.getElementById('up-status').textContent = st === 200 ? 'Subido ✓' : ('Error: ' + esc((b && b.detail) || st));
         if (st === 200) { document.getElementById('b-name').value = ''; loadAll(); pokeCatalog(); }
     });
@@ -157,8 +157,8 @@ function renderBorders() {
         var b = _data.borders[i];
         var isDef = _data.default_border_id === b.id;
         h += '<div class="row">'
-            + '<img class="thumb" src="/api/cardframes/img/' + encodeURIComponent(b.id) + '/idle">'
-            + '<img class="thumb" src="/api/cardframes/img/' + encodeURIComponent(b.id) + '/selected">'
+            + '<img class="thumb" src="/api/itemframes/img/' + encodeURIComponent(b.id) + '/idle">'
+            + '<img class="thumb" src="/api/itemframes/img/' + encodeURIComponent(b.id) + '/selected">'
             + '<div class="name">' + esc(b.name) + (isDef ? ' <span class="muted">(default)</span>' : '') + '<br><span class="muted">' + Math.round((b.idle_bytes || 0) / 1024) + 'KB + ' + Math.round((b.selected_bytes || 0) / 1024) + 'KB</span></div>'
             + (isDef ? '' : '<button class="btn2" onclick="setDefault(\'' + b.id + '\')">Default</button>')
             + (isDef ? '' : '<button class="btn2" onclick="delBorder(\'' + b.id + '\')">Eliminar</button>')
@@ -167,11 +167,11 @@ function renderBorders() {
     c.innerHTML = h || '<span class="muted">Sin bordes.</span>';
 }
 function setDefault(id) {
-    xhr('POST', '/api/cardframes/default', { border_id: id }, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } else alert('Error: ' + ((b && b.detail) || st)); });
+    xhr('POST', '/api/itemframes/default', { border_id: id }, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } else alert('Error: ' + ((b && b.detail) || st)); });
 }
 function delBorder(id) {
     if (!confirm('¿Eliminar borde?')) return;
-    xhr('DELETE', '/api/cardframes/borders/' + encodeURIComponent(id), null, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } else alert('Error: ' + ((b && b.detail) || st)); });
+    xhr('DELETE', '/api/itemframes/borders/' + encodeURIComponent(id), null, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } else alert('Error: ' + ((b && b.detail) || st)); });
 }
 function fillBorderSelect() {
     var s = document.getElementById('s-border');
@@ -203,7 +203,7 @@ function moveSet(idx, d) {
     var j = idx + d;
     if (j < 0 || j >= ids.length) return;
     var t = ids[idx]; ids[idx] = ids[j]; ids[j] = t;
-    xhr('POST', '/api/cardframes/reorder', { ids: ids }, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } });
+    xhr('POST', '/api/itemframes/reorder', { ids: ids }, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } });
 }
 function editSet(id) {
     for (var i = 0; i < _data.sets.length; i++) if (_data.sets[i].id === id) {
@@ -235,22 +235,22 @@ function saveSet() {
         enabled: 1
     };
     if (_editingSet) {
-        xhr('PUT', '/api/cardframes/sets/' + encodeURIComponent(_editingSet), body, false, function(b, st) { if (st === 200) { resetSetForm(); loadAll(); pokeCatalog(); } });
+        xhr('PUT', '/api/itemframes/sets/' + encodeURIComponent(_editingSet), body, false, function(b, st) { if (st === 200) { resetSetForm(); loadAll(); pokeCatalog(); } });
     } else {
-        xhr('POST', '/api/cardframes/sets', body, false, function(b, st) { if (st === 200) { resetSetForm(); loadAll(); pokeCatalog(); } });
+        xhr('POST', '/api/itemframes/sets', body, false, function(b, st) { if (st === 200) { resetSetForm(); loadAll(); pokeCatalog(); } });
     }
 }
 function toggleSet(id) {
     for (var i = 0; i < _data.sets.length; i++) if (_data.sets[i].id === id) {
         var s = _data.sets[i];
-        xhr('PUT', '/api/cardframes/sets/' + encodeURIComponent(id),
+        xhr('PUT', '/api/itemframes/sets/' + encodeURIComponent(id),
             { border_id: s.border_id, name: s.name, categories: s.categories, subcategories: s.subcategories, position: s.position, enabled: s.enabled ? 0 : 1 },
             false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } });
     }
 }
 function delSet(id) {
     if (!confirm('¿Eliminar set?')) return;
-    xhr('DELETE', '/api/cardframes/sets/' + encodeURIComponent(id), null, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } });
+    xhr('DELETE', '/api/itemframes/sets/' + encodeURIComponent(id), null, false, function(b, st) { if (st === 200) { loadAll(); pokeCatalog(); } });
 }
 function renderPreview() {
     var box = document.getElementById('preview');
@@ -274,7 +274,7 @@ function renderPreview() {
         var kind = sel ? 'selected' : 'idle';
         h += '<div class="prev-item"><div class="prev-cover">'
             + '<img class="cov" src="' + esc(src) + '" onerror="this.style.display=\'none\'">'
-            + '<div class="fr"><img src="/api/cardframes/img/' + encodeURIComponent(defId) + '/' + kind + '"></div>'
+            + '<div class="fr"><img src="/api/itemframes/img/' + encodeURIComponent(defId) + '/' + kind + '"></div>'
             + '</div><div class="muted">' + esc(it.title || '') + (sel ? ' ★' : '') + '</div></div>';
     }
     box.innerHTML = h;

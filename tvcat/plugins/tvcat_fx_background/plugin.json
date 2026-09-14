@@ -1,0 +1,24 @@
+{
+  "name": "tvcat_fx_background",
+  "version": "1.0.0",
+  "type": "grid-decorator",
+  "displayName": "FX Background",
+  "description": "Fondo ambiental del título seleccionado (cover difuminado o lava con su paleta), con fundido. Prefs en servidor por usuario-dispositivo.",
+  "iconEmoji": "🔮",
+  "defaultEnabled": true,
+  "priority": 60,
+  "js": ["fx_background.js?v=1.0.4"],
+  "css": ["fx_background.css?v=1.0.2"],
+  "has_interface": true,
+  "settings_ui": "/plugin-static/tvcat_fx_background/config.html",
+  "tray": [
+    {
+      "id": "fxbg",
+      "label": "FX Background",
+      "iconEmoji": "🔮",
+      "color": "#8b5cf6",
+      "action": "toggle-effect"
+    }
+  ],
+  "access": { "admin": true, "user": true, "child": false }
+}

@@ -27,6 +27,7 @@ from typing import Optional, List, Dict
 from datetime import datetime
 
 from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 logger = logging.getLogger("TGHirayi")
@@ -203,6 +204,7 @@ class ConfigUpdate(BaseModel):
     seven_zip_path: Optional[str] = None        # Ruta personalizada a 7z
     unrar_path: Optional[str] = None            # Ruta personalizada a unrar
     archive_parallel: Optional[bool] = None     # Procesar archives en paralelo (opción B)
+    episode_pipeline: Optional[bool] = None    # Descargar siguiente episodio en paralelo mientras se sube el actual
     max_pending_archives: Optional[int] = None  # Máx. archives en processing/ready_upload (esperando subir)
     default_audio_lang: Optional[str] = None    # Idioma audio por defecto para jobs nuevos (vacío = original)
     default_sub_lang: Optional[str] = None      # Idioma subs por defecto para jobs nuevos (vacío = ninguno)
@@ -332,6 +334,7 @@ def _load_config():
         "seven_zip_path": "",
         "unrar_path": "",
         "archive_parallel": True,
+        "episode_pipeline": True,
         "max_pending_archives": 5,
         "default_audio_lang": "",
         "default_sub_lang": "",
@@ -567,6 +570,8 @@ async def update_config(body: ConfigUpdate, request: Request):
         cfg["unrar_path"] = (body.unrar_path or "").strip()
     if body.archive_parallel is not None:
         cfg["archive_parallel"] = bool(body.archive_parallel)
+    if body.episode_pipeline is not None:
+        cfg["episode_pipeline"] = bool(body.episode_pipeline)
     if body.max_pending_archives is not None:
         cfg["max_pending_archives"] = max(1, min(50, body.max_pending_archives))
     if body.default_audio_lang is not None:
@@ -766,9 +771,34 @@ async def list_queue(request: Request):
                 "uploaded": current.get("_uploaded_to", {}).get(did, False)
             })
         current = {**current, "destinations_detail": dests}
+    # 2026-09-12: aligerar listado (el b64 del póster no viaja; va flag).
+    # 2026-09-13: in_scope_total = episodios checked del job (partidos/recortes),
+    # no el total del item (el badge 🎞️ muestra lo que se va a copiar).
+    def _public_job(_j):
+        if not isinstance(_j, dict):
+            return _j
+        _c = {k: v for k, v in _j.items() if k != "cover_poster_b64"}
+        _c["cover_thumb"] = bool((_j.get("cover_poster_b64") or "").strip())
+        try:
+            if _j.get("status") not in _TERMINAL_STATUSES and (_j.get("only_episode_msgs") or _j.get("skip_episode_msgs")):
+                _c["in_scope_total"] = _job_episode_count(_j)
+                try:
+                    import bisect as _bi
+                    _eps2 = _fetch_episodes_sync(_j.get("item_id", "")) or []
+                    _nums2 = sorted((i + 1) for i, _e2 in enumerate(_eps2) if _ep_in_scope(_j, _e2))
+                    _cur2 = int(_j.get("current_episode") or 0)
+                    _c["_scope_pos"] = _bi.bisect_right(_nums2, _cur2)
+                    _c["_scope_done"] = _bi.bisect_right(_nums2, _cur2 - 1)
+                except Exception:
+                    pass
+            else:
+                _c["in_scope_total"] = int(_j.get("total_episodes") or 0) or 0
+        except Exception:
+            _c["in_scope_total"] = int(_j.get("total_episodes") or 0) or 0
+        return _c
     return {
-        "queue": db.get("queue", []),
-        "current_job": current,
+        "queue": [_public_job(_j) for _j in db.get("queue", [])],
+        "current_job": _public_job(current) if current else current,
         "worker_paused": _worker_paused,
         "worker_running": _worker_running,
         "pending_archives": len(_count_pending_archives(db.get("queue", []))),
@@ -821,6 +851,23 @@ async def add_to_queue(body: QueueAdd, request: Request):
     # 2026-09-04: sembrar cover editado en local (enricher) al encolar.
     try:
         _seed_job_cover_from_local(job)
+    except Exception:
+        pass
+    # 2026-09-12: si el item está enriquecido, el job nace con el nombre
+    # enriquecido (Original title + 🗓año), no con el original del catálogo.
+    try:
+        from services.cover_override_registry import get_enriched_by_item_id as _gebi0
+        _row0 = _gebi0(str(job.get("item_id") or ""))
+        _det0 = (_row0 or {}).get("enrich_details") or {}
+        if isinstance(_det0, str):
+            import json as _js0
+            try:
+                _det0 = _js0.loads(_det0) or {}
+            except Exception:
+                _det0 = {}
+        _dn0 = _display_name_from_details(_det0) if _det0 else ""
+        if _dn0:
+            job["title"] = _dn0
     except Exception:
         pass
     db.setdefault("queue", []).append(job)
@@ -977,6 +1024,19 @@ def _ep_in_scope(job, ep) -> bool:
         return _mid not in {str(x) for x in _skip}
     except Exception:
         return True
+
+
+def _job_episode_count(job) -> int:
+    """2026-09-12: nº de episodios EN SCOPE del job (partidos/recortes con
+    only/skip), no el total del item. Sin recorte coincide con el total."""
+    try:
+        _all = _fetch_episodes_sync(job.get("item_id", "")) if job.get("item_id") else []
+        if not _all:
+            return int(job.get("total_episodes") or 0) or 0
+        _scoped = [e for e in _all if _ep_in_scope(job, e)]
+        return len(_scoped) if _scoped else len(_all)
+    except Exception:
+        return 0
 
 
 @router.put("/api/telegram-copy/queue/{job_id}/skip-exists")
@@ -1138,10 +1198,27 @@ async def split_job_from_episode(job_id: str, body: QueueSplitRequest, request: 
                 "only_episode_msgs": _only,
                 "force_generic_cover": True,
                 "cover_text": "",
+                "cover_local": True,
                 "use_enricher_cover": True,
                 "user_id": session["user_id"],
                 "created": time.time(),
             }
+            # 2026-09-12: el partido hereda la carátula VIGENTE del padre
+            # (texto, datos, póster): imagen desde el primer segundo, sin 404.
+            # Si el padre está fresco, hereda vacío → cover genérico al copiar.
+            _nj["cover_text"] = j.get("cover_text", "")
+            if j.get("cover_manual"):
+                _nj["cover_manual"] = True
+            if isinstance(j.get("enrich_details"), dict):
+                _nj["enrich_details"] = j.get("enrich_details")
+            if j.get("cover_poster_b64"):
+                _nj["cover_poster_b64"] = j.get("cover_poster_b64")
+            if j.get("cover_poster_url"):
+                _nj["cover_poster_url"] = j.get("cover_poster_url")
+            if "cover_use_poster" in j:
+                _nj["cover_use_poster"] = bool(j.get("cover_use_poster"))
+            if "use_enricher_cover" in j:
+                _nj["use_enricher_cover"] = bool(j.get("use_enricher_cover"))
             try:
                 _nj["is_archive"] = _detect_archive_job(_nj, _moved_checked)
             except Exception:
@@ -1238,20 +1315,24 @@ async def get_job_cover(job_id: str, request: Request):
         if not source_topic_id:
             source_topic_id = parsed_job.get("topic_id")
 
-    # Plantilla a editar: la del job si contiene tags, si no la default
-    # (enriquecedor resuelta por categoría, legacy cover_tags.json si no hay).
+    # Plantilla a editar: la guardada del job; si el texto guardado trae tags,
+    # ese; si no, la default (enriquecedor por categoría, legacy si no hay).
     default_template = _default_cover_template(job.get("category", ""), job.get("subcategory", ""))
 
     stored = (job.get("cover_text") or "").strip()
-    template = stored if "{f" in stored else default_template
+    tpl_stored = (job.get("cover_template") or "").strip()
+    template = tpl_stored or (stored if "{f" in stored else default_template)
 
     image_b64 = None
     file_found = False
-    ep_count = len(_fetch_episodes_sync(job.get("item_id", ""))) if job.get("item_id") else 0
+    ep_count = _job_episode_count(job)
     details = job.get("enrich_details") or {}
 
     preview = ""
-    if template:
+    if stored and "{f" not in stored:
+        # Texto guardado sin tags: verbatim (la edición manual no se regenera).
+        preview = stored
+    elif template:
         preview = _resolve_cover_tags(template, job.get("title", ""), ep_count, details)
 
     try:
@@ -1292,6 +1373,8 @@ async def get_job_cover(job_id: str, request: Request):
 
     return {"text": preview, "template": template, "image": image_b64, "file_found": file_found,
             "item_id": job.get("item_id", ""),
+            "cover_local": bool(job.get("cover_local", False)),
+            "episodes_in_scope": ep_count,
             "category": job.get("category", ""), "subcategory": job.get("subcategory", ""),
             "title": job.get("title", ""),
             "use_enricher_cover": bool(job.get("use_enricher_cover", True)),
@@ -1315,7 +1398,7 @@ async def preview_job_cover(job_id: str, body: dict, request: Request):
         raise HTTPException(404, "Job no encontrado")
 
     template = (body.get("template") or "")
-    ep_count = len(_fetch_episodes_sync(job.get("item_id", ""))) if job.get("item_id") else 0
+    ep_count = _job_episode_count(job)
     details = body.get("details") or job.get("enrich_details") or {}
     try:
         preview = _resolve_cover_tags(template, job.get("title", ""), ep_count, details)
@@ -1390,13 +1473,72 @@ async def update_job_cover(job_id: str, body: dict, request: Request):
             j["cover_from_local"] = False
             if "use_enricher_cover" in body:
                 j["use_enricher_cover"] = bool(body.get("use_enricher_cover"))
+            if "poster_b64" in body and (body.get("poster_b64") or ""):
+                j["cover_poster_b64"] = body.get("poster_b64")
+            if "poster_url" in body and (body.get("poster_url") or ""):
+                _url_changed = (body.get("poster_url") or "") != (j.get("cover_poster_url") or "")
+                j["cover_poster_url"] = body.get("poster_url") or ""
+            else:
+                _url_changed = False
+            if "use_poster" in body:
+                j["cover_use_poster"] = bool(body.get("use_poster"))
+                j["use_enricher_cover"] = bool(body.get("use_poster"))
+            # 2026-09-12: el navegador no puede traer el b64 (CORS) → descargarlo
+            # aquí para que el job tenga su póster propio guardado.
+            # 2026-09-13: si la URL es NUEVA (distinto candidato), los bytes
+            # heredados quedan obsoletos → re-descargar SIEMPRE (antes se
+            # saltaba por haber b64 y todos los partidos repetían imagen).
+            _new_url = (j.get("cover_poster_url") or "")
+            _need_dl = bool(_new_url) and (not (j.get("cover_poster_b64") or "") or _url_changed)
+            if _need_dl:
+                try:
+                    _dl = await asyncio.to_thread(_download_poster_bytes_sync, _new_url)
+                    if _dl:
+                        import base64 as _b64dl
+                        j["cover_poster_b64"] = _b64dl.b64encode(_dl).decode("ascii")
+                except Exception:
+                    pass
             if "title" in body:
                 j["title"] = (body.get("title") or "").strip()
+            if "template" in body:
+                j["cover_template"] = (body.get("template") or "")
             if "details" in body and isinstance(body.get("details"), dict):
                 j["enrich_details"] = body["details"]
+            try:
+                j["cover_rev"] = int(j.get("cover_rev") or 0) + 1
+            except Exception:
+                j["cover_rev"] = 1
             _save_db(db)
             return {"ok": True}
     raise HTTPException(404, "Job no encontrado")
+
+
+@router.get("/api/telegram-copy/queue/{job_id}/cover-thumb")
+async def job_cover_thumb(job_id: str, request: Request):
+    """Miniatura del póster PROPIO del job (guardado al editar). 404 si no tiene:
+    el frontend oculta la imagen. Sin Telegram, solo bytes ya guardados."""
+    session = _session_user(request)
+    if not session:
+        raise HTTPException(401, "Inicia sesion")
+    db = _load_db()
+    job = None
+    for j in db.get("queue", []):
+        if j["id"] == job_id:
+            job = j
+            break
+    if not job:
+        raise HTTPException(404, "Job no encontrado")
+    raw = (job.get("cover_poster_b64") or "").strip()
+    if raw:
+        if raw.startswith("data:") and "," in raw:
+            raw = raw.split(",", 1)[1]
+        try:
+            import base64 as _b64t
+            return Response(content=_b64t.b64decode(raw), media_type="image/jpeg",
+                            headers={"Cache-Control": "private, max-age=86400"})
+        except Exception:
+            pass
+    raise HTTPException(404, "Sin carátula propia")
 
 
 @router.post("/api/telegram-copy/queue/{job_id}/requeue")
@@ -1900,8 +2042,14 @@ async def _process_job(job: dict, db: dict):
             job["_omitted"] = {}
             job.pop("_omit_src_ids", None)
             _persist_job(job)
+        # 2026-09-13: job con progreso (cover o episodios ya subidos) NUNCA se
+        # omite: el topic existe porque lo creó él (reinicio a medias) y debe
+        # seguir trabajando. Omitir solo jobs frescos (sin nada subido).
+        _has_progress = bool(job.get("current_episode") or job.get("_cover_done") or job.get("_cover_msg_ids"))
+        if _has_progress and _skip_on:
+            print(f"[TGHirayi] Job {job['id']} con progreso previo: no se omite (sigue trabajando)", flush=True)
         try:
-            if _skip_on:
+            if _skip_on and not _has_progress:
                 for _sd in destinations:
                     try:
                         if int(_sd.get("topology", 1)) != 3:
@@ -1932,7 +2080,7 @@ async def _process_job(job: dict, db: dict):
                 for _d in destinations)
         except Exception:
             _all_omit_now = False
-        if _all_omit_now:
+        if _all_omit_now and not _has_progress:
             _dnames = ", ".join([_d.get("name", "?") for _d in destinations])
             job["status"] = "skipped"
             job["status_text"] = f"Omitido por existente en destino ({_dnames}): topic '{job.get('title')}' ya existe"
@@ -2122,6 +2270,19 @@ async def _process_job(job: dict, db: dict):
         # SÍ se procesa, no al primero de la lista si está omitido/partido).
         if pending:
             first_pending = pending[0][0] + 1
+        # 2026-09-13: numeración relativa al scope para lo VISIBLE (partidos:
+        # "Ep 4/24" en vez de "Ep 75/207"). El worker sigue en absoluto
+        # (resume/current_episode intactos); solo los status_text usan rango.
+        _scope_idx = [i for i, _e in enumerate(episodes) if _ep_in_scope(job, _e)]
+        job["_scope_total"] = len(_scope_idx) or total
+        _scope_rank = {i + 1: r + 1 for r, i in enumerate(_scope_idx)}
+
+        def _disp_ep(_n):
+            try:
+                _n = int(_n)
+                return "%d/%d" % (_scope_rank.get(_n, _n), job["_scope_total"])
+            except Exception:
+                return "%s/%s" % (_n, total)
         if not pending and episodes:
             # Todo desmarcado: se completa generando el cover y sin vídeos.
             if not job.get("_cover_done"):
@@ -2176,15 +2337,15 @@ async def _process_job(job: dict, db: dict):
             if kind == "download":
                 job["download_progress"] = pct
                 job["download_episode"] = dl_ep["n"]
-                txt = f"Descargando ep.{dl_ep['n']}/{total} {pct}%"
+                txt = f"Descargando ep.{_disp_ep(dl_ep['n'])} {pct}%"
                 if ul_ep["n"] and ul_ep["n"] != dl_ep["n"]:
-                    txt += f" · Subiendo ep.{ul_ep['n']}/{total}"
+                    txt += f" · Subiendo ep.{_disp_ep(ul_ep['n'])}"
             else:
                 job["upload_progress"] = pct
                 job["upload_episode"] = ul_ep["n"]
-                txt = f"Subiendo ep.{ul_ep['n']}/{total} {pct}%"
+                txt = f"Subiendo ep.{_disp_ep(ul_ep['n'])} {pct}%"
                 if dl_ep["n"] and dl_ep["n"] != ul_ep["n"]:
-                    txt += f" · Descargando ep.{dl_ep['n']}/{total}"
+                    txt += f" · Descargando ep.{_disp_ep(dl_ep['n'])}"
             job["status_text"] = txt
             _persist_job(job)
 
@@ -2229,7 +2390,7 @@ async def _process_job(job: dict, db: dict):
                 else:
                     job["current_episode"] = ep_num
                     dl_ep["n"] = ep_num
-                    job["status_text"] = f"Descargando ep.{ep_num}/{total}..."
+                    job["status_text"] = f"Descargando ep.{_disp_ep(ep_num)}..."
                     _persist_job(job)
                     print(f"[TGHirayi] Descargando episodio {ep_num}/{total}", flush=True)
                     media_data = await _download_episode_media(client, episode, source_channel_id, _progress,
@@ -2241,18 +2402,25 @@ async def _process_job(job: dict, db: dict):
                 # Lanzar descarga del SIGUIENTE episodio en paralelo
                 next_dl_task = None
                 if slot + 1 < total_pending:
-                    n_idx, n_ep = pending[slot + 1]
-                    dl_ep["n"] = n_idx + 1
-                    next_dl_task = asyncio.create_task(
-                        _download_episode_media(client, n_ep, source_channel_id, _progress,
-                                                normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
-                                                streaming_mkv=streaming_mkv, job=job)
-                    )
-                    print(f"[TGHirayi] Prefetch descarga ep.{n_idx+1}/{total} (paralelo)", flush=True)
+                    pipeline_enabled = bool(cfg.get("episode_pipeline", True))
+                    print(f"[TGHirayi] Pipeline {slot+1}/{total_pending}: episode_pipeline={pipeline_enabled} first_real={first_real} total_pending={total_pending}", flush=True)
+                    if pipeline_enabled:
+                        n_idx, n_ep = pending[slot + 1]
+                        dl_ep["n"] = n_idx + 1
+                        next_dl_task = asyncio.create_task(
+                            _download_episode_media(client, n_ep, source_channel_id, _progress,
+                                                    normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
+                                                    streaming_mkv=streaming_mkv, job=job)
+                        )
+                        print(f"[TGHirayi] Prefetch descarga ep.{n_idx+1}/{total} (paralelo)", flush=True)
+                    else:
+                        print(f"[TGHirayi] Pipeline desactivado, no se prefetchea ep.{pending[slot+1][0]+1}", flush=True)
+                else:
+                    print(f"[TGHirayi] Pipeline: no hay siguiente (slot={slot}, total_pending={total_pending})", flush=True)
 
             # Subir/copiar el actual a todos los destinos
             ul_ep["n"] = ep_num
-            job["status_text"] = f"Procesando ep.{ep_num}/{total}..."
+            job["status_text"] = f"Procesando ep.{_disp_ep(ep_num)}..."
             job["upload_progress"] = 0.0
 
             # ── Cover justo antes del primer vídeo real (todos los flujos) ──
@@ -2340,7 +2508,7 @@ async def _process_job(job: dict, db: dict):
 
                         if _is_omit:
                             _dn = dest.get('name', '?')
-                            job["status_text"] = f"Omitido en dest {_dn}: Topic ya existe (ep.{ep_num}/{total})"
+                            job["status_text"] = f"Omitido en dest {_dn}: Topic ya existe (ep.{_disp_ep(ep_num)})"
                             _persist_job(job)
                             if dest_idx == 0 and "_omit_src_ids" not in job:
                                 # dest-0 es la fuente para la copia telegram al resto
@@ -2360,19 +2528,19 @@ async def _process_job(job: dict, db: dict):
                         if dest_idx == 0:
                             # Destino 1: real si first_real (firewall o CB1), si no telegram directo desde el origen
                             if first_real:
-                                job["status_text"] = f"Subiendo ep.{ep_num}/{total} a {dest.get('name','?')}..."
+                                job["status_text"] = f"Subiendo ep.{_disp_ep(ep_num)} a {dest.get('name','?')}..."
                                 _persist_job(job)
                                 sent_ids = await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job)
                             elif use_forward:
                                 # OPCIÓN OCULTA: forward directo aunque el origen sea de terceros.
                                 # Sin descarga ni subida. Si falla (NoForwards/sin acceso) → fallback
                                 # a copia real del episodio para no dejar el job a medias.
-                                job["status_text"] = f"Reenviando (telegram) ep.{ep_num}/{total} a {dest.get('name','?')}..."
+                                job["status_text"] = f"Reenviando (telegram) ep.{_disp_ep(ep_num)} a {dest.get('name','?')}..."
                                 _persist_job(job)
                                 sent_ids = await _forward_episode_from_origin(client, source_channel_id, episode, dest, topic_id, delay)
                                 if not sent_ids:
                                     print(f"[TGHirayi] Forward falló en ep.{ep_num}, fallback a copia real", flush=True)
-                                    job["status_text"] = f"Subiendo ep.{ep_num}/{total} a {dest.get('name','?')} (fallback)..."
+                                    job["status_text"] = f"Subiendo ep.{_disp_ep(ep_num)} a {dest.get('name','?')} (fallback)..."
                                     _persist_job(job)
                                     dl_ep["n"] = ep_num
                                     media_data = await _download_episode_media(client, episode, source_channel_id, _progress,
@@ -2380,20 +2548,20 @@ async def _process_job(job: dict, db: dict):
                                                                                 streaming_mkv=streaming_mkv, job=job)
                                     sent_ids = await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job)
                             else:
-                                job["status_text"] = f"Copiando (telegram) ep.{ep_num}/{total} a {dest.get('name','?')}..."
+                                job["status_text"] = f"Copiando (telegram) ep.{_disp_ep(ep_num)} a {dest.get('name','?')}..."
                                 _persist_job(job)
                                 sent_ids = await _copy_episode_from_origin(client, source_channel_id, episode, dest, topic_id, delay)
                             first_dest_msg_ids = sent_ids
                         elif cb2_active:
                             # Resto: copia REAL desde el media descargado del origen (cada destino su file_id)
-                            job["status_text"] = f"Subiendo ep.{ep_num}/{total} a {dest.get('name','?')}..."
+                            job["status_text"] = f"Subiendo ep.{_disp_ep(ep_num)} a {dest.get('name','?')}..."
                             _persist_job(job)
                             await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job)
                         else:
                             # Resto: copia telegram desde el primer destino (sin re-subir).
                             # F5: si dest-0 fue omitido y su topic no dio msg_ids (vacío),
                             # fallback a copia desde el origen cuando es propio.
-                            job["status_text"] = f"Copiando (telegram) ep.{ep_num}/{total} a {dest.get('name','?')}..."
+                            job["status_text"] = f"Copiando (telegram) ep.{_disp_ep(ep_num)} a {dest.get('name','?')}..."
                             _persist_job(job)
                             if first_dest_msg_ids:
                                 await _copy_episode_from_first(client, destinations[0], dest, first_dest_msg_ids, topic_id, delay)
@@ -2796,7 +2964,7 @@ def _fetch_item_data_sync(item_id: str) -> Optional[dict]:
             pconn = sqlite3.connect(db_path)
             pconn.row_factory = sqlite3.Row
             try:
-                # Plugins sin catálogo (card_frames, enricher, peers...): saltar
+                # Plugins sin catálogo (item_frames, enricher, peers...): saltar
                 # en silencio en vez de loguear "no such table" por cada uno.
                 _has = pconn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unified_catalog' LIMIT 1"
@@ -2868,7 +3036,7 @@ def _fetch_episodes_sync(item_id: str) -> list:
         try:
             pconn = sqlite3.connect(db_path)
             pconn.row_factory = sqlite3.Row
-            # Plugins sin catálogo (card_frames, enricher, peers...): saltar en silencio.
+            # Plugins sin catálogo (item_frames, enricher, peers...): saltar en silencio.
             _ptab = pconn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unified_catalog' LIMIT 1"
             ).fetchone()
@@ -3351,7 +3519,7 @@ def _resolve_cover_override(job) -> Optional[str]:
     stored = (job.get("cover_text") or "").strip()
     if stored:
         if "{f" in stored:
-            cover_episodes = len(_fetch_episodes_sync(job["item_id"])) if job.get("item_id") else 0
+            cover_episodes = _job_episode_count(job)
             return _resolve_cover_tags(stored, job.get("title", ""), cover_episodes, job.get("enrich_details") or {})
         return stored
     # Sin cover_text: solo usar plantilla default si vino del enriquecedor
@@ -3360,14 +3528,71 @@ def _resolve_cover_override(job) -> Optional[str]:
     dtpl = _default_cover_template(job.get("category", ""), job.get("subcategory", ""))
     if not dtpl:
         return None
-    cover_episodes = len(_fetch_episodes_sync(job["item_id"])) if job.get("item_id") else 0
+    cover_episodes = _job_episode_count(job)
     return _resolve_cover_tags(dtpl, job.get("title", ""), cover_episodes, job.get("enrich_details") or {})
+
+
+def _download_poster_bytes_sync(url, timeout=25):
+    """Descarga un póster (SÍNCRONO, ejecutar con asyncio.to_thread).
+    Evita el CORS del navegador al guardar desde el editor."""
+    try:
+        import requests as _rq
+        _u = str(url or "")
+        if not _u.startswith("http"):
+            return None
+        _r = _rq.get(_u, timeout=timeout)
+        if _r.status_code == 200 and _r.content and 1024 < len(_r.content) < 10 * 1024 * 1024:
+            return _r.content
+    except Exception:
+        pass
+    return None
+
+
+def _display_name_from_details(details) -> str:
+    """2026-09-12: nombre visible del job = Original title + 🗓año
+    (sin año → solo título). Fallback al title ES si no hay original."""
+    try:
+        if not isinstance(details, dict):
+            return ""
+        _t = (details.get("api_original_title") or details.get("api_title") or "").strip()
+        if not _t:
+            return ""
+        _y = ""
+        try:
+            import re as _re3
+            _m3 = _re3.search(r"(\d{4})", str(details.get("api_year") or ""))
+            if _m3:
+                _y = _m3.group(1)
+        except Exception:
+            pass
+        return "%s🗓%s" % (_t, _y) if _y else _t
+    except Exception:
+        return ""
 
 
 def _bridge_enricher_cover(job) -> tuple:
     """2026-09-04: puente al cover editado en local (tvcat_enricher) vía registry.
     Devuelve (cover_text|None, poster_blob|None). Se usa en AMBAS ramas de copia
-    (con y sin cover_messages) y en el modal de la cola."""
+    (con y sin cover_messages) y en el modal de la cola.
+    2026-09-12: job con cover_local (partido) NUNCA toca el registry compartido:
+    devuelve su propio texto/póster o (None, None)."""
+    try:
+        if isinstance(job, dict) and job.get("cover_local"):
+            _lt = (job.get("cover_text") or "").strip() or None
+            _lp = None
+            if job.get("cover_use_poster", job.get("use_enricher_cover", True)):
+                _b64 = (job.get("cover_poster_b64") or "").strip()
+                if _b64:
+                    if _b64.startswith("data:") and "," in _b64:
+                        _b64 = _b64.split(",", 1)[1]
+                    import base64 as _b64m
+                    try:
+                        _lp = _b64m.b64decode(_b64)
+                    except Exception:
+                        _lp = None
+            return _lt, _lp
+    except Exception:
+        pass
     try:
         from services.cover_override_registry import get_enriched_by_item_id as _gebi
         _enr = _gebi(str(job.get("item_id") or ""))
@@ -3400,6 +3625,8 @@ def _seed_job_cover_from_local(job) -> bool:
     try:
         if not isinstance(job, dict):
             return False
+        if job.get("cover_local"):
+            return False
         if job.get("cover_manual"):
             return False
         if (job.get("cover_text") or "").strip() and not job.get("cover_from_local"):
@@ -3431,6 +3658,15 @@ def _job_poster_bytes_sync(job) -> Optional[bytes]:
         _bt, _bp = _bridge_enricher_cover(job if isinstance(job, dict) else {})
         if _bp and isinstance(_bp, (bytes, bytearray, memoryview)):
             return bytes(_bp)
+    except Exception:
+        pass
+    # 2026-09-12: URL guardada en el job (el b64 no llegó al guardar).
+    try:
+        _purl = ((job or {}).get("cover_poster_url") or "").strip()
+        if _purl:
+            _dl2 = _download_poster_bytes_sync(_purl)
+            if _dl2:
+                return _dl2
     except Exception:
         pass
     try:
@@ -3502,7 +3738,7 @@ async def _copy_cover_to_destinations(job, client, cover_messages, destinations,
                 try:
                     dtpl = _default_cover_template(job.get("category", ""), job.get("subcategory", ""))
                     if dtpl and job.get("enrich_details"):
-                        ep_cnt = len(_fetch_episodes_sync(job.get("item_id"))) if job.get("item_id") else 0
+                        ep_cnt = _job_episode_count(job)
                         cover_override = _resolve_cover_tags(dtpl, job.get("title", ""), ep_cnt, job.get("enrich_details") or {})
                     else:
                         cover_override = (job.get("title") or "").strip()

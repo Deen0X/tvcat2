@@ -1134,8 +1134,35 @@ var UI = {
     },
 
     // Guardar cambios globales (Perfil, Categorías Preferidas y Contraseña si aplica)
+    // Sin botones propios en la pestana Userbot: sus secciones (credenciales,
+    // comportamiento, buckets y Google) se persisten con el guardado global.
+    saveUserbotTab: function() {
+        try {
+            if (!document.getElementById('pane-userbot')) return;
+            if (typeof window.saveUserbotDefaults === 'function') window.saveUserbotDefaults();
+            if (typeof window.saveTelegramSettings === 'function') window.saveTelegramSettings();
+            if (typeof window.saveGoogleConfig === 'function') window.saveGoogleConfig();
+        } catch (e) {}
+    },
+
     saveGlobalSettings: function() {
         var self = this;
+
+        // Si hay una config de plugin abierta (iframe), guardarla también con
+        // los botones globales (misma línea: Guardar Cambios / Aplicar).
+        try {
+            var _pifr = document.querySelector('#plugins-list-container iframe');
+            if (_pifr && _pifr.contentWindow && typeof _pifr.contentWindow.saveConfig === 'function') {
+                _pifr.contentWindow.saveConfig();
+            }
+        } catch (e) {}
+
+        // Config genérica de plugin (settings_schema + hero cats): centralizada
+        // en Guardar Cambios / Aplicar, sin botones propios en la página.
+        try { if (typeof window.saveCurrentGenericPluginConfig === 'function') window.saveCurrentGenericPluginConfig(); } catch (e) {}
+
+        // La pestana Userbot no tiene botones propios: guardar sus secciones tambien.
+        try { if (typeof self.saveUserbotTab === 'function') self.saveUserbotTab(); } catch (e) {}
 
         // Guardar valores de saltos del reproductor en localStorage
         var jsInput = document.getElementById('player-jump-short');
@@ -1238,6 +1265,18 @@ var UI = {
 
     applyGlobalSettings: function() {
         var self = this;
+        // La pestana Userbot no tiene botones propios: guardar sus secciones tambien.
+        try { if (typeof self.saveUserbotTab === 'function') self.saveUserbotTab(); } catch (e) {}
+        // Igual que Guardar: propaga a la config de plugin abierta (iframe).
+        try {
+            var _pifr2 = document.querySelector('#plugins-list-container iframe');
+            if (_pifr2 && _pifr2.contentWindow && typeof _pifr2.contentWindow.saveConfig === 'function') {
+                _pifr2.contentWindow.saveConfig();
+            }
+        } catch (e) {}
+        // Config genérica de plugin (settings_schema + hero cats): centralizada
+        // en Guardar Cambios / Aplicar, sin botones propios en la página.
+        try { if (typeof window.saveCurrentGenericPluginConfig === 'function') window.saveCurrentGenericPluginConfig(); } catch (e) {}
         var nameInput = document.getElementById('profile-display-name');
         var displayName = nameInput ? nameInput.value.trim() : '';
         if (!displayName) {

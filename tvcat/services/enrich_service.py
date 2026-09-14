@@ -174,8 +174,12 @@ def render_template(details: dict, category="", subcategory="") -> str:
     Tags disponibles (idioma neutro / inglés / español):
       {title}, {release_year}, {year}, {description}, {sinopsis}, {overview},
       {rating}, {rating_count}, {genres}, {generos}, {themes}, {temas},
-      {author}, {autor}, {director}, {release_date}, {fecha}, {category},
-      {categoria}, {id}, {cover}, {originalmsg}
+      {author}, {autor}, {director}, {directores}, {release_date}, {fecha},
+      {category}, {categoria}, {id}, {cover}, {originalmsg},
+      {original_title}, {titulo_original},
+      {title_es}, {titulo_espana}, {title_latam}, {title_mx}, {titulo_latino},
+      {alt_titles}, {titulos_alt},
+      {cast}, {reparto}, {actores}, {actors}
     """
     templates = _load_templates()
     tpl = _resolve_template(templates, category, subcategory)
@@ -209,6 +213,12 @@ def render_template(details: dict, category="", subcategory="") -> str:
     year = str(details.get("api_year") or "")
     release_date = str(details.get("api_release_date") or "")
     cover = _json_list(details.get("api_cover"))
+    original_title = str(details.get("api_original_title") or "")
+    title_es = str(details.get("api_title_es") or "")
+    title_latam = str(details.get("api_title_latam") or "")
+    alt_titles = _json_list(details.get("api_alt_titles"))
+    cast = _json_list(details.get("api_cast"))
+    director = str(details.get("api_director") or details.get("api_author") or "")
 
     replacements = {
         "{title}": str(details.get("api_title") or ""),
@@ -225,7 +235,8 @@ def render_template(details: dict, category="", subcategory="") -> str:
         "{temas}": themes,
         "{author}": str(details.get("api_author") or ""),
         "{autor}": str(details.get("api_author") or ""),
-        "{director}": str(details.get("api_author") or ""),
+        "{director}": director,
+        "{directores}": director,
         "{release_date}": release_date,
         "{fecha}": release_date,
         "{category}": str(details.get("api_category") or ""),
@@ -233,6 +244,19 @@ def render_template(details: dict, category="", subcategory="") -> str:
         "{id}": str(details.get("api_id") or ""),
         "{cover}": cover,
         "{originalmsg}": str(details.get("originalmsg") or details.get("original_msg") or ""),
+        "{original_title}": original_title,
+        "{titulo_original}": original_title,
+        "{title_es}": title_es,
+        "{titulo_espana}": title_es,
+        "{title_latam}": title_latam,
+        "{title_mx}": title_latam,
+        "{titulo_latino}": title_latam,
+        "{alt_titles}": alt_titles,
+        "{titulos_alt}": alt_titles,
+        "{cast}": cast,
+        "{reparto}": cast,
+        "{actores}": cast,
+        "{actors}": cast,
     }
 
     out = tpl
@@ -253,6 +277,7 @@ def render_template(details: dict, category="", subcategory="") -> str:
             "author": "Author: {value}",
             "autor": "Author: {value}",
             "director": "Director: {value}",
+            "directores": "Director: {value}",
             "release_date": "Release date: {value}",
             "fecha": "Release date: {value}",
             "category": "Category: {value}",
@@ -266,6 +291,19 @@ def render_template(details: dict, category="", subcategory="") -> str:
             "sinopsis": "Sinopsis:\n{value}",
             "overview": "Overview:\n{value}",
             "originalmsg": "{value}",
+            "original_title": "Original title: {value}",
+            "titulo_original": "Original title: {value}",
+            "title_es": "Title ES: {value}",
+            "titulo_espana": "Title ES: {value}",
+            "title_latam": "Title Latam: {value}",
+            "title_mx": "Title Latam: {value}",
+            "titulo_latino": "Title Latam: {value}",
+            "alt_titles": "Alt titles: {value}",
+            "titulos_alt": "Alt titles: {value}",
+            "cast": "Cast: {value}",
+            "reparto": "Cast: {value}",
+            "actores": "Cast: {value}",
+            "actors": "Cast: {value}",
         }
         # Cargar personalizaciones desde TGHirayi si existe
         try:
@@ -300,7 +338,8 @@ def render_template(details: dict, category="", subcategory="") -> str:
 
 # ─── API pública ───────────────────────────────────────────────────
 
-async def search(query: str, category: str = "", subcategory: str = "") -> dict:
+async def search(query: str, category: str = "", subcategory: str = "",
+                episode_count: int = None) -> dict:
     """Busca candidatos de un título. Devuelve {candidates, has_more, provider, threshold}.
     Si el texto de búsqueda es una URL directa de themoviedb.org (movie/tv), se resuelve el
     id y media_type del propio enlace y se devuelve ese candidato directamente (sin search)."""
@@ -316,12 +355,26 @@ async def search(query: str, category: str = "", subcategory: str = "") -> dict:
 
     # ── URL directa de TMDB: ej. https://www.themoviedb.org/movie/1452176-slug
     #    o https://www.themoviedb.org/tv/108978-reacher → id + media_type del enlace.
+    #    La URL es la autoridad: se usa tal cual sin validar contra búsqueda.
     url_match = re.match(r'^https?://(?:www\.)?themoviedb\.org/(movie|tv)/(\d+)', query.strip())
     if url_match and provider_name == 'tmdb':
         media_type = "tv" if url_match.group(1) == "tv" else "movie"
         tmdb_id = url_match.group(2)
+        details = None
         try:
             details = await provider.get_details(tmdb_id, media_type=media_type)
+            # TMDB puede devolver datos de un tipo distinto al solicitado
+            # (p.ej. /tv/ID que es en realidad una película). Detectar y corregir:
+            # primera emisión → tv; estreno cinematográfico → movie.
+            if details and media_type == "tv" and details.get("api_release_date"):
+                _rd = details.get("api_release_date") or ""
+                _fad = details.get("first_air_date")
+                if _rd and not _fad:
+                    print(f"[ENRICH] TMDB auto-correct: id={tmdb_id} es película, reintentando como movie", flush=True)
+                    details = await provider.get_details(tmdb_id, media_type="movie")
+            elif details and media_type == "movie" and details.get("first_air_date"):
+                print(f"[ENRICH] TMDB auto-correct: id={tmdb_id} es serie, reintentando como tv", flush=True)
+                details = await provider.get_details(tmdb_id, media_type="tv")
         except Exception as e:
             print(f"[ENRICH] Error TMDB directo ('{query}'): {e}", flush=True)
             details = None
@@ -337,7 +390,7 @@ async def search(query: str, category: str = "", subcategory: str = "") -> dict:
                 "poster": covers[0] if covers else None,
                 "year": details.get("api_year"),
                 "provider": provider_name,
-                "media_type": media_type,
+                "media_type": details.get("api_category") or media_type,
             }
             return {"candidates": [candidate] if candidate.get("title") else [],
                     "has_more": False, "provider": provider_name,
@@ -352,6 +405,18 @@ async def search(query: str, category: str = "", subcategory: str = "") -> dict:
         attempts.append(second)
 
     media_type = resolve_media_type(category, subcategory) if provider_name == 'tmdb' else None
+    # Si episode_count indica múltiples episodios → serie probable → TV primero.
+    # Si 1 episodio o desconocido → película probable → movie primero.
+    # En ambos casos, si el primer intento no da resultados, se prueba el otro.
+    if provider_name == 'tmdb':
+        if episode_count is not None and episode_count > 1:
+            search_order = ('tv', 'movie')
+        else:
+            search_order = ('movie', 'tv')
+    else:
+        search_order = (media_type,)
+
+    print(f"[ENRICH] search query='{query}' cleaned='{cleaned}' attempts={attempts} cat='{category}' sub='{subcategory}' -> provider={provider_name} episode_count={episode_count} search_order={search_order}", flush=True)
 
     raw_candidates = []
     for attempt in attempts:
@@ -359,11 +424,16 @@ async def search(query: str, category: str = "", subcategory: str = "") -> dict:
             continue
         try:
             if provider_name == 'tmdb':
-                found = await provider.search(attempt, media_type=media_type)
+                for mt in search_order:
+                    found = await provider.search(attempt, media_type=mt)
+                    print(f"[ENRICH] provider.search('{attempt}', media_type={mt}) -> {len(found) if found else 0} resultados", flush=True)
+                    if found:
+                        raw_candidates.extend(found)
             else:
                 found = await provider.search(attempt)
-            if found:
-                raw_candidates.extend(found)
+                print(f"[ENRICH] provider.search('{attempt}') -> {len(found) if found else 0} resultados", flush=True)
+                if found:
+                    raw_candidates.extend(found)
         except Exception as e:
             print(f"[ENRICH] Error search ({provider_name}, '{attempt}'): {e}", flush=True)
 
@@ -375,7 +445,13 @@ async def search(query: str, category: str = "", subcategory: str = "") -> dict:
         if not cid or cid in seen:
             continue
         seen.add(cid)
-        score = get_match_score(cleaned or query, c.get("title") or "")
+        # El título localizado puede no parecerse a la query ("Batman vuelve"
+        # vs "Batman Returns"): puntuar también contra el original y quedarse
+        # con la mejor nota para no filtrar candidatos válidos por idioma.
+        score = max(
+            get_match_score(cleaned or query, c.get("title") or ""),
+            get_match_score(cleaned or query, c.get("original_title") or c.get("original_name") or ""),
+        )
         scored.append((score, c))
 
     scored.sort(key=lambda x: x[0], reverse=True)

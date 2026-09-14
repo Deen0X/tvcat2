@@ -46,7 +46,32 @@ def init_db():
             group_title TEXT,
             group_title_flat TEXT,
             telegram_link TEXT,
+            is_collection INTEGER DEFAULT 0,
+            collection_raw TEXT DEFAULT '',
+            collection_name TEXT DEFAULT '',
+            collection_serial TEXT DEFAULT '',
+            collection_msg_date INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # --- Colecciones locales/virtuales (títulos sintéticos CORE, sin canal) ---
+    # Una colección local vive aquí hasta que el escaneo encuentra la misma
+    # identidad (nombre+serial) en un canal con fecha más nueva; entonces el
+    # local se elimina y prevalece la escaneada. Visibilidad: global.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS collections_local (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id TEXT UNIQUE,
+            name TEXT NOT NULL DEFAULT '',
+            serial TEXT NOT NULL DEFAULT '',
+            entries_json TEXT DEFAULT '[]',
+            description TEXT DEFAULT '',
+            cover_text TEXT DEFAULT '',
+            cover_asset_key TEXT DEFAULT '',
+            created_by INTEGER,
+            created_at INTEGER DEFAULT 0,
+            updated_at INTEGER DEFAULT 0
         )
     """)
 
@@ -246,7 +271,10 @@ def init_db():
     # Migraciones seguras
     for col, typ in [("telegram_msg_id", "INTEGER"), ("cover_url", "TEXT"), ("group_title", "TEXT"), ("group_title_flat", "TEXT"), ("telegram_link", "TEXT"), ("season_display", "TEXT"),
                      ("info_messages", "TEXT"), ("season_number", "TEXT"), ("api_year", "TEXT"), ("active_cover_idx", "INTEGER"), ("api_cover", "TEXT"),
-                     ("backdrop", "TEXT"), ("release_date", "TEXT"), ("sync_status", "TEXT"), ("source_channel_id", "TEXT"), ("client_type", "TEXT"), ("genres", "TEXT")]:
+                     ("backdrop", "TEXT"), ("release_date", "TEXT"), ("sync_status", "TEXT"), ("source_channel_id", "TEXT"), ("client_type", "TEXT"), ("genres", "TEXT"),
+                     ("is_collection", "INTEGER DEFAULT 0"), ("collection_raw", "TEXT DEFAULT ''"),
+                     ("collection_name", "TEXT DEFAULT ''"), ("collection_serial", "TEXT DEFAULT ''"),
+                     ("collection_msg_date", "INTEGER DEFAULT 0")]:
         try:
             c.execute(f"ALTER TABLE unified_catalog ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -264,6 +292,10 @@ def init_db():
             pass
     try:
         c.execute("ALTER TABLE unified_catalog ADD COLUMN has_mkv INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE unified_catalog ADD COLUMN rorder INTEGER DEFAULT NULL")
     except sqlite3.OperationalError:
         pass
     # Tabla de metadata de pistas de audio/subtítulos por episodio (HLS multitrack).
@@ -348,6 +380,26 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_item_episodes_key ON item_episodes(item_id, episode_key)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_watch_progress_key ON watch_progress(profile_id, episode_key)")
 
+    # --- Comentarios globales por título (2026-09-08): un comentario por
+    # item_id, visible para todos los usuarios autenticados. El creador puede
+    # permitir edición colaborativa con editable_by_others. Solo admin/creador
+    # pueden eliminar (vía endpoints del gateway).
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tvcat_item_comments (
+            item_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            text TEXT NOT NULL DEFAULT '',
+            editable_by_others INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            edited INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    try:
+        c.execute("ALTER TABLE tvcat_item_comments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
     print(" [CATALOG] Base de datos inicializada")
@@ -356,6 +408,497 @@ def init_db():
         migrate_cache_keys()
     except Exception as e:
         print(f" [CATALOG] migrate_cache_keys omitida: {e}", flush=True)
+
+
+# --- Colecciones locales/virtuales + identidad de instancia (2026-09-09) ---
+# Una colección local es un título sintético CORE (sin canal) que vive en
+# `collections_local` hasta que el escaneo encuentra la misma identidad
+# (nombre+serial) en un canal con fecha más nueva. Regla de precedencia:
+#   fecha_msg_escaneado > updated_at_local  =>  se borra el local.
+# En caso contrario el local prevalece (es más nuevo que el escaneado).
+LOCAL_COLLECTION_CHANNEL = "collections_local"
+
+import time as _time
+import uuid as _uuid
+
+
+def get_instance_uid():
+    """UID corto (8 hex) único de esta instancia, persistido en tvcat_settings.
+    Se usa como prefijo del serial de colecciones para evitar colisiones
+    entre instancias distintas que usen el mismo nombre."""
+    conn = get_conn()
+    try:
+        try:
+            row = conn.execute("SELECT value FROM tvcat_settings WHERE key='instance_uid'").fetchone()
+        except Exception:
+            row = None
+        if row and (row["value"] or "").strip():
+            return row["value"].strip()
+        uid = _uuid.uuid4().hex[:8]
+        try:
+            conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES ('instance_uid', ?)", (uid,))
+            conn.commit()
+        except Exception:
+            pass
+        return uid
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def next_collection_serial():
+    """Serial único `uid8-seq` para una colección local nueva."""
+    conn = get_conn()
+    try:
+        try:
+            row = conn.execute("SELECT value FROM tvcat_settings WHERE key='collection_serial_seq'").fetchone()
+            seq = int((row["value"] if row else "0") or 0) + 1
+        except Exception:
+            seq = 1
+        try:
+            conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES ('collection_serial_seq', ?)", (str(seq),))
+            conn.commit()
+        except Exception:
+            pass
+        return "%s-%d" % (get_instance_uid(), seq)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _local_now():
+    return int(_time.time())
+
+
+def create_local_collection(name, serial, entries, user_id=None, description="", cover_text=""):
+    """Crea una fila local. Devuelve el dict con item_id `COL-<id>`."""
+    import json as _json
+    conn = get_conn()
+    try:
+        try:
+            conn.execute("ALTER TABLE collections_local ADD COLUMN description TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE collections_local ADD COLUMN cover_text TEXT DEFAULT ''")
+        except Exception:
+            pass
+        now = _local_now()
+        cur = conn.execute(
+            "INSERT INTO collections_local (name, serial, entries_json, description, cover_text, created_by, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ((name or "").strip(), (serial or "").strip(),
+             _json.dumps(entries or [], ensure_ascii=False),
+             (description or "").strip(), (cover_text or "").strip(), user_id, now, now))
+        lid = cur.lastrowid
+        item_id = "COL-%d" % lid
+        conn.execute("UPDATE collections_local SET item_id=? WHERE id=?", (item_id, lid))
+        conn.commit()
+        return get_local_collection(item_id, _conn=conn)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def get_local_collection(item_id, _conn=None):
+    conn = _conn or get_conn()
+    try:
+        row = conn.execute("SELECT * FROM collections_local WHERE item_id=?", (item_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        if _conn is None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def list_local_collections(_conn=None):
+    conn = _conn or get_conn()
+    try:
+        return [dict(r) for r in conn.execute("SELECT * FROM collections_local ORDER BY name ASC").fetchall()]
+    finally:
+        if _conn is None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def update_local_collection(item_id, name=None, serial=None, entries=None, user_id=None, description=None, cover_text=None):
+    """Actualiza una colección local (solo campos dados). Refresca updated_at."""
+    import json as _json
+    conn = get_conn()
+    try:
+        try:
+            conn.execute("ALTER TABLE collections_local ADD COLUMN description TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE collections_local ADD COLUMN cover_text TEXT DEFAULT ''")
+        except Exception:
+            pass
+        sets, params = [], []
+        if name is not None:
+            sets.append("name=?")
+            params.append((name or "").strip())
+        if serial is not None:
+            sets.append("serial=?")
+            params.append((serial or "").strip())
+        if entries is not None:
+            sets.append("entries_json=?")
+            params.append(_json.dumps(entries or [], ensure_ascii=False))
+        if description is not None:
+            sets.append("description=?")
+            params.append((description or "").strip())
+        if cover_text is not None:
+            sets.append("cover_text=?")
+            params.append((cover_text or "").strip())
+        sets.append("updated_at=?")
+        params.append(_local_now())
+        if user_id is not None:
+            sets.append("created_by=COALESCE(created_by, ?)")
+            params.append(user_id)
+        params.append(item_id)
+        conn.execute("UPDATE collections_local SET %s WHERE item_id=?" % ", ".join(sets), params)
+        conn.commit()
+        return get_local_collection(item_id, _conn=conn)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def delete_local_collection(item_id, _conn=None):
+    conn = _conn or get_conn()
+    try:
+        row = conn.execute("SELECT id FROM collections_local WHERE item_id=?", (item_id,)).fetchone()
+        if not row:
+            return False
+        lid = int(row["id"])
+        conn.execute("DELETE FROM collections_local WHERE item_id=?", (item_id,))
+        try:
+            conn.execute("DELETE FROM catalog_assets WHERE channel_id=? AND telegram_msg_id=? AND asset_type='cover'",
+                         (LOCAL_COLLECTION_CHANNEL, lid))
+        except Exception:
+            pass
+        conn.commit()
+        return True
+    finally:
+        if _conn is None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def save_local_cover(local_id, img_bytes, mime=None):
+    """Guarda el blob del cover en catalog_assets (channel_id sintético)."""
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO catalog_assets"
+            " (channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size)"
+            " VALUES (?, ?, 'cover', 0, ?, ?, ?)",
+            (LOCAL_COLLECTION_CHANNEL, int(local_id), bytes(img_bytes or b""),
+             mime or "image/jpeg", len(img_bytes or b"")))
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def get_local_cover(local_id, _conn=None):
+    conn = _conn or get_conn()
+    try:
+        row = conn.execute(
+            "SELECT image_blob, mime_type FROM catalog_assets"
+            " WHERE channel_id=? AND telegram_msg_id=? AND asset_type='cover' LIMIT 1",
+            (LOCAL_COLLECTION_CHANNEL, int(local_id))).fetchone()
+        if row and row["image_blob"]:
+            return {"blob": bytes(row["image_blob"]), "mime": row["mime_type"] or "image/jpeg"}
+        return None
+    except Exception:
+        return None
+    finally:
+        if _conn is None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def collection_identity_key(name, serial):
+    """Clave de conciliación local<->escaneado: (nombre normalizado, serial)."""
+    try:
+        from services.text_norm import normalize_title as _nt
+        return (_nt(name or ""), (serial or "").strip())
+    except Exception:
+        return ((name or "").strip().lower(), (serial or "").strip())
+
+
+def _cover_text_title(text):
+    """Título desde el tag Title/Título/Nombre del cover_text (igual que el
+    enriquecedor). Vacío si no hay tag resuelto."""
+    try:
+        import re as _re
+        _await_hash = False
+        for _line in (text or "").split("\n"):
+            _l = _line.strip()
+            if not _l:
+                continue
+            if _await_hash and _l.startswith("#"):
+                _v = _l.lstrip("#").strip().replace("_", " ")
+                if len(_v) >= 2:
+                    return _v[:200]
+                _await_hash = False
+                continue
+            _await_hash = False
+            _m = _re.match(r"(?i)^(t[ií]tulo|titulo|title|nombre)\s*[:=\-]?\s*(.*?)\s*$", _l)
+            if not _m:
+                continue
+            _v = _m.group(2).strip()
+            if not _v or _v in (":", "-", ""):
+                _await_hash = True
+                continue
+            if "{" in _v or "}" in _v or len(_v) < 2:
+                continue
+            return _v[:200]
+    except Exception:
+        pass
+    return ""
+
+
+def _cover_text_year(text):
+    """Año desde la línea Year:/Año: del cover_text."""
+    try:
+        import re as _re
+        m = _re.search(r"(?i)^\s*(?:year|a[ñn]o)\s*[:=\-]\s*(\d{4})\b", text or "", _re.MULTILINE)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
+def _details_year(details):
+    """Año desde enrich_details (api_year / api_release_date / release_date)."""
+    try:
+        d = details or {}
+        for k in ("api_year", "year", "release_year"):
+            v = d.get(k)
+            if v is None or v == "":
+                continue
+            s = str(v).strip()[:4]
+            if re.match(r"^\d{4}$", s):
+                return s
+        for k in ("api_release_date", "release_date", "fecha"):
+            v = d.get(k)
+            if not v:
+                continue
+            s = str(v).strip()[:4]
+            if re.match(r"^\d{4}$", s):
+                return s
+    except Exception:
+        pass
+    return ""
+
+
+def get_effective_title_year(item_id, _conn=None):
+    """Título/año EFECTIVOS de un item (lo que ve el usuario):
+    título = tag Title del cover enriquecido si existe, si no catálogo;
+    año = catálogo.year, si no Year: del cover enriquecido, si no
+    enrich_details. El year de unified_catalog casi nunca está relleno
+    (el scanner no lo escribe), por eso el fallback enriquecido es necesario
+    para que las colecciones publiquen `AÑO; Título`."""
+    title, year = "", ""
+    try:
+        conn = _conn or get_conn()
+        try:
+            row = conn.execute("SELECT title, year FROM unified_catalog WHERE item_id=?",
+                               (item_id,)).fetchone()
+            if row:
+                d = dict(row)
+                title = (d.get("title") or "").strip()
+                y = str(d.get("year") or "").strip()[:4]
+                if re.match(r"^\d{4}$", y or ""):
+                    year = y
+        except Exception:
+            pass
+        try:
+            from services.cover_override_registry import get_enriched_by_item_id
+            enriched = get_enriched_by_item_id(item_id)
+            if enriched:
+                t = _cover_text_title(enriched.get("cover_text") or "")
+                if t:
+                    title = t
+                if not year:
+                    y = _cover_text_year(enriched.get("cover_text") or "")
+                    if not y:
+                        det = enriched.get("enrich_details") or {}
+                        if isinstance(det, str):
+                            try:
+                                import json as _js
+                                det = _js.loads(det)
+                            except Exception:
+                                det = {}
+                        y = _details_year(det if isinstance(det, dict) else {})
+                    if y:
+                        year = y
+        except Exception:
+            pass
+    finally:
+        if _conn is None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return title, year
+
+
+def refresh_collection_entries(entries, _conn=None):
+    """Refresca una lista [{title, year, literal, item_id}] contra el catálogo
+    actual: cada entrada CON item_id adopta el título/año efectivos de HOY
+    (incluye ediciones del enriquecedor posteriores a la creación).
+    Sin item_id se conserva tal cual (normalizando year a 4 dígitos o '')."""
+    out = []
+    conn = _conn or get_conn()
+    try:
+        for e in entries or []:
+            e = dict(e or {})
+            iid = (e.get("item_id") or "").strip()
+            lit = bool(e.get("literal"))
+            if iid:
+                try:
+                    t, y = get_effective_title_year(iid, _conn=conn)
+                except Exception:
+                    t, y = "", ""
+                if t:
+                    e["title"] = t
+                if y:
+                    e["year"] = y
+                e["item_id"] = iid
+                e["literal"] = lit
+                if not (e.get("title") or "").strip():
+                    continue
+                out.append(e)
+            else:
+                t = (e.get("title") or "").strip()
+                if not t:
+                    continue
+                y = str(e.get("year") or "").strip()[:4]
+                e["title"] = t
+                e["year"] = y if re.match(r"^\d{4}$", y or "") else ""
+                e["literal"] = lit
+                out.append(e)
+        return out
+    finally:
+        if _conn is None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# --- Comentarios globales por título (2026-09-08) ---
+COMMENT_MAX_LEN = 500
+
+
+def get_item_comment(item_id):
+    """Devuelve el comentario global de un item_id con datos de autor para
+    visualización, o None si no existe. El autor se resuelve contra
+    tvcat_users + tvcat_user_prefs (display_name/avatar)."""
+    conn = get_conn()
+    try:
+        row = conn.execute("""
+            SELECT c.item_id, c.user_id, c.text, c.editable_by_others,
+                   c.created_at, c.updated_at, c.edited,
+                   u.username, p.display_name, p.avatar, p.avatar_url, p.color
+            FROM tvcat_item_comments c
+            LEFT JOIN tvcat_users u ON u.id = c.user_id
+            LEFT JOIN tvcat_user_prefs p ON p.user_id = c.user_id
+            WHERE c.item_id = ?
+        """, (item_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["editable_by_others"] = int(d.get("editable_by_others") or 0)
+        d["edited"] = bool(d.get("edited")) or (
+            str(d.get("updated_at") or "") != str(d.get("created_at") or ""))
+        return d
+    finally:
+        conn.close()
+
+
+def get_has_comment_map(item_ids):
+    """Batch: {item_id: True} para los ids que tienen comentario. Evita N+1
+    en listados (favoritos, continue, completed)."""
+    ids = [str(i) for i in (item_ids or []) if i]
+    if not ids:
+        return {}
+    conn = get_conn()
+    try:
+        out = {}
+        for a in range(0, len(ids), 500):
+            chunk = ids[a:a + 500]
+            ph = ",".join("?" for _ in chunk)
+            for r in conn.execute(
+                    f"SELECT item_id FROM tvcat_item_comments WHERE item_id IN ({ph})",
+                    chunk).fetchall():
+                out[str(r["item_id"])] = True
+        return out
+    finally:
+        conn.close()
+
+
+def set_item_comment(item_id, user_id, text, editable_by_others=False):
+    """Crea o sobrescribe el comentario de un item_id. El creador original
+    (user_id) se conserva en ediciones de terceros; el flag
+    editable_by_others solo lo cambia el creador o el admin (el gateway lo
+    garantiza pasando el valor ya resuelto). Retorna el comentario completo."""
+    text = (text or "").strip()[:COMMENT_MAX_LEN]
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT user_id, created_at FROM tvcat_item_comments WHERE item_id = ?",
+                           (item_id,)).fetchone()
+        if row:
+            conn.execute("""UPDATE tvcat_item_comments
+                            SET text = ?, editable_by_others = ?,
+                                updated_at = CURRENT_TIMESTAMP, edited = 1
+                            WHERE item_id = ?""",
+                         (text, 1 if editable_by_others else 0, item_id))
+        else:
+            conn.execute("""INSERT INTO tvcat_item_comments
+                            (item_id, user_id, text, editable_by_others)
+                            VALUES (?, ?, ?, ?)""",
+                         (item_id, user_id, text, 1 if editable_by_others else 0))
+        conn.commit()
+    finally:
+        conn.close()
+    return get_item_comment(item_id)
+
+
+def delete_item_comment(item_id):
+    """Elimina el comentario de un item_id. Retorna True si existía."""
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM tvcat_item_comments WHERE item_id = ?", (item_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
 
 
 def _seed_tag_dictionary(conn):
@@ -680,8 +1223,9 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 (item_id, title, category, subcategory, source, origin_depth,
                  description, year, rating, alt_titles, metadata_json, cover_url,
                  telegram_msg_id, group_title, group_title_flat, telegram_link,
-                 season_display, info_messages, genres)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 season_display, info_messages, genres, is_collection, collection_raw,
+                 collection_name, collection_serial, collection_msg_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 item_id,
                 d.get("title"),
@@ -701,7 +1245,12 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 d.get("telegram_link"),
                 d.get("season_display"),
                 info,
-                genres
+                genres,
+                int(d.get("is_collection", 0) or 0),
+                d.get("collection_raw", ""),
+                d.get("collection_name", ""),
+                d.get("collection_serial", ""),
+                int(d.get("collection_msg_date", 0) or 0)
             ))
             items_inserted += 1
 
@@ -884,14 +1433,18 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
                 (item_id, title, category, subcategory, source, origin_depth,
                  description, year, rating, alt_titles, metadata_json, cover_url,
                  telegram_msg_id, group_title, group_title_flat, telegram_link,
-                 season_display, info_messages, genres)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 season_display, info_messages, genres, is_collection, collection_raw,
+                 collection_name, collection_serial, collection_msg_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 item_id, d.get("title"), d.get("category", ""), d.get("subcategory", ""),
                 plugin_name, 0, d.get("description", ""), d.get("year", ""), d.get("rating", 0),
                 d.get("alt_titles", "[]"), "{}", f"/api/cover/{item_id}",
                 d.get("telegram_msg_id"), d.get("group_title"), d.get("group_title_flat"),
-                d.get("telegram_link"), d.get("season_display"), info, genres
+                d.get("telegram_link"), d.get("season_display"), info, genres,
+                int(d.get("is_collection", 0) or 0), d.get("collection_raw", ""),
+                d.get("collection_name", ""), d.get("collection_serial", ""),
+                int(d.get("collection_msg_date", 0) or 0)
             ))
             items_inserted += 1
 
@@ -1140,7 +1693,8 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
     total = c.fetchone()[0]
 
     c.execute(f"""
-        SELECT * FROM unified_catalog
+        SELECT *, EXISTS(SELECT 1 FROM tvcat_item_comments c WHERE c.item_id = unified_catalog.item_id) AS has_comment
+        FROM unified_catalog
         WHERE id IN (
             SELECT MIN(id)
             FROM unified_catalog
@@ -1166,6 +1720,10 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
             "rating": d.get("rating", 0),
             "cover_url": d.get("cover_url", ""),
             "has_mkv": d.get("has_mkv", 0),
+            "has_comment": 1 if d.get("has_comment") else 0,
+            "is_collection": int(d.get("is_collection", 0) or 0),
+            "collection_name": d.get("collection_name", "") or "",
+            "collection_serial": d.get("collection_serial", "") or "",
         })
 
     conn.close()

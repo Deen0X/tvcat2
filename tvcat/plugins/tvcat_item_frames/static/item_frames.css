@@ -1,13 +1,13 @@
-/* TVCat Card Frames — overlay PNG sobre .grid-item-cover + shine del seleccionado.
+/* TVCat Item Frames — overlay PNG sobre .grid-item-cover + shine del seleccionado.
    Fallbacks estáticos primero (TV vieja): nada de var() sin fallback, nada de inset. */
-.grid-item-cover .card-frame {
+.grid-item-cover .item-frame {
     position: absolute;
     top: 0; right: 0; bottom: 0; left: 0;
     z-index: 2;
     pointer-events: none;
     overflow: hidden;
 }
-.grid-item-cover .card-frame img {
+.grid-item-cover .item-frame img {
     width: 100%;
     height: 100%;
     object-fit: fill;
@@ -16,7 +16,7 @@
 /* Badges del core por encima del marco (el frame es z:2; el fav/mkv ya van a 10). */
 .grid-item-cover .grid-item-badge { z-index: 4; }
 /* Shine: franja diagonal que cruza una vez por ciclo (solo seleccionado). */
-.grid-item-cover .card-shine {
+.grid-item-cover .item-shine {
     position: absolute;
     top: -20%; right: 0; bottom: -20%; left: 0;
     z-index: 3;
@@ -26,12 +26,12 @@
     transform: translateX(-150%);
     opacity: 0;
 }
-.grid-item.card-selected .card-shine.shine-go {
-    animation-name: cardframe-shine;
+.grid-item.card-selected .item-shine.shine-go {
+    animation-name: itemframe-shine;
     animation-timing-function: ease-in-out;
     animation-iteration-count: infinite;
 }
-@keyframes cardframe-shine {
+@keyframes itemframe-shine {
     0% { transform: translateX(-150%); opacity: 0; }
     8% { opacity: 1; }
     42% { transform: translateX(150%); opacity: 1; }
@@ -39,5 +39,5 @@
     100% { transform: translateX(150%); opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-    .grid-item-cover .card-shine { display: none; }
+    .grid-item-cover .item-shine { display: none; }
 }

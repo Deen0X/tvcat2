@@ -27,5 +27,14 @@
     "user": true,
     "child": false
   },
-  "iconEmoji": "📡"
+  "iconEmoji": "📡",
+  "tray": [
+    {
+      "id": "add_scan_item",
+      "label": "Añadir scan item",
+      "iconEmoji": "➕",
+      "color": "#22c55e",
+      "action": "add_scan_item"
+    }
+  ]
 }

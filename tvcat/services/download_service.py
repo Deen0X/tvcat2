@@ -31,6 +31,7 @@ _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PROJECT_ROOT = os.path.dirname(_BASE)
 _HLS_CACHE_DIR = os.path.join(_PROJECT_ROOT, "data", "cache")
 HLS_BLOCK_SIZE = 512 * 1024
+CHUNK = 512 * 1024  # bloque del sparse/sidecar (conserva formato .chunks previo)
 
 _jobs = {}  # episode_key -> {status, progress, speed, ...}
 _lock = asyncio.Lock()
@@ -46,6 +47,46 @@ def set_prefer(episode_key: str, prefer_block):
     j = _jobs.get(episode_key)
     if j is not None:
         j["prefer_block"] = prefer_block
+
+
+_tasks = {}  # episode_key -> asyncio.Task del worker en curso
+
+
+def cancel(episode_key: str) -> bool:
+    """Cancela el worker en curso (al salir del player). El sidecar conserva lo
+    descargado; al entrar de nuevo se reanuda (ensure → status partial)."""
+    t = _tasks.get(episode_key)
+    if t is not None and not t.done():
+        try:
+            t.cancel()
+        except Exception:
+            pass
+    j = _jobs.get(episode_key)
+    if j is not None and j.get("status") == "downloading":
+        j["status"] = "partial"
+    return True
+
+
+async def reprioritize(episode_key: str, file_size: int, msg, dc_id=None,
+                       prefer_block=None) -> bool:
+    """Relanza el worker con un nuevo prefer_block (seek lejos). Cancela la tarea
+    actual (el sidecar conserva lo descargado) y arranca otra que prioriza la
+    nueva zona. Devuelve True si relanzó."""
+    j = _jobs.get(episode_key)
+    if j is not None:
+        j["status"] = "partial"
+    old = _tasks.get(episode_key)
+    if old is not None and not old.done():
+        try:
+            old.cancel()
+        except Exception:
+            pass
+    import asyncio as _aio
+    t = _aio.get_running_loop().create_task(
+        download_sparse(episode_key, file_size, msg, dc_id, prefer_block=prefer_block))
+    _tasks[episode_key] = t
+    print(f" [DOWNLOAD-SERVICE] {episode_key}: relanzado con prefer_block={prefer_block}", flush=True)
+    return True
 
 
 async def download_sparse(episode_key: str, file_size: int, msg, dc_id=None, progress_callback=None, prefer_block=None) -> Optional[str]:
@@ -71,81 +112,103 @@ async def download_sparse(episode_key: str, file_size: int, msg, dc_id=None, pro
         return None
     _jobs[episode_key] = {"status": "downloading", "progress": 0, "speed": 0, "bytes_done": 0, "bytes_total": file_size, "prefer_block": prefer_block}
 
-    import asyncio as _aio
-    from telethon.tl.functions.upload import GetFileRequest
-    from telethon.tl.types import InputDocumentFileLocation
+    import asyncio as _areg
+    _me = _areg.get_running_loop().create_task(
+        _download_sparse_inner(episode_key, file_size, msg, dc_id, progress_callback, prefer_block))
+    _tasks[episode_key] = _me
+    try:
+        res = await _me
+    except asyncio.CancelledError:
+        # Relanzado con otro prefer (reprioritize): el sidecar conserva el progreso.
+        _jobs[episode_key] = {"status": "partial", "progress": 0, "speed": 0,
+                              "bytes_done": 0, "bytes_total": file_size,
+                              "prefer_block": prefer_block}
+        return None
+    except Exception as e:
+        # Que la tarea NUNCA muera en silencio con status 'downloading' (bucle
+        # 503 eterno): marcar partial para que la próxima petición la relance.
+        print(f" [DOWNLOAD-SERVICE] {episode_key}: ERROR {e}", flush=True)
+        import traceback as _tb
+        _tb.print_exc()
+        _jobs[episode_key] = {"status": "partial", "progress": 0, "speed": 0,
+                              "bytes_done": 0, "bytes_total": file_size,
+                              "prefer_block": prefer_block}
+        return None
+    finally:
+        if _tasks.get(episode_key) is _me:
+            _tasks.pop(episode_key, None)
+    # Sin resultado y todavía en 'downloading' (retorno temprano): partial para
+    # no clavar el guard anti-duplicado (otra causa del 503 eterno).
+    if res is None and _jobs.get(episode_key, {}).get("status") == "downloading":
+        _jobs[episode_key] = {"status": "partial", "progress": 0, "speed": 0,
+                              "bytes_done": 0, "bytes_total": file_size,
+                              "prefer_block": prefer_block}
+    return res
+
+
+async def _download_sparse_inner(episode_key: str, file_size: int, msg, dc_id=None, progress_callback=None, prefer_block=None) -> Optional[str]:
+    """Rellena el sparse usando el servicio central (file_transfer) con la
+    librería preferida. Sin motor propio: sin clonado de sesiones ni GetFile
+    directos aquí. Conserva sparse preasignado, sidecar, prefer-first, estado."""
+    from services import file_transfer as _ft
     from services.userbot_service import get_active_client
 
-    ubot = await get_active_client()
+    # 1. Librería preferida (ajuste global Comportamiento Telegram)
+    try:
+        from services.catalog_service import get_conn as _gc
+        _c = _gc()
+        _r = _c.execute("SELECT value FROM tvcat_settings WHERE key='telegram_client_type'").fetchone()
+        _c.close()
+        pref = (_r[0] if _r else None) or "telethon"
+        if pref not in ("telethon", "pyrogram"):
+            pref = "telethon"
+    except Exception:
+        pref = "telethon"
+
+    try:
+        ubot = await asyncio.wait_for(get_active_client(pref), timeout=30)
+    except Exception as e:
+        print(f" [DOWNLOAD-SERVICE] {episode_key}: cliente {pref} sin respuesta en 30s ({e})")
+        return None
     if not ubot:
-        print(" [DOWNLOAD-SERVICE] No hay cliente Telegram activo")
+        print(f" [DOWNLOAD-SERVICE] {episode_key}: sin cliente {pref} activo")
         return None
     client = getattr(ubot, '_client', ubot)
 
-    media = getattr(msg, 'media', None)
-    doc = getattr(media, 'document', None) if media else None
-    if not doc:
-        doc = getattr(msg, 'document', None)
-    if not doc or not getattr(doc, 'size', 0):
+    # 2. chat_id/msg_id del mensaje (cualquiera de las dos libs)
+    chat_id, mid = _msg_chat_ids(msg)
+    if not chat_id or not mid:
+        print(f" [DOWNLOAD-SERVICE] {episode_key}: sin chat/msg")
+        return None
+
+    # 3. Mensaje del mismo tipo que el cliente (con timeout: sin cuelgues silenciosos)
+    try:
+        msg = await asyncio.wait_for(_coerce_msg(client, pref, msg, chat_id, mid), timeout=30)
+    except Exception as e:
+        print(f" [DOWNLOAD-SERVICE] {episode_key}: mensaje no resoluble vía {pref} en 30s ({e})")
+        return None
+    if msg is None:
+        print(f" [DOWNLOAD-SERVICE] {episode_key}: mensaje no resoluble vía {pref}")
+        return None
+
+    # 4. Tamaño real (telethon .size / pyro .file_size)
+    try:
+        from services.userbot_service import pyro_media as _pm
+        _med = _pm(msg) if pref == "pyrogram" else None
+    except Exception:
+        _med = None
+    if _med is None:
+        _media = getattr(msg, 'media', None)
+        _med = getattr(_media, 'document', None) if _media else None
+        if _med is None:
+            _med = getattr(msg, 'document', None)
+    file_size = int(getattr(_med, 'size', 0) or getattr(_med, 'file_size', 0) or file_size or 0)
+    if file_size <= 0:
         print(f" [DOWNLOAD-SERVICE] {episode_key}: documento no encontrado")
         return None
+    print(f" [DOWNLOAD-SERVICE] {episode_key}: {file_size/(1024*1024):.1f} MB vía {pref}", flush=True)
 
-    file_size = int(getattr(doc, 'size', file_size) or file_size)
-    if file_size <= 0:
-        return None
-
-    location = InputDocumentFileLocation(
-        id=doc.id,
-        access_hash=doc.access_hash,
-        file_reference=doc.file_reference,
-        thumb_size=''
-    )
-    doc_dc = getattr(doc, 'dc_id', dc_id)
-
-    async def _refresh_file_reference():
-        try:
-            peer = getattr(msg, 'peer_id', None) or getattr(msg, 'chat_id', None)
-            if peer is None:
-                return False
-            m = await client.get_messages(peer, ids=msg.id)
-            if m and getattr(m, 'media', None) and getattr(m.media, 'document', None):
-                nd = m.media.document
-                location.file_reference = nd.file_reference
-                location.access_hash = nd.access_hash
-                return True
-        except Exception:
-            pass
-        return False
-
-    # Conexiones como TGHirayi (download_threads, default 8, max 16).
-    # NO satura porque solo hay 1 descarga por episodio (guard anti-duplicado + worker único).
-    threads = 8
-    threads = max(1, min(int(threads), 16))
-
-    REQ_TIMEOUT = 90
-    CONNECT_TIMEOUT = 15
-    CHUNK = 512 * 1024
-
-    # Clonar sesión para conexiones secundarias
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    session_string = client.session.save() if hasattr(client, 'session') else ''
-    secondary = []
-    for _ in range(max(0, threads - 1)):
-        if not session_string:
-            break
-        c = TelegramClient(StringSession(session_string), client.api_id, client.api_hash)
-        try:
-            await asyncio.wait_for(c.connect(), timeout=CONNECT_TIMEOUT)
-        except Exception:
-            try:
-                await c.disconnect()
-            except:
-                pass
-            continue
-        secondary.append(c)
-
-    # Preparar fichero sparse (path espejo de HLS: tvcat2/data/cache/{key}.mp4)
+    # 5. Sparse + sidecar (igual que antes)
     file_path = os.path.join(_HLS_CACHE_DIR, f"{episode_key}.mp4")
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
@@ -160,163 +223,175 @@ async def download_sparse(episode_key: str, file_size: int, msg, dc_id=None, pro
                 done = {int(x) for x in json.load(f)}
             done = {i for i in done if 0 <= i < chunk_total}
             resume = bool(done)
-        except:
+        except Exception:
             done = set()
+    if not resume and os.path.isfile(file_path) and os.path.getsize(file_path) == file_size:
+        # Sin sidecar (descarga completa anterior o sidecar perdido): reconstruir el
+        # bitmap sondeando cada chunk (los huecos se leen como ceros; 4KB por chunk
+        # basta para medios comprimidos). Resume exacto desde donde quedó.
+        try:
+            with open(file_path, 'rb') as _pf:
+                for _i in range(chunk_total):
+                    _pf.seek(_i * CHUNK)
+                    if _pf.read(4096).strip(b'\x00'):
+                        done.add(_i)
+            if done:
+                resume = True
+                print(f" [DOWNLOAD-SERVICE] {episode_key}: sidecar ausente, bitmap reconstruido {len(done)}/{chunk_total} chunks, sigue descargando", flush=True)
+            else:
+                print(f" [DOWNLOAD-SERVICE] {episode_key}: fichero vacío, descarga desde cero", flush=True)
+        except Exception as e:
+            print(f" [DOWNLOAD-SERVICE] {episode_key}: sondeo falló ({e}), descarga desde cero", flush=True)
+            pass
     if not resume:
         with open(file_path, 'wb') as f:
             f.truncate(file_size)
         done = set()
         try:
             os.remove(chunks_side)
-        except:
+        except Exception:
             pass
 
     def _save_chunks():
         try:
             with open(chunks_side, 'w', encoding='utf-8') as f:
                 json.dump(sorted(done), f)
-        except:
+        except Exception:
             pass
 
     def _get_dynamic_prefer():
-        # Leer el prefer_block dinámico del job (set_prefer lo actualiza en caliente para seek)
         j = _jobs.get(episode_key, {})
         return j.get("prefer_block", prefer_block)
 
-    def _ranges():
-        per = max(1, (chunk_total + threads - 1) // threads)
-        ranges = []
-        # 1º: rango centrado en el prefer_block dinámico (punto de reproducción) — se descarga primero
+    # Orden: zona preferente primero, resto secuencial
+    def _order():
+        order = []
         dpb = _get_dynamic_prefer()
         if dpb is not None:
             pb = max(0, min(int(dpb), chunk_total - 1))
-            start = max(0, pb - per // 2)
-            end = min(chunk_total, start + per)
-            if start < chunk_total:
-                ranges.append((start, end))
-        # 2º: resto del fichero en rangos contiguos (llenar todo)
-        for s in range(0, chunk_total, per):
-            e = min(s + per, chunk_total)
-            to_skip = False
-            if dpb is not None:
-                pb0 = max(0, min(int(dpb), chunk_total-1))
-                pstart = max(0, pb0 - per // 2)
-                if s == pstart:
-                    to_skip = True
-            if not to_skip and s < chunk_total:
-                ranges.append((s, e))
-        return ranges
+            start = max(0, pb - 4)
+            end = min(chunk_total, start + 32)
+            order += [i for i in range(start, end) if i not in done]
+        order += [i for i in range(chunk_total) if i not in done and i not in order]
+        return order
 
-    ranges = _ranges()
-    workers = secondary + [client]
-    writers = workers[:len(ranges)]
+    _jobs[episode_key] = {"status": "downloading", "progress": len(done)/max(1,chunk_total)*100, "bytes_done": min(len(done)*CHUNK, file_size), "bytes_total": file_size}
 
-    # Limitar ranges a writers disponibles
-    if len(ranges) > len(writers):
-        ranges = ranges[:len(writers)]
-
-    _jobs[episode_key] = {"status": "downloading", "progress": len(done)/max(1,chunk_total)*100, "bytes_done": len(done)*CHUNK, "bytes_total": file_size}
-
-    progress = [len(done) * CHUNK]
+    progress = [min(len(done) * CHUNK, file_size)]
     lock = asyncio.Lock()
     last_save = [time.perf_counter()]
-    from telethon import helpers as _tl_helpers
+    sem = asyncio.Semaphore(4)  # 4 rangos concurrentes (el central ya paraleliza dentro)
 
-    async def _dl_range(c, range_start, range_end, retries=3):
-        from telethon.errors.rpcerrorlist import FileMigrateError, FileReferenceExpiredError, FilerefUpgradeNeededError
-        last_err = None
-        migrated_sender = None
-        for attempt in range(1, retries + 1):
-            try:
-                # Verificar conexión viva
-                if hasattr(c, 'is_connected') and not c.is_connected():
-                    print(f" [DOWNLOAD-SERVICE] conexión muerta rango {range_start}-{range_end}")
-                    return False
-                with open(file_path, 'r+b') as f:
-                    for i in range(range_start, range_end):
-                        if i in done:
-                            continue
-                        offset = i * CHUNK
-                        if offset >= file_size:
-                            break
-                        req = GetFileRequest(location=location, offset=offset, limit=CHUNK)
-                        if migrated_sender is not None:
-                            result = await asyncio.wait_for(client._call(migrated_sender, req), timeout=REQ_TIMEOUT)
-                        else:
-                            result = await asyncio.wait_for(c(req), timeout=REQ_TIMEOUT)
-                        data = bytes(result.bytes)
-                        if not data:
-                            last_err = f"chunk {i} vacío"
-                            break
-                        f.seek(offset)
-                        f.write(data)
-                        done.add(i)
-                        progress[0] += len(data)
-                        if progress_callback:
-                            async with lock:
-                                await _tl_helpers._maybe_await(progress_callback(progress[0], file_size))
-                        # Actualizar estado
-                        _jobs[episode_key].update({"progress": len(done)/max(1,chunk_total)*100, "bytes_done": progress[0]})
-                        now = time.perf_counter()
-                        if now - last_save[0] >= 1.0:
-                            last_save[0] = now
-                            _save_chunks()
-                remaining = [i for i in range(range_start, range_end) if i not in done]
-                if remaining:
-                    last_err = f"{len(remaining)} chunks restantes"
-                    raise RuntimeError(last_err)
+    async def _dl_chunk(i):
+        async with sem:
+            if i in done:
                 return True
-            except asyncio.TimeoutError:
-                last_err = "timeout"
-            except FileMigrateError as e:
-                last_err = repr(e)
-                try:
-                    migrated_sender = await client._borrow_exported_sender(e.new_dc)
-                except:
-                    migrated_sender = None
-            except (FileReferenceExpiredError, FilerefUpgradeNeededError) as e:
-                last_err = repr(e)
-                if not await _refresh_file_reference():
-                    break
-            except ConnectionError as ce:
-                last_err = f"disconnect ({ce})"
-                break
+            offset = i * CHUNK
+            if offset >= file_size:
+                return True
+            length = min(CHUNK, file_size - offset)
+            try:
+                data = await asyncio.wait_for(
+                    _ft.download_range(client, chat_id, mid, offset, length,
+                                       client_type=pref, pre_msg=msg),
+                    timeout=120)
             except Exception as e:
-                last_err = repr(e)
-        _save_chunks()
-        print(f" [DOWNLOAD-SERVICE] Rango {range_start}-{range_end} falló tras {retries} intentos ({last_err})")
-        return False
+                print(f" [DOWNLOAD-SERVICE] chunk {i} fallo: {e}", flush=True)
+                return False
+            if not data or len(data) < length:
+                return False
+            try:
+                with open(file_path, 'r+b') as f:
+                    f.seek(offset)
+                    f.write(data)
+            except Exception as e:
+                print(f" [DOWNLOAD-SERVICE] chunk {i} escritura: {e}", flush=True)
+                return False
+            done.add(i)
+            progress[0] += len(data)
+            # Velocidad (media móvil de ~5s, mismo patrón que TGHirayi)
+            try:
+                _sj = _jobs.get(episode_key)
+                if _sj is not None:
+                    _now = time.perf_counter()
+                    _buf = _sj.setdefault("_spd_buf", [])
+                    _buf.append((_now, progress[0]))
+                    while len(_buf) > 2 and (_now - _buf[0][0]) > 5.0:
+                        _buf.pop(0)
+                    if len(_buf) >= 2 and (_now - _buf[0][0]) >= 0.5:
+                        _sj["speed"] = max(0.0, (_buf[-1][1] - _buf[0][1]) / max(_now - _buf[0][0], 0.01))
+            except Exception:
+                pass
+            if progress_callback:
+                try:
+                    r = progress_callback(progress[0], file_size)
+                    if asyncio.iscoroutine(r):
+                        async with lock:
+                            await r
+                except Exception:
+                    pass
+            _jobs[episode_key].update({"progress": len(done)/max(1,chunk_total)*100, "bytes_done": progress[0]})
+            now = time.perf_counter()
+            if now - last_save[0] >= 1.0:
+                last_save[0] = now
+                _save_chunks()
+            return True
 
-    results = await asyncio.gather(*[
-        _dl_range(writers[i], ranges[i][0], ranges[i][1])
-        for i in range(len(ranges))
-    ], return_exceptions=True)
+    # Pasada 1: orden preferente. Pasada 2: reintento de pendientes.
+    for _pass in (1, 2):
+        order = _order()
+        if not order:
+            break
+        results = await asyncio.gather(*[_dl_chunk(i) for i in order], return_exceptions=True)
+        if all(r is True for r in results):
+            break
+        await asyncio.sleep(1)
 
-    failed = [ranges[i] for i in range(len(ranges)) if results[i] is not True]
-    if failed:
-        for rng in failed:
-            await _dl_range(client, rng[0], rng[1], retries=4)
+    await asyncio.sleep(0.2)
+    if len(done) >= chunk_total and os.path.isfile(file_path) and os.path.getsize(file_path) == file_size:
+        try:
+            os.remove(chunks_side)
+        except Exception:
+            pass
+        _jobs[episode_key].update({"status": "completed", "progress": 100})
+        return file_path
+    _save_chunks()
+    _jobs[episode_key].update({"status": "partial", "progress": len(done)/max(1,chunk_total)*100})
+    return None
 
+
+def _msg_chat_ids(msg):
+    """Extrae (chat_id, msg_id) de un mensaje Telethon o Pyrogram."""
+    mid = getattr(msg, 'id', None)
+    chat = getattr(msg, 'chat', None)
+    if chat is not None and getattr(chat, 'id', None) is not None:
+        return int(chat.id), int(mid) if mid else None
+    peer = getattr(msg, 'peer_id', None)
+    if peer is not None:
+        cid = getattr(peer, 'channel_id', None) or getattr(peer, 'chat_id', None)
+        if cid is not None:
+            return int("-100" + str(cid)) if int(cid) > 0 else int(cid), int(mid) if mid else None
+    cid = getattr(msg, 'chat_id', None)
+    if cid is not None:
+        return int(cid), int(mid) if mid else None
+    return None, int(mid) if mid else None
+
+
+async def _coerce_msg(client, pref: str, msg, chat_id, mid):
+    """Devuelve el mensaje en el tipo del cliente preferido (re-fetch si difiere)."""
+    if pref == "pyrogram":
+        if getattr(msg, 'file_id', None) is not None or getattr(msg, 'chat', None) is not None:
+            return msg
+        try:
+            m = await client.get_messages(int(chat_id), int(mid))
+            return m[0] if isinstance(m, list) else m
+        except Exception:
+            return None
+    # telethon
+    if getattr(getattr(msg, 'media', None), 'document', None) is not None and hasattr(msg, 'peer_id'):
+        return msg
     try:
-        await asyncio.sleep(0.2)
-        if len(done) >= chunk_total and os.path.isfile(file_path) and os.path.getsize(file_path) == file_size:
-            try:
-                os.remove(chunks_side)
-            except:
-                pass
-            _jobs[episode_key].update({"status": "completed", "progress": 100})
-            return file_path
-        _save_chunks()
-        _jobs[episode_key].update({"status": "partial", "progress": len(done)/max(1,chunk_total)*100})
+        ent = await client.get_entity(int(chat_id))
+        return await client.get_messages(ent, ids=int(mid))
+    except Exception:
         return None
-    finally:
-        # Resetear estado si no se completó (para permitir reanudar en próxima petición)
-        if _jobs.get(episode_key, {}).get("status") == "downloading":
-            _jobs[episode_key].update({"status": "partial", "progress": len(done)/max(1,chunk_total)*100})
-        for c in secondary:
-            try:
-                await c.disconnect()
-            except:
-                pass
-        # El servicio es standalone: NO actualiza el bitmap del gateway (evita import side-effects).
-        # El llamador (HLS SEQ) sincronizará el bitmap con `done` vía get_status/descarga completa.

@@ -66,12 +66,19 @@
         opts = opts || {};
         var itemId = data.item_id;
         var original = data.original || {};
-        var enriched = data.enriched || null;
+        // localOnly (cola TGHirayi): lo compartido no existe aquí; todo sale del job.
+        var enriched = opts.localOnly ? null : (data.enriched || null);
         var hasEnriched = !!enriched;
         var category = original.category || itemData.category || '';
         var subcategory = original.subcategory || itemData.subcategory || '';
-        var initialText = hasEnriched ? (enriched.cover_text || '') : (original.description || '');
-        var initialDetails = hasEnriched ? (enriched.enrich_details || {}) : null;
+        var episodeCount = (function () { try { return itemData.episodes && itemData.episodes.length ? itemData.episodes.length : 0; } catch (e) { return 0; } })();
+        var initialText = (opts.localOnly && opts.initialText != null) ? String(opts.initialText) : (hasEnriched ? (enriched.cover_text || '') : (original.description || ''));
+        // Caption inicial en localOnly: texto ya resuelto del job (lo guardado, no la plantilla).
+        var initialCaption = (opts.localOnly && opts.initialCaption != null) ? String(opts.initialCaption) : initialText;
+        var initialDetails = opts.localOnly ? (opts.details || null) : (hasEnriched ? (enriched.enrich_details || {}) : null);
+        // Póster propio del job (b64 sin prefijo) para preview inicial en localOnly.
+        var localPosterB64 = (opts.localOnly && opts.posterB64) ? String(opts.posterB64) : '';
+        if (localPosterB64.indexOf('data:') === 0 && localPosterB64.indexOf(',') !== -1) localPosterB64 = localPosterB64.split(',').slice(1).join(',');
         var posterB64 = null; // de la imagen actual o del candidato
         var posterMime = 'image/jpeg';
         var selectedDetails = initialDetails;
@@ -88,21 +95,37 @@
         panel.onclick = function (e) { e.stopPropagation(); };
         var html = '';
         html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
-        html += '<div style="font-weight:700;font-size:0.95rem;">✨ Enriquecer cover</div>';
+        html += '<div style="font-weight:700;font-size:0.95rem;">' + (opts.localOnly ? 'Cover propio (solo este partido)' : '✨ Enriquecer cover') + '</div>';
         html += '<button id="enricher-close" style="width:32px;height:32px;border-radius:50%;background:#27272a;border:1px solid #3f3f46;color:#a1a1aa;cursor:pointer;font-size:18px;line-height:1;">×</button>';
         html += '</div>';
 
-        // Badge de estado
+        // Badge de estado (localOnly: solo cola, sin autoría compartida)
         var badge = '';
+        if (opts.localOnly) {
+            badge = '<span style="display:inline-block;padding:2px 8px;background:#06b6d422;color:#22d3ee;border-radius:999px;font-size:0.68rem;border:1px solid #164e63;">Solo cola — no toca catálogo</span>';
+        } else {
         if (hasEnriched) badge = '<span style="display:inline-block;padding:2px 8px;background:#22c55e22;color:#4ade80;border-radius:999px;font-size:0.68rem;border:1px solid #14532d;">Enriquecido</span> ';
         if (auth.is_mine) badge += '<span style="display:inline-block;padding:2px 8px;background:#06b6d422;color:#22d3ee;border-radius:999px;font-size:0.68rem;border:1px solid #164e63;">Tuyo — editable en Telegram</span>';
         else badge += '<span style="display:inline-block;padding:2px 8px;background:#f59e0b22;color:#fbbf24;border-radius:999px;font-size:0.68rem;border:1px solid #78350f;">Ajeno — solo local</span>';
-        html += '<div style="margin-bottom:10px;">' + badge + '<span style="font-size:0.68rem;color:#71717a;margin-left:6px;">' + (auth.reason || '') + '</span></div>';
+        }
+        html += '<div style="margin-bottom:10px;">' + badge + '<span style="font-size:0.68rem;color:#71717a;margin-left:6px;">' + (opts.localOnly ? '' : (auth.reason || '')) + '</span></div>';
+        // Título del job (solo localOnly): editable, con sugerido del candidato.
+        if (opts.localOnly) {
+            var _jt0 = (opts.jobTitle != null ? String(opts.jobTitle) : '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+            html += '<label style="font-size:0.75rem;color:#a1a1aa;">Título del job</label>';
+            html += '<div style="display:flex;gap:6px;margin-top:4px;margin-bottom:10px;">';
+            html += '<input type="text" id="enricher-job-title" value="' + _jt0 + '" style="flex:1;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;">';
+            html += '</div>';
+            html += '<div id="enricher-title-sugg" style="display:none;font-size:0.72rem;color:#a1a1aa;margin:-6px 0 10px;">Sugerido: <span id="enricher-title-sugg-v" style="color:#22d3ee;"></span> <a href="#" id="enricher-title-use" style="color:#22d3ee;">usar</a></div>';
+        }
 
         // Imagen + busqueda lado a lado
         html += '<div style="display:flex;gap:12px;margin-bottom:12px;align-items:flex-start;flex-wrap:wrap;">';
         html += '<div style="flex-shrink:0;width:160px;max-width:38%;">';
-        if (hasEnriched && data.enriched && data.enriched.poster_blob) {
+        if (localPosterB64) {
+            // Póster propio del job (localOnly): preview directo, sin registry.
+            html += '<img id="enricher-img" src="data:image/jpeg;base64,' + localPosterB64 + '" style="width:100%;border-radius:8px;border:1px solid #3f3f46;display:block;max-height:220px;object-fit:cover;">';
+        } else if (hasEnriched && data.enriched && data.enriched.poster_blob) {
             // servido desde /api/enricher/item/{id}/cover para preview
             html += '<img id="enricher-img" src="/api/enricher/item/' + encodeURIComponent(itemId) + '/cover?v=' + Date.now() + '" style="width:100%;border-radius:8px;border:1px solid #3f3f46;display:block;max-height:220px;object-fit:cover;">';
         } else {
@@ -110,6 +133,25 @@
             html += '<div id="enricher-img-placeholder" style="display:none;width:100%;height:140px;border-radius:8px;border:1px dashed #3f3f46;align-items:center;justify-content:center;font-size:0.7rem;color:#71717a;background:#18181b;">sin imagen</div>';
         }
         html += '<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:0.72rem;color:#a1a1aa;cursor:pointer;"><input type="checkbox" id="enricher-use-poster" checked> Usar imagen descargada</label>';
+        html += '<div style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:0.72rem;color:#a1a1aa;"><span>Traer versión</span>' +
+            '<select id="enricher-poster-lang" class="variant-select" style="background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:4px 6px;color:#f4f4f5;font-size:0.72rem;">' +
+            '<option value="">Cualquiera</option>' +
+            '<option value="es">ES - Español</option>' +
+            '<option value="en">EN - English</option>' +
+            '<option value="ja">JA - Japonés</option>' +
+            '<option value="ko">KO - Coreano</option>' +
+            '<option value="zh">ZH - Chino</option>' +
+            '</select></div>';
+        html += '<div style="position:relative;">';
+        html += '<div id="enricher-cover-menu" style="display:none;position:absolute;left:0;top:100%;z-index:20;background:#09090b;border:1px solid #3f3f46;border-radius:8px;padding:6px;width:170px;box-sizing:border-box;">';
+        html += '<div id="enricher-cover-obt" style="display:none;"></div>';
+        html += '<button id="enricher-cover-orig" style="display:block;width:100%;padding:8px 10px;font-size:0.8rem;margin:2px 0;text-align:left;background:#27272a;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;cursor:pointer;">🖼️ Original</button>';
+        html += '<button id="enricher-cover-url" style="display:block;width:100%;padding:8px 10px;font-size:0.8rem;margin:2px 0;text-align:left;background:#27272a;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;cursor:pointer;">🔗 URL</button>';
+        html += '<button id="enricher-cover-paste" style="display:block;width:100%;padding:8px 10px;font-size:0.8rem;margin:2px 0;text-align:left;background:#27272a;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;cursor:pointer;">📋 Pegar</button>';
+        html += '<button id="enricher-cover-upload" style="display:block;width:100%;padding:8px 10px;font-size:0.8rem;margin:2px 0;text-align:left;background:#27272a;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;cursor:pointer;">⬆️ Subir</button>';
+        html += '</div>';
+        html += '<input type="file" id="enricher-cover-file" accept="image/*" style="display:none;">';
+        html += '</div>';
         html += '</div>';
         html += '<div style="flex:1;min-width:260px;">';
         // Busqueda enriquecedor
@@ -119,6 +161,7 @@
         html += '<input type="text" id="enricher-query" value="' + defaultQuery.replace(/"/g, '&quot;') + '" placeholder="Titulo" style="flex:1;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;">';
         html += '<button id="enricher-search" style="padding:6px 12px;background:#06b6d4;border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:0.8rem;font-weight:700;">Buscar</button>';
         html += '</div>';
+        html += '<div id="enricher-extlinks" style="margin-top:4px;font-size:0.68rem;color:#71717a;"></div>';
         html += '<div id="enricher-cands" style="margin-top:8px;max-height:140px;overflow-y:auto;"></div>';
         html += '</div></div>';
 
@@ -136,11 +179,11 @@
         html += '<button id="enricher-tags-btn" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Tags ▾</button>';
         html += '</div>';
         html += '<div style="font-size:0.68rem;color:#71717a;margin:2px 0 4px;">Escribe {title} y al cerrar } se expande · o usa Tags</div>';
-        html += '<textarea id="enricher-text" style="width:100%;height:140px;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;resize:vertical;white-space:pre-wrap;">' + (initialText || '').replace(/</g, '&lt;') + '</textarea>';
+        html += '<textarea id="enricher-text" style="width:100%;height:140px;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;resize:vertical;white-space:pre-wrap;">' + (initialCaption || '').replace(/</g, '&lt;') + '</textarea>';
         html += '<div id="enricher-tags-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;z-index:1000000;background:rgba(0,0,0,0.7);align-items:center;justify-content:center;"><div style="background:#0d0d0f;border:1px solid #3f3f46;border-radius:8px;padding:12px;width:90vw;max-width:560px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;"><div style="font-weight:600;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;"><span>Tags</span><button id="enricher-tags-close" style="width:28px;height:28px;border-radius:50%;background:#27272a;border:1px solid #3f3f46;color:#a1a1aa;cursor:pointer;">×</button></div><div id="enricher-tags-table" style="overflow-y:auto;flex:1;border:1px solid #27272a;border-radius:6px;"></div></div></div>';
 
         // Poster actual (hidden, se sube como base64 en el payload, reutiliza el del candidato si hay)
-        html += '<input type="hidden" id="enricher-poster-b64">';
+        html += '<input type="hidden" id="enricher-poster-b64" value="' + (localPosterB64 ? 'data:image/jpeg;base64,' + localPosterB64 : '') + '">';
         // Botones
         html += '<div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">';
         html += '<button id="enricher-save-local" style="flex:1;min-width:120px;padding:9px;background:#3f3f46;border:none;color:#f4f4f5;border-radius:6px;cursor:pointer;font-weight:600;">Guardar local</button>';
@@ -148,6 +191,8 @@
             html += '<button id="enricher-apply" style="flex:1;min-width:150px;padding:9px;background:#22c55e;border:none;color:#fff;border-radius:6px;cursor:pointer;font-weight:700;">Aplicar en Telegram</button>';
         }
         html += '</div>';
+        // hasEnriched es falso en localOnly (enriched=null): el Revertir (borra lo
+        // COMPARTIDO) nunca se pinta en la cola.
         if (hasEnriched) html += '<button id="enricher-revert" style="width:100%;margin-top:8px;padding:6px;background:transparent;border:1px solid #ef4444;color:#f87171;border-radius:6px;cursor:pointer;font-size:0.8rem;">Revertir enriquecimiento</button>';
         html += '<div id="enricher-status" style="margin-top:8px;font-size:0.75rem;color:#a1a1aa;min-height:1.2em;"></div>';
         panel.innerHTML = html;
@@ -162,6 +207,8 @@
             if (!chk || !img) return;
             var origSrc = '/api/cover/' + encodeURIComponent(itemId) + '?v=' + Date.now();
             var enrichedSrc = hasEnriched && data.enriched && data.enriched.poster_blob ? ('/api/enricher/item/' + encodeURIComponent(itemId) + '/cover?v=' + Date.now()) : null;
+            // localOnly: el "descargado" es el póster propio del job.
+            if (!enrichedSrc && localPosterB64) enrichedSrc = 'data:image/jpeg;base64,' + localPosterB64;
             // Si hay poster seleccionado de búsqueda, usar ese b64 como enriched
             chk.onchange = function(){
                 if (chk.checked) {
@@ -185,17 +232,174 @@
             };
         })();
 
+        // Menú de portada (click en la imagen): Original / Obtenidas / URL / Pegar / Subir
+        (function(){
+            var img = document.getElementById('enricher-img');
+            var menu = document.getElementById('enricher-cover-menu');
+            if (!img || !menu) return;
+            img.style.cursor = 'pointer';
+            img.title = 'Cambiar carátula';
+            img.onclick = function (ev) {
+                if (ev && ev.stopPropagation) ev.stopPropagation();
+                menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
+            };
+            document.addEventListener('click', function (e) {
+                if (menu.style.display !== 'block') return;
+                var t = e.target || e.srcElement;
+                var inside = false;
+                try {
+                    var el = t;
+                    while (el) {
+                        if (el === menu || el === img) { inside = true; break; }
+                        el = el.parentNode;
+                    }
+                } catch (ex) {}
+                if (!inside) hideEnricherCoverMenu();
+            });
+            function setCustomPoster(src, b64, url) {
+                hideEnricherCoverMenu();
+                var chk = document.getElementById('enricher-use-poster');
+                if (chk && !chk.checked) chk.checked = true;
+                selectedPosterUrl = url || null;
+                img.src = src;
+                img.style.display = 'block';
+                var ph = document.getElementById('enricher-img-placeholder');
+                if (ph) ph.style.display = 'none';
+                if (b64 !== undefined) {
+                    document.getElementById('enricher-poster-b64').value = b64 || '';
+                }
+            }
+            var bOrig = document.getElementById('enricher-cover-orig');
+            if (bOrig) bOrig.onclick = function () {
+                hideEnricherCoverMenu();
+                var chk = document.getElementById('enricher-use-poster');
+                if (chk) {
+                    chk.checked = false;
+                    if (typeof chk.onchange === 'function') chk.onchange();
+                }
+                setStatus('Carátula: original (sin imagen descargada)');
+            };
+            var bUrl = document.getElementById('enricher-cover-url');
+            if (bUrl) bUrl.onclick = function () {
+                var u = prompt('URL de la imagen de portada:', 'https://');
+                if (u === null) return;
+                u = (u || '').trim();
+                if (!u) return;
+                // Sin b64: el servidor la descarga vía poster_url al guardar
+                setCustomPoster(u, '', u);
+                setStatus('Carátula: URL personalizada (se descarga al guardar)');
+            };
+            var bPaste = document.getElementById('enricher-cover-paste');
+            if (bPaste) bPaste.onclick = function () {
+                hideEnricherCoverMenu();
+                try {
+                    if (!navigator.clipboard || !navigator.clipboard.read) { setStatus('Portapapeles no disponible: usa Subir o URL', true); return; }
+                    navigator.clipboard.read().then(function (items) {
+                        var done = false;
+                        for (var i = 0; i < (items || []).length && !done; i++) {
+                            var types = items[i].types || [];
+                            for (var t = 0; t < types.length; t++) {
+                                if (types[t].indexOf('image/') === 0) {
+                                    done = true;
+                                    items[i].getType(types[t]).then(function (blob) {
+                                        if (!blob || blob.size > 10 * 1024 * 1024) { setStatus('Imagen mayor de 10MB', true); return; }
+                                        var rd = new FileReader();
+                                        rd.onload = function () { setCustomPoster(rd.result, rd.result, null); setStatus('Carátula: imagen pegada'); };
+                                        rd.readAsDataURL(blob);
+                                    }, function () { setStatus('No se pudo leer la imagen', true); });
+                                    break;
+                                }
+                            }
+                        }
+                        if (!done) setStatus('No hay imagen en el portapapeles', true);
+                    }, function () { setStatus('Permiso denegado: usa Subir o URL', true); });
+                } catch (e) { setStatus('Portapapeles no disponible: usa Subir o URL', true); }
+            };
+            var bUp = document.getElementById('enricher-cover-upload');
+            var fUp = document.getElementById('enricher-cover-file');
+            if (bUp && fUp) {
+                bUp.onclick = function () { hideEnricherCoverMenu(); fUp.click(); };
+                fUp.onchange = function () {
+                    var f = fUp.files && fUp.files[0];
+                    if (!f) return;
+                    if (f.size > 10 * 1024 * 1024) { setStatus('Imagen mayor de 10MB', true); return; }
+                    var rd = new FileReader();
+                    rd.onload = function () { setCustomPoster(rd.result, rd.result, null); setStatus('Carátula: imagen subida'); };
+                    rd.readAsDataURL(f);
+                };
+            }
+            // Tira inicial (cover ya enriquecido con varias carátulas)
+            try { renderPosterStrip(); } catch (e) {}
+            // Combo "Traer versión": filtra las Obtenidas por idioma (persistente)
+            try {
+                var langSel = document.getElementById('enricher-poster-lang');
+                if (langSel) {
+                    var savedLang = '';
+                    try { savedLang = localStorage.getItem('enricher_poster_lang') || ''; } catch (e2) {}
+                    if (savedLang) langSel.value = savedLang;
+                    langSel.onchange = function () {
+                        try { localStorage.setItem('enricher_poster_lang', langSel.value || ''); } catch (e3) {}
+                        renderPosterStrip();
+                    };
+                }
+            } catch (e4) {}
+        })();
+
+        // Enlaces externos por proveedor configurado (texto pequeño junto a Buscar)
+        (function(){
+            var box = document.getElementById('enricher-extlinks');
+            var qEl = document.getElementById('enricher-query');
+            if (!box) return;
+            function renderLinks(providers) {
+                var q = qEl ? qEl.value.trim() : '';
+                var links = [];
+                for (var i = 0; i < providers.length; i++) {
+                    var p = providers[i];
+                    if (!p.configured || !p.search_url) continue;
+                    var url = p.search_url.split('{q}').join(encodeURIComponent(q));
+                    links.push('<a href="' + url.replace(/"/g, '&quot;') + '" target="_blank" rel="noopener" style="color:#67e8f9;font-size:0.68rem;text-decoration:underline;white-space:nowrap;">' + String(p.label || p.name).replace(/</g, '&lt;') + '</a>');
+                }
+                box.innerHTML = links.length ? ('buscar en: ' + links.join(' · ')) : '';
+            }
+            fetch('/api/enricher/providers').then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+                if (!j || !j.providers) return;
+                renderLinks(j.providers);
+                if (qEl) {
+                    var t = null;
+                    qEl.addEventListener('input', function () {
+                        if (t) clearTimeout(t);
+                        t = setTimeout(function () { renderLinks(j.providers); }, 400);
+                    });
+                }
+            }).catch(function(){});
+        })();
+
         // Tags picker + auto-expansión al cerrar }
         (function(){
             function jv(v){ if(!v) return ''; if(Array.isArray(v)) return v.join(', '); if(typeof v==='string'){ try{ var a=JSON.parse(v); if(Array.isArray(a)) return a.join(', '); }catch(e){} } return String(v); }
             function getTagMap(){
                 var d = selectedDetails || {};
                 var orig = original.description || '';
+                // rorder: valor original del cover si existe, sino season_number de la variante
+                var rorderVal = original.rorder || (original.season_number ? String(original.season_number) : '');
                 // tagtitle es sanitizado como en TGHirayi
                 var tagtitleVal = (d.api_title || '').toString().trim().replace(/\s+/g, ' ');
                 var m = {
                     'tagtitle': tagtitleVal,
                     'title': d.api_title || '',
+                    'original_title': d.api_original_title || '',
+                    'titulo_original': d.api_original_title || '',
+                    'title_es': d.api_title_es || '',
+                    'titulo_espana': d.api_title_es || '',
+                    'title_latam': d.api_title_latam || '',
+                    'title_mx': d.api_title_latam || '',
+                    'titulo_latino': d.api_title_latam || '',
+                    'alt_titles': jv(d.api_alt_titles),
+                    'titulos_alt': jv(d.api_alt_titles),
+                    'cast': jv(d.api_cast),
+                    'reparto': jv(d.api_cast),
+                    'actores': jv(d.api_cast),
+                    'actors': jv(d.api_cast),
                     'year': d.api_year || '',
                     'release_year': d.api_year || '',
                     'rating': d.api_rating ? ('★ ' + d.api_rating) : '',
@@ -206,7 +410,8 @@
                     'temas': jv(d.api_themes),
                     'author': d.api_author || '',
                     'autor': d.api_author || '',
-                    'director': d.api_author || '',
+                    'director': d.api_director || d.api_author || '',
+                    'directores': d.api_director || d.api_author || '',
                     'release_date': d.api_release_date || '',
                     'fecha': d.api_release_date || '',
                     'category': d.api_category || category || '',
@@ -219,11 +424,26 @@
                     'description': d.api_description || '',
                     'sinopsis': d.api_description || '',
                     'overview': d.api_description || '',
-                    'originalmsg': orig || ''
+                    'originalmsg': orig || '',
+                    'rorder': rorderVal,
+                    'roder': rorderVal
                 };
                 var FTAG_FORMATS = {
                     // ftagtitle no existe, solo ftitle
                     "title": "Title: {value}",
+                    "original_title": "Original title: {value}",
+                    "titulo_original": "Original title: {value}",
+                    "title_es": "Title ES: {value}",
+                    "titulo_espana": "Title ES: {value}",
+                    "title_latam": "Title Latam: {value}",
+                    "title_mx": "Title Latam: {value}",
+                    "titulo_latino": "Title Latam: {value}",
+                    "alt_titles": "Alt titles: {value}",
+                    "titulos_alt": "Alt titles: {value}",
+                    "cast": "Cast: {value}",
+                    "reparto": "Cast: {value}",
+                    "actores": "Cast: {value}",
+                    "actors": "Cast: {value}",
                     "year": "Year: {value}",
                     "release_year": "Year: {value}",
                     "description": "Description:\n{value}",
@@ -233,7 +453,9 @@
                     "rating_count": "Rating count: {value}",
                     "genres": "Genres: {value}",
                     "author": "Author: {value}",
-                    "originalmsg": "{value}"
+                    "originalmsg": "{value}",
+                    "rorder": "ROrder: {value}",
+                    "roder": "ROrder: {value}"
                 };
                 var fm = {};
                 for (var k in m) {
@@ -367,6 +589,20 @@
                     var bestOpt = sel.options[sel.selectedIndex];
                     rawEl.value = bestOpt ? (bestOpt.getAttribute('data-tpl') || '') : (tpls.fallback||'');
                 }
+                // localOnly: respetar la plantilla guardada del job (no la primera del combo).
+                if (opts.localOnly && initialText) {
+                    try {
+                        rawEl.value = initialText;
+                        var _matched = false;
+                        for (var _oi = 0; _oi < sel.options.length; _oi++) {
+                            if ((sel.options[_oi].getAttribute('data-tpl') || '') === initialText) { sel.value = sel.options[_oi].value; _matched = true; break; }
+                        }
+                        if (!_matched) {
+                            var _oc = document.createElement('option'); _oc.value = '__job__'; _oc.textContent = 'Del job'; _oc.setAttribute('data-tpl', initialText);
+                            sel.insertBefore(_oc, sel.firstChild); sel.value = '__job__';
+                        }
+                    } catch (_eTj) {}
+                }
                 sel.onchange = function(){
                     var curTpl = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].getAttribute('data-tpl') : '';
                     var rawEl2 = document.getElementById('enricher-tpl-raw');
@@ -417,8 +653,23 @@
             var desc = details.api_description || '';
             var epCount = '';
             try { if (itemData && itemData.episodes && itemData.episodes.length) epCount = String(itemData.episodes.length); } catch (e) { }
+            // localOnly (cola): la cola pasa los episodios EN SCOPE del job.
+            try { if (!epCount && opts.epCount) epCount = String(opts.epCount); } catch (e2) { }
             var map = {
                 '{title}': details.api_title || '',
+                '{original_title}': details.api_original_title || '',
+                '{titulo_original}': details.api_original_title || '',
+                '{title_es}': details.api_title_es || '',
+                '{titulo_espana}': details.api_title_es || '',
+                '{title_latam}': details.api_title_latam || '',
+                '{title_mx}': details.api_title_latam || '',
+                '{titulo_latino}': details.api_title_latam || '',
+                '{alt_titles}': jv(details.api_alt_titles),
+                '{titulos_alt}': jv(details.api_alt_titles),
+                '{cast}': jv(details.api_cast),
+                '{reparto}': jv(details.api_cast),
+                '{actores}': jv(details.api_cast),
+                '{actors}': jv(details.api_cast),
                 '{release_year}': year,
                 '{year}': year,
                 '{description}': desc,
@@ -432,7 +683,8 @@
                 '{temas}': jv(details.api_themes),
                 '{author}': details.api_author || '',
                 '{autor}': details.api_author || '',
-                '{director}': details.api_author || '',
+                '{director}': details.api_director || details.api_author || '',
+                '{directores}': details.api_director || details.api_author || '',
                 '{release_date}': details.api_release_date || '',
                 '{fecha}': details.api_release_date || '',
                 '{category}': details.api_category || '',
@@ -444,6 +696,19 @@
             };
             var FTAGS = {
                 "title": "Title: {value}",
+                "original_title": "Original title: {value}",
+                "titulo_original": "Original title: {value}",
+                "title_es": "Title ES: {value}",
+                "titulo_espana": "Title ES: {value}",
+                "title_latam": "Title Latam: {value}",
+                "title_mx": "Title Latam: {value}",
+                "titulo_latino": "Title Latam: {value}",
+                "alt_titles": "Alt titles: {value}",
+                "titulos_alt": "Alt titles: {value}",
+                "cast": "Cast: {value}",
+                "reparto": "Cast: {value}",
+                "actores": "Cast: {value}",
+                "actors": "Cast: {value}",
                 "year": "Year: {value}",
                 "release_year": "Year: {value}",
                 "rating": "Rating: {value}",
@@ -455,6 +720,7 @@
                 "author": "Author: {value}",
                 "autor": "Author: {value}",
                 "director": "Director: {value}",
+                "directores": "Director: {value}",
                 "release_date": "Release date: {value}",
                 "fecha": "Release date: {value}",
                 "category": "Category: {value}",
@@ -508,6 +774,143 @@
                 .catch(function () { cb(null, null); });
         }
 
+        function usePosterUrl(posterUrl) {
+            // Carátula activa: preview + b64 en segundo plano + URL para el servidor
+            selectedPosterUrl = posterUrl || null;
+            var chkPrev = document.getElementById('enricher-use-poster');
+            if (chkPrev && !chkPrev.checked) chkPrev.checked = true;
+            if (posterUrl) {
+                document.getElementById('enricher-img').src = posterUrl;
+                document.getElementById('enricher-img').style.display = 'block';
+                var phPrev = document.getElementById('enricher-img-placeholder');
+                if (phPrev) phPrev.style.display = 'none';
+                fetchPosterAsB64(posterUrl, function (b64) {
+                    if (b64) {
+                        document.getElementById('enricher-poster-b64').value = b64;
+                    }
+                });
+            }
+        }
+
+        function posterList(det) {
+            var l = det && det.api_cover;
+            if (typeof l === 'string') { try { l = JSON.parse(l); } catch (e) { l = l ? [l] : []; } }
+            if (!Array.isArray(l)) l = l ? [l] : [];
+            return l.filter(function (u) { return !!u; });
+        }
+
+        function posterLang() {
+            var sel = document.getElementById('enricher-poster-lang');
+            return sel ? (sel.value || '') : '';
+        }
+
+        function posterAllList(det) {
+            var l = det && det.api_covers_all;
+            if (typeof l === 'string') { try { l = JSON.parse(l); } catch (e) { l = []; } }
+            if (Array.isArray(l) && l.length) {
+                return l.filter(function (p) { return p && p.url; });
+            }
+            // Sin lista con idioma: las de api_cover como neutras
+            return posterList(det).map(function (u) { return { url: u, lang: '' }; });
+        }
+
+        function posterLangMatch(p, code) {
+            if (!code) return true;
+            var pl = String((p && p.lang) || '').toLowerCase();
+            return !pl || pl === String(code).toLowerCase();
+        }
+
+        function renderPosterStrip() {
+            // Solo rellena las entradas Obtenida N del menú (con miniatura),
+            // filtradas por "Traer versión". Sin tira visible: descuadraba el diseño.
+            var obt = document.getElementById('enricher-cover-obt');
+            if (!obt) return;
+            var code = posterLang();
+            var list = posterAllList(selectedDetails).filter(function (p) { return posterLangMatch(p, code); });
+            if (list.length > 1) {
+                var mh = '';
+                for (var j = 0; j < list.length; j++) {
+                    mh += '<button data-obt-url="' + String(list[j].url).replace(/"/g, '&quot;') + '" style="display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;font-size:0.8rem;margin:2px 0;text-align:left;background:#27272a;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;cursor:pointer;">' +
+                        '<img src="' + String(list[j].url).replace(/"/g, '&quot;') + '" style="width:24px;height:36px;object-fit:cover;border-radius:3px;flex-shrink:0;">' +
+                        '<span>Obtenida ' + (j + 1) + '</span></button>';
+                }
+                obt.innerHTML = mh;
+                obt.style.display = 'block';
+                var mels = obt.querySelectorAll('button[data-obt-url]');
+                Array.prototype.forEach.call(mels, function (mel) {
+                    mel.onclick = function () { hideEnricherCoverMenu(); usePosterUrl(mel.getAttribute('data-obt-url')); };
+                });
+            } else {
+                obt.innerHTML = '';
+                obt.style.display = 'none';
+            }
+        }
+
+        function hideEnricherCoverMenu() {
+            var m = document.getElementById('enricher-cover-menu');
+            if (m) m.style.display = 'none';
+        }
+
+        // Sugerencia de título del job (solo localOnly): Original + año desde los datos.
+        var jobTitleDirty = false;
+        function suggestedJobTitle(det) {
+            try {
+                det = det || {};
+                var t = det.api_original_title || det.api_title || '';
+                if (!t) return '';
+                var y = '';
+                var m = String(det.api_year || '').match(/(\d{4})/);
+                if (m) y = m[1];
+                return y ? (t + '🗓' + y) : t;
+            } catch (e) { return ''; }
+        }
+        // Nombre desde el caption guardado: Original title primero, luego Title
+        // (misma prioridad que el servidor), + año de Year/Año. Sin tags crudos.
+        function titleFromCaption(txt) {
+            try {
+                var orig = '', disp = '', year = '';
+                var lines = String(txt || '').split('\n');
+                for (var i = 0; i < lines.length; i++) {
+                    var ln = lines[i].replace(/^\s+|\s+$/g, '');
+                    if (!ln || ln.length < 2) continue;
+                    var mO = ln.match(/^(original\s+title|t[ií]tulo\s+original)\s*[:=\-]?\s*(.+?)\s*$/i);
+                    if (mO && !orig) {
+                        var vO = mO[2].replace(/^\s+|\s+$/g, '');
+                        if (vO.length >= 2 && vO.indexOf('{') === -1 && vO.indexOf('}') === -1) orig = vO.slice(0, 200);
+                    }
+                    var mD = ln.match(/^(t[ií]tulo|titulo|title|nombre)(?!\s+(?:alt\d*|es(?:pa[ñn]a)?|latam|latin[oa]|mx|m[ée]xico|original)\b)\s*[:=\-]?\s*(.+?)\s*$/i);
+                    if (mD && !disp) {
+                        var vD = mD[2].replace(/^\s+|\s+$/g, '');
+                        if (vD.length >= 2 && vD !== ':' && vD !== '-' && vD.indexOf('{') === -1 && vD.indexOf('}') === -1) disp = vD.slice(0, 200);
+                    }
+                    if (!year) {
+                        var mY = ln.match(/^(?:year|a[ñn]o)\s*[:=\-]?\s*(\d{4})/i);
+                        if (mY) year = mY[1];
+                    }
+                    if ((orig || disp) && year) break;
+                }
+                var t = orig || disp;
+                return t ? (t + (year ? '🗓' + year : '')) : '';
+            } catch (e) { return ''; }
+        }
+        function updateTitleSuggestion() {
+            if (!opts.localOnly) return;
+            try {
+                var box = document.getElementById('enricher-title-sugg');
+                var v = document.getElementById('enricher-title-sugg-v');
+                var inp = document.getElementById('enricher-job-title');
+                if (!box || !v) return;
+                var s = suggestedJobTitle(selectedDetails);
+                var cur = inp ? inp.value : '';
+                if (s && s !== cur) {
+                    v.textContent = s;
+                    box.style.display = 'block';
+                } else {
+                    box.style.display = 'none';
+                }
+            } catch (e) {}
+        }
+
         document.getElementById('enricher-search').onclick = function () {
             var q = document.getElementById('enricher-query').value.trim();
             if (!q) { setStatus('Escribe un titulo', true); return; }
@@ -517,7 +920,7 @@
             fetch('/api/enricher/search', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: q, category: category, subcategory: subcategory })
+                body: JSON.stringify({ query: q, category: category, subcategory: subcategory, episode_count: episodeCount })
             })
             .then(function (r) { return r.json(); })
             .then(function (j) {
@@ -527,8 +930,10 @@
                     var t = c.title || c.api_title || c.name || '—';
                     var y = c.year || c.api_year || '';
                     var prov = c.provider || '';
+                    var origT = (c.original_title || '').trim();
+                    var origHtml = (origT && origT !== t) ? ' · <span title="Título original" style="color:#a1a1aa;">orig: ' + origT.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</span>' : '';
                     var poster = c.poster || (c.api_cover && c.api_cover[0]) || '';
-                    return '<div class="enricher-cand" data-idx="' + i + '" data-provider="' + (prov || '') + '" data-cid="' + (c.id || c.api_id || '') + '" data-poster="' + (poster || '').replace(/"/g, '&quot;') + '" style="padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent;display:flex;gap:8px;align-items:center;"><div style="width:16px;height:16px;border-radius:50%;border:1px solid #71717a;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><div class="enricher-cand-dot" style="width:8px;height:8px;border-radius:50%;background:#06b6d4;display:none;"></div></div><div style="width:28px;height:40px;background:#18181b;border-radius:4px;flex-shrink:0;overflow:hidden;">' + (poster ? '<img src="' + poster + '" style="width:100%;height:100%;object-fit:cover;">' : '') + '</div><div style="flex:1;min-width:0;"><div style="font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + '</div><div style="font-size:0.68rem;color:#71717a;">' + (y || '') + (prov ? ' · ' + prov : '') + '</div></div></div>';
+                    return '<div class="enricher-cand" data-idx="' + i + '" data-provider="' + (prov || '') + '" data-cid="' + (c.id || c.api_id || '') + '" data-media-type="' + (c.media_type || '') + '" data-poster="' + (poster || '').replace(/"/g, '&quot;') + '" style="padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent;display:flex;gap:8px;align-items:center;"><div style="width:16px;height:16px;border-radius:50%;border:1px solid #71717a;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><div class="enricher-cand-dot" style="width:8px;height:8px;border-radius:50%;background:#06b6d4;display:none;"></div></div><div style="width:28px;height:40px;background:#18181b;border-radius:4px;flex-shrink:0;overflow:hidden;">' + (poster ? '<img src="' + poster + '" style="width:100%;height:100%;object-fit:cover;">' : '') + '</div><div style="flex:1;min-width:0;"><div style="font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + '</div><div style="font-size:0.68rem;color:#71717a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (y || '') + (prov ? ' · ' + prov : '') + origHtml + '</div></div></div>';
                 }).join('');
                 if (cands.length > 10) box.innerHTML += '<div style="font-size:0.68rem;color:#71717a;margin-top:4px;">Hay mas (refina la busqueda)</div>';
                 setStatus(cands.length + ' candidatos · ' + (j.provider || '') + (cands.length===1 ? ' · auto-seleccionado' : ' · selecciona uno como fuente activa'));
@@ -542,6 +947,7 @@
                         setActiveCand(el);
                         var prov = el.getAttribute('data-provider') || 'tmdb';
                         var cid = el.getAttribute('data-cid');
+                        var mt = el.getAttribute('data-media-type') || '';
                         var posterUrl = el.getAttribute('data-poster');
                         if (!cid) return;
                         selectedProvider = prov; selectedId = cid;
@@ -550,32 +956,27 @@
                         fetch('/api/enricher/details', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ provider: prov, id: String(cid) })
+                            body: JSON.stringify({ provider: prov, id: String(cid), media_type: mt })
                         })
                         .then(function (r) { return r.json(); })
                         .then(function (det) {
                             if (!det || det.error) { setStatus((det && det.error) || 'Sin detalle', true); return; }
                             selectedDetails = det;
+                            renderPosterStrip();
                             // Preview inmediato con la URL directa (sin esperar base64, evita CORS del fetch)
                             if (posterUrl) {
-                                var chkPrev = document.getElementById('enricher-use-poster');
-                                if (!chkPrev || chkPrev.checked) {
-                                    document.getElementById('enricher-img').src = posterUrl;
-                                    document.getElementById('enricher-img').style.display = 'block';
-                                    var phPrev = document.getElementById('enricher-img-placeholder');
-                                    if (phPrev) phPrev.style.display = 'none';
-                                }
-                                fetchPosterAsB64(posterUrl, function (b64) {
-                                    if (b64) {
-                                        document.getElementById('enricher-poster-b64').value = b64;
-                                        // Si sigue marcado, asegurar que el preview sea el b64 ya cacheado para el guardado
-                                        var chk2b = document.getElementById('enricher-use-poster');
-                                        if (chk2b && chk2b.checked) {
-                                            // Mantener la URL directa como preview (más rápido), el b64 queda para el POST
-                                        }
-                                    }
-                                });
+                                usePosterUrl(posterUrl);
                             }
+                            updateTitleSuggestion();
+                            // Si el caption está vacío, rellenarlo con la plantilla actual
+                            // (evita guardar vacío por olvidar "Aplicar").
+                            try {
+                                var _capEl = document.getElementById('enricher-text');
+                                if (_capEl && !_capEl.value.trim()) {
+                                    var _rawEl = document.getElementById('enricher-tpl-raw');
+                                    _capEl.value = renderTpl(det, category, subcategory, original.description || '', _rawEl ? _rawEl.value : '');
+                                }
+                            } catch (_eCap) {}
                             setStatus('Fuente activa: ' + (det.api_title || det.title || '—') + ' · pulsa Aplicar para usar la plantilla');
                         })
                         .catch(function () { setStatus('Error al cargar detalle', true); });
@@ -592,6 +993,43 @@
         };
         var applyBtn = document.getElementById('enricher-apply');
         if (applyBtn) applyBtn.onclick = function () { doSave(true); };
+        // Modo local (partido TGHirayi): no hay item compartido al que aplicar.
+        if (opts.localOnly && applyBtn) applyBtn.style.display = 'none';
+        // Sugerido inicial (datos propios del job) + botón usar + dirty tracking.
+        if (opts.localOnly) {
+            try {
+                var _jtInp = document.getElementById('enricher-job-title');
+                if (_jtInp) _jtInp.oninput = function () { jobTitleDirty = true; };
+                var _useL = document.getElementById('enricher-title-use');
+                if (_useL) _useL.onclick = function (e) {
+                    try { if (e && e.preventDefault) e.preventDefault(); } catch (_eU) {}
+                    try {
+                        var s = suggestedJobTitle(selectedDetails);
+                        if (s) document.getElementById('enricher-job-title').value = s;
+                        jobTitleDirty = true;
+                        updateTitleSuggestion();
+                    } catch (_eU2) {}
+                    return false;
+                };
+            } catch (_eU3) {}
+            updateTitleSuggestion();
+        }
+
+        // Vuelve a la hero del mismo título, actualizada (sin recargar la página).
+        function backToHero() {
+            try { overlay.remove(); } catch (e) {}
+            try { if (window.openDetails) window.openDetails(itemId); } catch (e2) {}
+            // Romper caché del cover en hero y grid (el blob cambió con la misma URL).
+            setTimeout(function () {
+                try {
+                    var v = Date.now();
+                    var bg = document.getElementById('detail-backdrop');
+                    if (bg) bg.style.backgroundImage = "url('/api/cover/" + encodeURIComponent(itemId) + "?v=" + v + "')";
+                    var gridImg = document.querySelector('.grid-item[data-id="' + itemId + '"] img');
+                    if (gridImg) gridImg.src = '/api/cover/' + encodeURIComponent(itemId) + '?v=' + v;
+                } catch (e3) {}
+            }, 1500);
+        }
 
         function doSave(applyTelegram) {
             var text = document.getElementById('enricher-text').value || '';
@@ -605,6 +1043,33 @@
             if (!posterB64 && imgEl && imgEl.src && imgEl.src.indexOf('data:') === 0) posterB64 = imgEl.src;
             var posterUrl = null;
             if (usePoster && usePoster.checked) posterUrl = selectedPosterUrl;
+            // Modo local (partido TGHirayi): sin POST al registry; devolver datos al callback.
+            if (opts.localOnly) {
+                var _jt = '';
+                try { _jt = (document.getElementById('enricher-job-title') || {}).value || ''; } catch (_eJ) {}
+                _jt = String(_jt).replace(/^\s+|\s+$/g, '');
+                // Título: el manual si se tocó; si no, el derivado del caption
+                // (Original title → Title + año). Así Guardar renombra solo.
+                if (!jobTitleDirty) {
+                    var _autoT = titleFromCaption(text);
+                    if (_autoT) _jt = _autoT;
+                }
+                var _tplRaw = '';
+                try { _tplRaw = (document.getElementById('enricher-tpl-raw') || {}).value || ''; } catch (_eT) {}
+                var _loc = {
+                    cover_text: text,
+                    template: _tplRaw,
+                    poster_b64: posterB64,
+                    poster_url: posterUrl,
+                    use_poster: !!(usePoster && usePoster.checked),
+                    details: selectedDetails || null,
+                    title: _jt
+                };
+                setStatus('Cover propio listo');
+                try { if (typeof opts.onDone === 'function') opts.onDone(_loc); } catch (_eL) {}
+                try { overlay.remove(); } catch (_eL2) {}
+                return;
+            }
             var payload = {
                 cover_text: text,
                 enrich_details: selectedDetails || enriched && enriched.enrich_details || null,
@@ -623,7 +1088,25 @@
             .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
             .then(function (res) {
                 if (!res.ok) { setStatus((res.j && (res.j.detail || res.j.error)) || 'Error', true); return; }
-                setStatus(applyTelegram ? 'Aplicado en Telegram y guardado local' : 'Guardado local');
+                try {
+                    // El backend ya propagó el título al catálogo: reflejarlo en el
+                    // grid en memoria y en el DOM sin recargar la página.
+                    var _rj = res.j || {};
+                    if (_rj.title_applied && _rj.catalog_title && window.Catalog && window.Catalog.currentItems) {
+                        var _items = window.Catalog.currentItems;
+                        for (var _k = 0; _k < _items.length; _k++) {
+                            if (String(_items[_k].item_id) === String(itemId)) { _items[_k].title = _rj.catalog_title; break; }
+                        }
+                        var _node = document.querySelector('.grid-item[data-id="' + itemId + '"] .grid-item-title');
+                        if (_node) _node.textContent = _rj.catalog_title;
+                    }
+                } catch (_e) {}
+                var _msg = applyTelegram ? 'Aplicado en Telegram y guardado local' : 'Guardado local';
+                try {
+                    var _rj2 = res.j || {};
+                    if (_rj2.title_applied && _rj2.catalog_title) _msg += ' · Título catálogo: ' + _rj2.catalog_title;
+                } catch (_e2) {}
+                setStatus(_msg);
                 // Llamada externa (p.ej. cola TGHirayi): devolver el resultado al
                 // callback en vez de reabrir la hero. El guardado en el registry
                 // compartido ya se ha hecho (propaga a catálogo).
@@ -646,7 +1129,7 @@
                     }, 1500);
                     return;
                 }
-                setTimeout(function () { overlay.remove(); location.reload(); }, 900);
+                setTimeout(backToHero, 900);
             })
             .catch(function () { setStatus('Error de red', true); });
         }
@@ -656,7 +1139,7 @@
             if (!confirm('Eliminar el enriquecimiento local de este titulo?')) return;
             fetch('/api/enricher/item/' + encodeURIComponent(itemId), { method: 'DELETE' })
                 .then(function (r) { return r.json(); })
-                .then(function () { setStatus('Revertido'); setTimeout(function () { overlay.remove(); location.reload(); }, 600); })
+                .then(function () { setStatus('Revertido'); setTimeout(backToHero, 600); })
                 .catch(function () { setStatus('Error al revertir', true); });
         }
     }

@@ -5,14 +5,14 @@
   "displayName": "Player HLS SEQ",
   "description": "Reproductor basado en HLS nativo para SmartTVs antiguas (Tizen 2.4 / WebKit 538.1). Resuelve el seek en dispositivos que no soportan Range requests progresivos. Requiere que el servidor tenga ffmpeg instalado.",
   "icon": "static/plugin_icon.png",
-  "iconEmoji": "\u00c1\u00b0\u00c5\u00b8\u00e2\u20ac\u0153\u00a1",
+  "iconEmoji": "📡",
   "defaultEnabled": true,
   "action_category": "playback",
   "single_button": true,
   "priority": 3,
   "js": [
     "hls.min.js?v=20260935z21",
-    "player_hls.js?v=20260935"
+    "player_hls.js?v=20260914l"
   ],
   "css": [],
   "applies_to": [
@@ -59,7 +59,7 @@
           "label": "5 - Precarga 5 segmentos"
         }
       ],
-      "description": "N\u00c1\u0192\u00bamero de segmentos que se descargan y procesan por delante para evitar cortes."
+      "description": "N\u00famero de segmentos que se descargan y procesan por delante para evitar cortes."
     },
     {
       "id": "prio1_audio",
@@ -111,7 +111,7 @@
     },
     {
       "id": "prio1_subs",
-      "label": "Prioridad 1 - Subt\u00c1\u0192\u00adtulos",
+      "label": "Prioridad 1 - Subt\u00edtulos",
       "type": "select",
       "default": "spa",
       "options": [
@@ -143,7 +143,7 @@
     },
     {
       "id": "prio2_audio",
-      "label": "Prioridad 2 - Audio (fallback)",
+      "label": "Prioridad 2 - Audio",
       "type": "select",
       "default": "eng",
       "options": [
@@ -195,7 +195,7 @@
     },
     {
       "id": "prio2_subs",
-      "label": "Prioridad 2 - Subt\u00c1\u0192\u00adtulos (fallback)",
+      "label": "Prioridad 2 - Subt\u00edtulos",
       "type": "select",
       "default": "none",
       "options": [
@@ -227,7 +227,7 @@
     },
     {
       "id": "sub_font_size",
-      "label": "Tama\u00c1\u0192\u00b1o fuente subt\u00c1\u0192\u00adtulos (px)",
+      "label": "Tama\u00f1o fuente subt\u00edtulos (px)",
       "type": "number",
       "default": 20
     },

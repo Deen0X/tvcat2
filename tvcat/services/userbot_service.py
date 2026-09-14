@@ -18,6 +18,31 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DB_PATH = os.path.join(BASE_DIR, "data", "tvcat.db")
 
 
+def pyro_media(msg):
+    """Devuelve el medio de un mensaje Pyrogram (document, video, audio,
+    animation, voice, video_note, sticker, photo) o None. En Pyrogram los vídeos
+    van en `msg.video`, NO en `msg.document` (a diferencia de Telethon)."""
+    if msg is None:
+        return None
+    for attr in ("document", "video", "audio", "animation", "voice",
+                 "video_note", "sticker", "photo"):
+        try:
+            medium = getattr(msg, attr, None)
+        except Exception:
+            medium = None
+        if medium is not None:
+            return medium
+    try:
+        media = getattr(msg, "media", None)
+        if media is not None:
+            doc = getattr(media, "document", None)
+            if doc is not None:
+                return doc
+    except Exception:
+        pass
+    return None
+
+
 def _get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -266,6 +291,20 @@ def get_session(session_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_session_by_name(name: str, client_type: str = "telethon") -> Optional[dict]:
+    """Sesión por nombre (para credenciales de plugins)."""
+    if not name:
+        return None
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT s.*, u.name as tg_name FROM userbot_sessions s "
+        "LEFT JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
+        "WHERE s.name=? AND s.client_type=? LIMIT 1", (name, client_type)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def save_session(name: str, client_type: str, phone: str, api_id: int, api_hash: str,
                  session_string: str, tg_user_id: int = None, is_active: bool = False) -> dict:
     conn = _get_conn()
@@ -366,6 +405,13 @@ def get_primary_session() -> Optional[dict]:
 
 _client_pool = {}
 
+# Cooldown de reconexión por clave (anti-tormenta): si el cliente se cayó hace
+# segundos (flood/red), no reconectar en cada llamada — se devuelve igual y se
+# reintenta como mucho 1 vez por ventana. Cada connect() en pyro cuesta un
+# users.GetFullUser que Telegram pone en FloodWait en escalada.
+import time as _time
+_reconnect_ts = {}
+
 # 2026-09-04: locks single-flight por clave. Sin esto, N corutinas concurrentes
 # veían el cliente caído y lanzaban N connect() en paralelo -> N-1 senders
 # abandonados cuyo recv_loop/reconnect crashea en Telethon (_connection=None)
@@ -395,6 +441,10 @@ async def get_active_client(client_type: str = None) -> 'UserbotClient':
                 except Exception:
                     connected = False
                 if not connected:
+                    _now = _time.monotonic()
+                    if _now - _reconnect_ts.get(key, 0) < 60:
+                        return c  # cooldown: no machacar con reconnects
+                    _reconnect_ts[key] = _now
                     try:
                         await c.connect()
                     except Exception as e:
@@ -499,32 +549,45 @@ class UserbotClient:
     async def _connect_pyrogram(self):
         from pyrogram import Client
         import os, tempfile
-        # 2026-09-04: igual que telethon, cerrar el anterior para no fugarlo.
-        old = self._client
-        self._client = None
-        if old is not None:
-            try:
-                await old.disconnect()
-            except Exception:
-                pass
         name = f"tvcat_pyro_{abs(hash(str(self.session_data.get('session_string',''))))}"
         # Workers de red configurables (por defecto 16). Afecta a subida/descarga del cliente.
         workers = int(self.session_data.get("workers", 16) or 16)
-        self._client = Client(
+        new_client = Client(
             name=name,
             session_string=self.session_data.get("session_string") or None,
             api_id=self.session_data["api_id"],
             api_hash=self.session_data["api_hash"],
             in_memory=True,
             workers=workers,
+            # F2 FastDownload: transmisiones concurrentes (Nanaki usa 4).
+            max_concurrent_transmissions=4,
             workdir=tempfile.gettempdir()
         )
-        if self.session_data.get("session_string"):
-            # start() conecta y autentica (no conectar antes, ya lo hace internamente)
-            await self._client.start()
-        else:
-            # Sin sesión (generación): solo conectar
-            await self._client.connect()
+        try:
+            if self.session_data.get("session_string"):
+                # Con sesión existente basta connect() (sin get_me/GetFullUser).
+                # start() solo de fallback si connect() no basta.
+                try:
+                    await new_client.connect()
+                except Exception:
+                    await new_client.start()
+            else:
+                await new_client.connect()
+        except Exception:
+            try:
+                await new_client.disconnect()
+            except Exception:
+                pass
+            raise
+        # Nuevo OK: ahora sí retirar el anterior (antes se cerraba primero y el
+        # storage sqlite moría bajo los pies de otras tareas que lo usaban).
+        old = self._client
+        self._client = new_client
+        if old is not None:
+            try:
+                await old.disconnect()
+            except Exception:
+                pass
         return self._client
 
     async def get_me(self):
@@ -558,10 +621,7 @@ class UserbotClient:
             from pyrogram.raw.functions.upload import GetFile
             from pyrogram.raw.types import InputDocumentFileLocation
             from pyrogram.raw.types.upload import File as UploadFile, FileCdnRedirect
-            doc = getattr(message, "document", None)
-            if doc is None:
-                media = getattr(message, "media", None)
-                doc = getattr(media, "document", None) if media else None
+            doc = pyro_media(message)
             if doc is None:
                 print(" [ITER_DOWNLOAD] Pyrogram: documento no disponible, fallback a download_media")
                 data = await self.download_media(message)
@@ -570,34 +630,113 @@ class UserbotClient:
                     yield data[offset:end]
                     offset = end
                 return
+            # El Document de alto nivel de Pyrogram NO trae ids crudos (.id no
+            # existe): se resuelven vía FileId.decode(file_id) (mismo patrón que
+            # services/fast_download.py). Acepta también doc crudo (raw) por
+            # compatibilidad.
+            try:
+                if hasattr(doc, "file_id") and getattr(doc, "file_id"):
+                    from pyrogram.file_id import FileId
+                    _fid = FileId.decode(doc.file_id)
+                    _mid, _ah, _fr = _fid.media_id, _fid.access_hash, _fid.file_reference
+                else:
+                    _mid, _ah, _fr = doc.id, doc.access_hash, doc.file_reference
+            except AttributeError:
+                print(" [ITER_DOWNLOAD] Pyrogram: sin localización, fallback a download_media")
+                data = await self.download_media(message)
+                while offset < len(data):
+                    end = min(offset + chunk_size, len(data))
+                    yield data[offset:end]
+                    offset = end
+                return
             loc = InputDocumentFileLocation(
-                id=doc.id,
-                access_hash=doc.access_hash,
-                file_reference=bytes(doc.file_reference) if doc.file_reference else b"",
+                id=_mid,
+                access_hash=_ah,
+                file_reference=bytes(_fr) if _fr else b"",
                 thumb_size=""
             )
             # Telegram capa upload.getFile en ~1MB por petición
             limit = max(4096, min(chunk_size, 1024 * 1024))
+            expected = 0
+            try:
+                expected = int(getattr(doc, "file_size", 0) or 0)
+            except Exception:
+                expected = 0
+            # El offset debe ser múltiplo del limit (si no → 400 LIMIT_INVALID).
+            # El player pide seeks arbitrarios: se alinea hacia abajo y se
+            # recortan los primeros bytes (patrón Telethon).
+            orig_offset = offset
+            skip_first = 0
+            if limit > 0 and offset % limit:
+                skip_first = offset % limit
+                offset -= skip_first
+            yielded = 0
             chunk_count = 0
+            empty_streak = 0
+
+            def _gate():
+                from services.telegram_service import get_telegram_service
+                return get_telegram_service()
+
             while True:
-                result = await self._client.invoke(GetFile(location=loc, offset=offset, limit=limit))
+                # Carril bulk del servicio central (streaming = prioridad 0):
+                # el control de Telegram es exclusivo del servicio.
+                await _gate().bulk_acquire(0)
+                try:
+                    # El limit se pide SIEMPRE completo: el servidor devuelve menos
+                    # bytes en la cola. Acortarlo rompe la invariante
+                    # offset % limit == 0 → 400 LIMIT_INVALID (así lo hace Telethon).
+                    result = await self._client.invoke(GetFile(location=loc, offset=offset, limit=limit))
+                except Exception as e:
+                    if type(e).__name__ in ("FloodWait", "FloodPremiumWait"):
+                        _gate().bulk_flood_report(float(getattr(e, 'value', 0) or 0))
+                    raise
+                finally:
+                    await _gate().bulk_release()
                 if isinstance(result, FileCdnRedirect):
                     print(" [ITER_DOWNLOAD] Pyrogram: CDN Redirect detectado, fallback a download_media")
                     data = await self.download_media(message)
-                    while offset < len(data):
-                        end = min(offset + chunk_size, len(data))
-                        yield data[offset:end]
-                        offset = end
+                    _pos = orig_offset
+                    while _pos < len(data):
+                        end = min(_pos + chunk_size, len(data))
+                        yield data[_pos:end]
+                        _pos = end
                     return
-                if not result.bytes:
-                    break
-                yield bytes(result.bytes)
-                offset += len(result.bytes)
+                _raw = bytes(getattr(result, "bytes", b"") or b"")
+                _b = _raw[skip_first:] if skip_first else _raw
+                skip_first = 0
+                if not _b:
+                    # EOF prematuro del servidor (location rancia): NO cortar en
+                    # silencio (rompería el Content-Length del stream) → fallback.
+                    print(f" [ITER_DOWNLOAD] Pyrogram: GetFile vacío en offset={offset} (yielded={yielded}/{expected})", flush=True)
+                    empty_streak += 1
+                    if empty_streak >= 3 or (expected and yielded >= expected):
+                        break
+                    await asyncio.sleep(1)
+                    continue
+                empty_streak = 0
+                yield _b
+                offset += len(_raw)  # posición de servidor (sin recortar)
+                yielded += len(_b)
                 chunk_count += 1
                 if chunk_count <= 3 or chunk_count % 50 == 0:
-                    print(f" [ITER_DOWNLOAD] Pyrogram chunk #{chunk_count}: {len(result.bytes)} bytes (offset={offset})")
-                if getattr(result, "type", "") == "last":
-                    break
+                    print(f" [ITER_DOWNLOAD] Pyrogram chunk #{chunk_count}: {len(_b)} bytes (offset={offset})")
+                if expected and offset >= expected:
+                    break  # EOF alcanzado: no pedir de más (400 OFFSET_INVALID)
+            if expected and yielded < expected:
+                # El servidor cortó antes de tiempo: completar con descarga normal
+                # para no truncar el stream HTTP (h11 exige el Content-Length).
+                print(f" [ITER_DOWNLOAD] Pyrogram: incompleto ({yielded}/{expected}), completando vía download_media", flush=True)
+                try:
+                    data = await self.download_media(message)
+                    if data and len(data) > yielded:
+                        tail = data[yielded:]
+                        while tail:
+                            yield tail[:chunk_size]
+                            tail = tail[chunk_size:]
+                        yielded = len(data)
+                except Exception as e:
+                    print(f" [ITER_DOWNLOAD] Pyrogram: fallback falló: {e}", flush=True)
             print(f" [ITER_DOWNLOAD] Pyrogram: streaming completado ({offset} bytes, {chunk_count} chunks)")
             return
         chunk_count = 0

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title data-i18n="TVCat 2">TVCat 2</title>
     <link rel="icon" type="image/png" href="static/TVCat.png">
-    <link rel="stylesheet" href="style.css?v=20260903q">
+    <link rel="stylesheet" href="style.css?v=20260914c">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css">
     <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
@@ -92,6 +92,9 @@
             </a>
             <a href="#" data-category="completed" onclick="selectSection('completed', this)">
                 <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg> Vistos
+            </a>
+            <a href="#" data-category="collections" onclick="selectSection('collections', this)">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM9 4h2v6l-1-.75L9 10V4zm9 16H6V4h1v9l3-2.25L13 13V4h5v16z"/></svg> Colecciones
             </a>
         </div>
 
@@ -413,7 +416,6 @@
                                 </div>
                                 <div style="display:flex;align-items:flex-end;gap:4px;">
                                     <button class="btn-secondary" onclick="toggleUserbotVisibility()" id="userbot-eye-btn" style="padding:6px 10px;font-size:0.75rem;">👁</button>
-                                    <button class="btn-secondary" onclick="saveUserbotDefaults()" style="padding:6px 12px;font-size:0.75rem;">Guardar</button>
                                 </div>
                             </div>
                         </div>
@@ -457,9 +459,17 @@
                                     <option value="pyrogram" style="background:var(--bg);color:var(--text);">Pyrogram (Pyrofork)</option>
                                 </select>
                             </div>
-                            <div>
-                                <button class="btn-secondary" onclick="saveTelegramSettings()" style="padding:4px 10px;font-size:0.7rem;">Guardar</button>
-                                <span id="telegram-behavior-status" style="font-size:0.7rem;color:var(--text-secondary);margin-left:8px;"></span>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Trozos simultáneos en descarga rápida Pyrofork (1 conexión). Telethon usa su config por plugin.">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Descarga rápida (workers):</label>
+                                <input type="number" id="setting-tg-fastdl-workers" min="1" max="16" step="1" value="8" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Trozos simultáneos en subida rápida Pyrofork (1 conexión). Telethon usa su config por plugin.">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Subida rápida (workers):</label>
+                                <input type="number" id="setting-tg-fastul-workers" min="1" max="16" step="1" value="8" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Conexiones TCP simultáneas en subida rápida (1 = actual). Subir si la subida es estable pero muy inferior a la bajada con el mismo RTT (el DC raciona el ingress por conexión).">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Sesiones subida:</label>
+                                <input type="number" id="setting-tg-fastul-sessions" min="1" max="8" step="1" value="1" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
                             </div>
                         </div>
                     </div>
@@ -478,10 +488,6 @@
                             <div style="display:flex;align-items:center;gap:8px;">
                                 <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Ráfaga inicial:</label>
                                 <input type="number" id="setting-tg-throttle-burst" min="1" max="30" step="1" value="5" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
-                            </div>
-                            <div>
-                                <button class="btn-secondary" onclick="saveTelegramSettings()" style="padding:4px 10px;font-size:0.7rem;">Guardar</button>
-                                <span id="buckets-status" style="font-size:0.7rem;color:var(--text-secondary);margin-left:8px;"></span>
                             </div>
                             <div id="buckets-live" style="display:flex;flex-direction:column;gap:6px;"></div>
                         </div>
@@ -516,7 +522,6 @@
                                     <input type="text" id="google-redirect-uri-input" class="settings-input" placeholder="http://ip:puerto/api/auth/google/callback" style="flex:1;padding:6px 8px;font-size:0.8rem;">
                                 </div>
                                 <div>
-                                    <button class="btn-secondary" onclick="saveGoogleConfig()" style="padding:6px 12px;font-size:0.75rem;">Guardar configuraci&oacute;n Google</button>
                                     <span id="google-config-status" style="font-size:0.75rem;color:var(--text-secondary);margin-left:8px;"></span>
                                 </div>
                             </div>
@@ -751,8 +756,7 @@
                     </div>
                 </div>
             </div>
-            <div class="settings-footer"
-            <div class="settings-footer"<div class="settings-footer" style="display:flex;justify-content:flex-end;gap:8px;margin-top:0;padding:12px 20px;border-top:1px solid var(--border-color);align-items:center;flex-shrink:0;">
+            <div class="settings-footer" style="display:flex;justify-content:flex-end;gap:8px;margin-top:0;padding:12px 20px;border-top:1px solid var(--border-color);align-items:center;flex-shrink:0;">
                 <button class="btn-primary" onclick="saveGlobalSettings()" style="padding:10px 20px;">Guardar Cambios</button>
                 <button class="btn-secondary" onclick="applyGlobalSettings()" style="padding:10px 20px;">Aplicar</button>
                 <button class="btn-secondary" onclick="toggleSettingsModal()" style="padding:10px 20px;">Cerrar</button>
@@ -876,13 +880,13 @@
     <!-- Core JS -->
     <script src="js/translate.js?v=20260801"></script>
     <script src="js/api.js?v=20260801"></script>
-    <script src="js/plugin_system.js?v=20260935"></script>
+    <script src="js/plugin_system.js?v=20260910"></script>
     <script src="js/navEngine.js?v=20260801"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
     <script src="js/inputHelper.js?v=20260903q"></script>
-    <script src="js/catalog.js?v=20260935m"></script>
+    <script src="js/catalog.js?v=20260910j"></script>
     <script src="js/player.js?v=20260801"></script>
-    <script src="js/ui2.js?v=20260907b"></script>
-    <script src="js/app.js?v=20260907d"></script>
+    <script src="js/ui2.js?v=20260910b"></script>
+    <script src="js/app.js?v=20260910d"></script>
 </body>
 </html>

@@ -117,6 +117,42 @@ window.pluginSystem = (function() {
         decoratorsOrder = order;
     }
 
+    // Anti-caché de JS/CSS de plugins por versión del plugin.json: sin esto el
+    // navegador congela el JS viejo (los plugins no llevan ?v= como el core).
+    function versionedUrl(url, version) {
+        if (!url) return url;
+        var v = version || '1.0.0';
+        return url + (url.indexOf('?') === -1 ? '?v=' : '&v=') + encodeURIComponent(v);
+    }
+
+    // Acciones de página de colección (cabecera de colección abierta):
+    // plugins tipo 'collectionpage-action' con getCollectionButtons(collectionData),
+    // o 'heropage-action' que ADEMÁS exponga getCollectionButtons (hero, colección
+    // o ambas según qué funciones declare cada plugin).
+    function getCollectionPageActions(collectionData) {
+        var buttons = [];
+        var candidates = [];
+        for (var name in registry) {
+            var p = registry[name];
+            if ((p.type === 'collectionpage-action' || p.type === 'heropage-action') && p.enabled !== false && p.getCollectionButtons) {
+                candidates.push(p);
+            }
+        }
+        candidates = sortByPluginOrder(candidates);
+        for (var i = 0; i < candidates.length; i++) {
+            var q = candidates[i];
+            try {
+                var result = q.getCollectionButtons(collectionData);
+                if (result && result.length) {
+                    buttons = buttons.concat(result);
+                }
+            } catch (e) {
+                console.error('[PLUGIN SYSTEM] Error en getCollectionButtons de', q.name, e);
+            }
+        }
+        return buttons;
+    }
+
     function loadPluginResources(pluginList, onComplete) {
         var total = pluginList.length;
         var loaded = 0;
@@ -130,7 +166,7 @@ window.pluginSystem = (function() {
             var plugin = pluginList[i];
             // Marcar como activo en el registry
             if (registry[plugin.name]) registry[plugin.name].enabled = true;
-            // Cargar CSS
+            // Cargar CSS (anti-caché por versión del plugin.json)
             var cssFiles = plugin.css || [];
             for (var c = 0; c < cssFiles.length; c++) {
                 var cssUrl = cssFiles[c];
@@ -138,7 +174,7 @@ window.pluginSystem = (function() {
                     loadedStyles[cssUrl] = true;
                     var link = document.createElement('link');
                     link.rel = 'stylesheet';
-                    link.href = cssUrl;
+                    link.href = versionedUrl(cssUrl, plugin.version);
                     document.head.appendChild(link);
                 }
             }
@@ -162,7 +198,7 @@ window.pluginSystem = (function() {
                 }
                 loadedScripts[jsUrl] = true;
                 var script = document.createElement('script');
-                script.src = jsUrl;
+                script.src = versionedUrl(jsUrl, plugin.version);
                 (function(u){
                     script.onload = function() {
                         jsLoaded++;
@@ -202,6 +238,7 @@ window.pluginSystem = (function() {
         applyGridDecorators: applyGridDecorators,
         getActionsForCategory: getActionsForCategory,
         getHeroPageActions: getHeroPageActions,
+        getCollectionPageActions: getCollectionPageActions,
         setDecoratorOrder: setDecoratorOrder,
         setPluginOrder: function(order) { pluginOrder = order || []; },
         loadPluginResources: loadPluginResources,

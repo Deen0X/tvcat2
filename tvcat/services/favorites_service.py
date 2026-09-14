@@ -78,8 +78,29 @@ def get_favorites(profile_id: int) -> list:
         JOIN tvcat_favorites f ON f.item_id = c.item_id
         WHERE f.profile_id = ?
     """, (profile_id,)).fetchall()
+    items = [dict(r) for r in rows]
+    # Colecciones locales (COL-): no están en unified_catalog; se fusionan.
+    try:
+        fav_ids = {str(r["item_id"]) for r in conn.execute(
+            "SELECT item_id FROM tvcat_favorites WHERE profile_id=?", (profile_id,)).fetchall()}
+    except Exception:
+        fav_ids = set()
     conn.close()
-    return [dict(r) for r in rows]
+    try:
+        from services.catalog_service import list_local_collections
+        for loc in list_local_collections():
+            if str(loc.get("item_id") or "") not in fav_ids:
+                continue
+            items.append({
+                "item_id": loc.get("item_id"), "title": loc.get("name") or "Colección",
+                "category": "", "subcategory": "", "source": "collections_local",
+                "description": loc.get("description") or "", "year": "", "rating": 0,
+                "cover_url": "/api/cover/%s" % loc.get("item_id"),
+                "is_collection": 1, "local": 1, "fav": True,
+            })
+    except Exception:
+        pass
+    return items
 
 
 def update_progress(profile_id: int, item_id: str, episode_key: str, episode_id: int, progress: float, duration: float, completed: int = 0, watched_state: int = 0):

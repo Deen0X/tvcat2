@@ -344,7 +344,8 @@
             if (activeEl && activeEl.classList &&
                 (activeEl.classList.contains('tgcopy2-next-input') || activeEl.classList.contains('tgcopy2-norm-input'))) {
                 if (overlay && overlay.parentNode) {
-                    setTimeout(function() { refreshQueue2(content, overlay); }, 2500);
+                    try { if (_queue_modal && _queue_modal._t) clearTimeout(_queue_modal._t); } catch (_eT) {}
+                    _queue_modal._t = setTimeout(function() { if (_queue_modal) _queue_modal._t = null; refreshQueue2(content, overlay); }, 2500);
                 }
                 return;
             }
@@ -378,8 +379,8 @@
 
             // ─── Job actual ───
             if (current && current.status === 'processing') {
-                var ep = current.current_episode || 0;
-                var total = current.total_episodes || 1;
+                var ep = (typeof current._scope_pos === 'number') ? current._scope_pos : (current.current_episode || 0);
+                var total = (current.in_scope_total || current.total_episodes || 1);
                 var pctGeneral = Math.round(current.progress || 0);
                 var pctDownload = Math.round(current.download_progress || 0);
                 var pctUpload = Math.round(current.upload_progress || 0);
@@ -532,7 +533,7 @@ html += '</div>';
                 html += '<div style="color:#a1a1aa;text-align:center;padding:12px;font-size:13px;">No hay trabajos pendientes.</div>';
             }
 
-            // Finalizados (collapsible, estado persistente entre refrescos)
+            // Finalizados: inverso (arriba lo más reciente)
             if (done.length > 0) {
                 var doneId = 'tgcopy2-done-list';
                 var doneOpen = window._queue_done_expanded;
@@ -540,15 +541,19 @@ html += '</div>';
                 html += '<span>' + (doneOpen ? '&#x25BC; ' : '&#x25B6; ') + '</span>Finalizados (' + done.length + ')</div>';
                 html += '<div style="text-align:right;margin:2px 0 4px;"><button onclick="window._tgcopy2CleanCompleted()" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:11px;padding:3px 8px;">Limpiar finalizados</button></div>';
                 html += '<div id="' + doneId + '" style="display:' + (doneOpen ? 'block' : 'none') + ';">';
-                for (var i = 0; i < done.length; i++) {
+                for (var i = done.length - 1; i >= 0; i--) {
                     html += renderJobRow(done[i], current, true);
                 }
                 html += '</div>';
             }
 
+            var _panelEl = content.parentNode;
+            var _st = _panelEl ? _panelEl.scrollTop : 0;
             content.innerHTML = html;
+            if (_panelEl) _panelEl.scrollTop = _st;
             if (overlay && overlay.parentNode) {
-                setTimeout(function() { refreshQueue2(content, overlay); }, 2500);
+                try { if (_queue_modal && _queue_modal._t) clearTimeout(_queue_modal._t); } catch (_eT2) {}
+                _queue_modal._t = setTimeout(function() { if (_queue_modal) _queue_modal._t = null; refreshQueue2(content, overlay); }, 2500);
             }
         });
     }
@@ -584,11 +589,13 @@ html += '</div>';
             h += '</div>';
         }
 
+        var _thumbSrc = j.cover_thumb ? (API + '/queue/' + j.id + '/cover-thumb?v=' + (j.cover_rev || 0)) : ('/api/cover/' + encodeURIComponent(j.item_id || ''));
+        h += '<span style="display:block;width:44px;height:66px;border-radius:4px;border:1px solid #3f3f46;flex-shrink:0;background:#18181b;overflow:hidden;" title="Cover del job"><img src="' + _thumbSrc + '" onload="this.style.display=\'block\'" onerror="this.onerror=null;this.parentNode.style.display=\'none\'" style="display:none;width:100%;height:100%;object-fit:cover;"></span>';
         h += '<div style="flex:1;min-width:0;">';
         h += '<div style="display:flex;align-items:center;gap:6px;font-size:13px;">';
         h += '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">' + jobTitleHtml(j) + '</span>';
-        if ((j.total_episodes || 0) > 1) {
-            h += '<span onclick="window._tgcopy2Episodes(\'' + j.id + '\')" title="Ver episodios y elegir cuáles copiar" style="cursor:pointer;font-size:11px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;">🎞️ ' + j.total_episodes + '</span>';
+        if (((j.in_scope_total || j.total_episodes) || 0) > 1) {
+            h += '<span onclick="window._tgcopy2Episodes(\'' + j.id + '\')" title="Ver episodios y elegir cuáles copiar" style="cursor:pointer;font-size:11px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;">🎞️ ' + (j.in_scope_total || j.total_episodes) + '</span>';
         }
         if (j.is_archive) {
             h += '<span title="Job de archives comprimidos" style="background:rgba(251,191,36,0.15);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">\uD83D\uDCE6 Archive</span>';
@@ -626,8 +633,9 @@ html += '</div>';
         if (j.status === 'error') h += '<div style="font-size:10px;color:#ef4444;">Error: ' + (j.error || '') + '</div>';
 
         // Información de episodios: total y siguiente a procesar (editable en jobs activos)
-        var processed = (j.current_episode && j.current_episode > 0) ? (j.current_episode - 1) : 0;
-        var totalEps = j.total_episodes || '?';
+        // En scope: hechos relativos al scope; si no, absoluto (comportamiento anterior).
+        var processed = (typeof j._scope_done === 'number') ? j._scope_done : ((j.current_episode && j.current_episode > 0) ? (j.current_episode - 1) : 0);
+        var totalEps = (j.in_scope_total || j.total_episodes || '?');
         h += '<div style="display:flex;align-items:center;gap:6px;margin-top:3px;font-size:11px;color:#a1a1aa;">';
         h += '<span>Total: ' + totalEps + '</span>';
         h += '<span>·</span>';
@@ -905,17 +913,26 @@ html += '</div>';
         api(API + '/queue/' + jobId + '/cover', {}, function(res) {
             done();
             if (!res) { showToast('No se pudo obtener el cover'); return; }
-            // Mismo editor que el enriquecedor: propaga al registry compartido
-            // (catálogo/hero) y al volver se deja snapshot en el job.
+            // El cover de la cola es SOLO del job (sin propagar al catálogo).
             var _iid2 = res.item_id || '';
+            // El cover de la cola es SOLO del job: mismo editor en modo local
+            // (sin POST al registry, sin propagar al catálogo).
             if (_iid2 && _iid2.indexOf('COL-') !== 0 && window.Enricher && window.Enricher.open) {
                 window.Enricher.open(
                     { item_id: _iid2, category: res.category || '', subcategory: res.subcategory || '', title: res.title || '' },
-                    { onDone: function(r) {
+                    { localOnly: true, initialText: res.template || '', initialCaption: (res.text || ''),
+                      details: (res.details || null), posterB64: (res.image || ''), jobTitle: (res.title || ''),
+                      epCount: (res.episodes_in_scope || 0),
+                      onDone: function(r) {
                         var payload = { cover_text: (r && r.cover_text) || '' };
-                        if (r && r.catalog_title) payload.title = r.catalog_title;
+                        if (r && typeof r.template === 'string') payload.template = r.template;
+                        if (r && r.details) payload.details = r.details;
+                        if (r && r.poster_b64) payload.poster_b64 = r.poster_b64;
+                        if (r && r.poster_url) payload.poster_url = r.poster_url;
+                        if (r && typeof r.use_poster === 'boolean') payload.use_poster = r.use_poster;
+                        if (r && r.title) payload.title = r.title;
                         api(API + '/queue/' + jobId + '/cover', { method: 'PUT', data: payload }, function(rr) {
-                            if (rr && rr.ok) showToast('Cover guardado' + (r && r.catalog_title ? '. Título: ' + r.catalog_title : ''));
+                            if (rr && rr.ok) showToast('Cover guardado (solo cola)');
                             else showToast('Error al guardar cover en el job');
                             if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
                         });

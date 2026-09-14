@@ -53,6 +53,12 @@ window.handleSearch = function(value) {
         clearBtn.classList.toggle('hidden', value.trim().length === 0);
     }
     var input = document.getElementById('global-search');
+    // Saneo de invisibles (filtro fantasma): si cambia, normalizar la caja.
+    try {
+        var clean = window.sanitizeSearchText ? window.sanitizeSearchText(value) : value;
+        if (clean !== value && input) input.value = clean;
+        value = clean;
+    } catch (e) {}
     saveSearchState();
     if (value.trim().length >= 2) {
         window.Catalog.performSearch(value.trim());
@@ -203,6 +209,7 @@ function saveSearchState() {
     var input = document.getElementById('global-search');
     var text = input ? input.value : '';
     try {
+        if (window.sanitizeSearchText) text = window.sanitizeSearchText(text);
         localStorage.setItem('tvcat_search_state', JSON.stringify({
             search_text: text,
             filters: _activeFilters
@@ -215,10 +222,11 @@ function loadSearchState() {
         var raw = localStorage.getItem('tvcat_search_state');
         if (!raw) return;
         var state = JSON.parse(raw);
-        // Restaurar texto
+        // Restaurar texto (saneado: un estado con invisibles restauraría el filtro fantasma)
         var input = document.getElementById('global-search');
         if (input && state.search_text) {
-            input.value = state.search_text;
+            var restored = window.sanitizeSearchText ? window.sanitizeSearchText(state.search_text) : state.search_text;
+            input.value = restored;
             var clearBtn = document.getElementById('clear-search-btn');
             if (clearBtn) clearBtn.classList.toggle('hidden', state.search_text.trim().length === 0);
         }
@@ -577,6 +585,12 @@ function loadUserbotConfig() {
             if (tpm) tpm.value = settings.tg_throttle_per_minute || '20';
             var tbu = document.getElementById('setting-tg-throttle-burst');
             if (tbu) tbu.value = settings.tg_throttle_burst || '5';
+            var fdw = document.getElementById('setting-tg-fastdl-workers');
+            if (fdw) fdw.value = settings.tg_fastdl_workers || '8';
+            var fuw = document.getElementById('setting-tg-fastul-workers');
+            if (fuw) fuw.value = settings.tg_fastul_workers || '8';
+            var fus = document.getElementById('setting-tg-fastul-sessions');
+            if (fus) fus.value = settings.tg_fastul_sessions || '1';
         }
     });
 
@@ -1174,12 +1188,18 @@ window.saveTelegramSettings = function() {
     var client = document.getElementById('setting-telegram-client');
     var tpm = document.getElementById('setting-tg-throttle-per-minute');
     var tbu = document.getElementById('setting-tg-throttle-burst');
+    var fdw = document.getElementById('setting-tg-fastdl-workers');
+    var fuw = document.getElementById('setting-tg-fastul-workers');
+    var fus = document.getElementById('setting-tg-fastul-sessions');
     var st = document.getElementById('telegram-behavior-status');
     var data = {};
     if (interval) data.jit_cover_interval = interval.value;
     if (client) data.telegram_client_type = client.value;
     if (tpm) data.tg_throttle_per_minute = String(Math.max(5, Math.min(120, parseInt(tpm.value, 10) || 20)));
     if (tbu) data.tg_throttle_burst = String(Math.max(1, Math.min(30, parseInt(tbu.value, 10) || 5)));
+    if (fdw) data.tg_fastdl_workers = String(Math.max(1, Math.min(16, parseInt(fdw.value, 10) || 8)));
+    if (fuw) data.tg_fastul_workers = String(Math.max(1, Math.min(16, parseInt(fuw.value, 10) || 8)));
+    if (fus) data.tg_fastul_sessions = String(Math.max(1, Math.min(8, parseInt(fus.value, 10) || 1)));
     if (!Object.keys(data).length) return;
     window.API.ajax({
         method: 'POST',
@@ -1817,6 +1837,7 @@ var PLUGIN_SECTIONS = {
 
 function loadPluginsList() {
     if (window._tghirayiSaving) return;
+    window._genericPluginName = null;
     var container = document.getElementById('plugins-list-container');
     if (!container) return;
     exitPluginFullScreen();
@@ -1990,10 +2011,21 @@ function renderPluginTray() {
     var html = '';
     for (var i = 0; i < _pluginListCache.length; i++) {
         var p = _pluginListCache[i];
+        // Plugin descargado = como si no existiera: sin botones de acceso rápido.
+        if (p.enabled === false) continue;
         if (!p.tray || !p.tray.length) continue;
         for (var j = 0; j < p.tray.length; j++) {
             var btn = p.tray[j];
-            var active = isPluginEnabled(p.name) && p.tray[j].action === 'toggle-plugin';
+            // Estado visual: toggle-effect refleja la FUNCIÓN (no la carga).
+            var active = false;
+            if (btn.action === 'toggle-effect') {
+                try {
+                    var _rp = window.pluginSystem ? window.pluginSystem.getPlugin(p.name) : null;
+                    active = (_rp && _rp.isEffectActive) ? !!_rp.isEffectActive() : true;
+                } catch (e) { active = true; }
+            } else if (btn.action === 'toggle-plugin') {
+                active = isPluginEnabled(p.name);
+            }
             html += '<button class="plugin-tray-btn' + (active ? ' tray-active' : '') + '" title="' + (btn.label || p.displayName || p.name) + '" ' +
                 (btn.color ? 'style="color:' + btn.color + ';"' : '') +
                 ' onclick="handleTrayAction(\'' + p.name + '\',' + j + ', this)">' +
@@ -2011,6 +2043,28 @@ window.handleTrayAction = function(pluginName, btnIndex, el) {
     }
     if (!p || !p.tray || !p.tray[btnIndex]) return;
     var btn = p.tray[btnIndex];
+    // El botón conmuta la FUNCIÓN del plugin, nunca su carga.
+    // Diferido tras la burbuja del click: repintar el tray aquí mismo
+    // desprende el botón pulsado del DOM y el cierre-por-fuera lo tomaría
+    // como click externo (cerraría el panel lateral).
+    if (btn.action === 'toggle-effect') {
+        try {
+            var _rp2 = window.pluginSystem ? window.pluginSystem.getPlugin(pluginName) : null;
+            if (_rp2 && _rp2.toggleEffect) _rp2.toggleEffect();
+        } catch (e) {}
+        setTimeout(function() {
+            renderPluginTray();
+            // Si el plugin se auto-aplica en caliente (hotEffect), no recargar
+            // el grid: evita flash de skeletons y pérdida de scroll.
+            var hot = false;
+            try {
+                var _rp3 = window.pluginSystem ? window.pluginSystem.getPlugin(pluginName) : null;
+                hot = !!(_rp3 && _rp3.hotEffect);
+            } catch (e) {}
+            if (!hot && window.Catalog) window.Catalog.load(window.Catalog.currentCategory || 'home');
+        }, 0);
+        return;
+    }
     if (btn.action === 'toggle-plugin') {
         togglePlugin(pluginName, el);
         return;
@@ -2023,9 +2077,28 @@ window.handleTrayAction = function(pluginName, btnIndex, el) {
         if (window.Catalog) window.Catalog.load(btn.category);
         return;
     }
-    if (btn.onTrayClick && typeof btn.onTrayClick === 'function') {
-        btn.onTrayClick(btn);
-    }
+	if (btn.action === 'add_scan_item') {
+		if (typeof openTgindexEditModal === 'function') {
+			openTgindexEditModal(null);
+			setTimeout(function() {
+				if (navigator.clipboard && navigator.clipboard.readText) {
+					navigator.clipboard.readText().then(function(text) {
+						if (text && text.match(/t\.me\/c\/\d+/)) {
+							var startEl = document.getElementById('tgindex-start');
+							if (startEl) {
+								startEl.value = text.trim();
+								if (typeof autofillTgindexId === 'function') autofillTgindexId();
+							}
+						}
+					}).catch(function() {});
+				}
+			}, 150);
+		}
+		return;
+	}
+	if (btn.onTrayClick && typeof btn.onTrayClick === 'function') {
+		btn.onTrayClick(btn);
+	}
 };
 
 // --- Contenidos (nivel 1 · Acceso del admin por perfil) ---
@@ -3550,7 +3623,7 @@ function pollGlobalScanBar() {
                 var items = res.plan_items || [];
                 var dn = 0, tt = 0;
                 for (var i = 0; i < items.length; i++) { dn += (items[i].done || 0); tt += (items[i].count || 0); }
-                var p = tt > 0 ? Math.min(99, Math.round(dn * 100 / tt)) : (res.progress_percent || 0);
+                var planP = tt > 0 ? Math.min(99, Math.round(dn * 100 / tt)) : 0; var p = (tt > 0 && dn < tt) ? planP : (res.progress_percent || 0);
                 var cur = res.current_item || 'Escaneando...';
                 wrap.classList.remove('hidden');
                 if (fill) fill.style.width = p + '%';
@@ -3618,9 +3691,12 @@ window.showPluginInfo = function(name) {
     if (!container) return;
     // Config UI personalizada (iframe) si el plugin la define
     if (plugin.settings_ui) {
-        container.innerHTML = '<div style="margin-bottom:8px;"><button onclick="loadPluginsList()" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:0.85rem;font-family:Outfit,sans-serif;">\u2190 Volver a lista</button></div><iframe src="' + plugin.settings_ui + '" style="width:100%;min-height:400px;border:none;border-radius:6px;"></iframe>';
+        window._genericPluginName = null;
+        container.innerHTML = '<div style="margin-bottom:8px;"><button onclick="loadPluginsList()" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:0.85rem;font-family:Outfit,sans-serif;">\u2190 Volver a lista</button></div><iframe src="' + plugin.settings_ui + '" style="width:100%;height:70vh;min-height:400px;border:none;border-radius:6px;display:block;"></iframe>';
         return;
     }
+    // Config genérica (settings_schema + hero cats): se guarda con Guardar Cambios inferior.
+    window._genericPluginName = plugin.name;
     var html = '<div style="margin-bottom:8px;">' +
         '<button onclick="loadPluginsList()" style="background:none;border:none;color:var(--accent,#e91e63);cursor:pointer;font-size:0.85rem;font-family:Outfit,sans-serif;outline:none;padding:4px 0;">\u2190 Volver</button>' +
         '</div>' +
@@ -3642,6 +3718,86 @@ window.showPluginInfo = function(name) {
             var key = plugin.name + '_' + s.id;
             var saved = localStorage.getItem(key);
             var val = saved !== null ? JSON.parse(saved) : s.default;
+
+            // Fila doble audio|subs para prioridades (inline-block: compatible SmartTV antigua).
+            if ((s.id === 'prio1_audio' || s.id === 'prio2_audio') && si + 1 < plugin.settings_schema.length) {
+                var s2 = plugin.settings_schema[si + 1];
+                if (s2 && (s2.id === 'prio1_subs' || s2.id === 'prio2_subs') && s2.type === 'select' && s2.options && s.type === 'select' && s.options) {
+                    var key2 = plugin.name + '_' + s2.id;
+                    var saved2 = localStorage.getItem(key2);
+                    var val2 = saved2 !== null ? JSON.parse(saved2) : s2.default;
+                    html += '<div style="margin-bottom:10px;">';
+                    html += '<div style="display:inline-block;width:48%;vertical-align:top;">';
+                    html += '<label style="display:block;font-size:0.8rem;font-weight:500;margin-bottom:3px;">' + s.label + '</label>';
+                    html += '<select id="setting-' + key + '" style="width:100%;padding:12px 42px 12px 16px;border-radius:12px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.15);font-size:0.85rem;font-family:inherit;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;">';
+                    for (var oi = 0; oi < s.options.length; oi++) {
+                        var opt = s.options[oi];
+                        html += '<option value="' + opt.value + '"' + (String(val) === String(opt.value) ? ' selected' : '') + '>' + opt.label + '</option>';
+                    }
+                    html += '</select></div>';
+                    html += '<div style="display:inline-block;width:4%;"></div>';
+                    html += '<div style="display:inline-block;width:48%;vertical-align:top;">';
+                    html += '<label style="display:block;font-size:0.8rem;font-weight:500;margin-bottom:3px;">' + s2.label + '</label>';
+                    html += '<select id="setting-' + key2 + '" style="width:100%;padding:12px 42px 12px 16px;border-radius:12px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.15);font-size:0.85rem;font-family:inherit;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;">';
+                    for (var oj = 0; oj < s2.options.length; oj++) {
+                        var opt2 = s2.options[oj];
+                        html += '<option value="' + opt2.value + '"' + (String(val2) === String(opt2.value) ? ' selected' : '') + '>' + opt2.label + '</option>';
+                    }
+                    html += '</select></div>';
+                    html += '</div>';
+                    si++;
+                    continue;
+                }
+            }
+
+            // Bloque compacto de estilo de subtítulos: tamaño+color+borde / fondo+transparencia.
+            if (s.id === 'sub_font_size') {
+                var byId = {};
+                for (var bk = 0; bk < plugin.settings_schema.length; bk++) { byId[plugin.settings_schema[bk].id] = plugin.settings_schema[bk]; }
+                if (byId['sub_color'] && byId['sub_outline_color'] && byId['sub_bg_color'] && byId['sub_bg_alpha']) {
+                    var c1 = byId['sub_color'], c2 = byId['sub_outline_color'], c3 = byId['sub_bg_color'], a1 = byId['sub_bg_alpha'];
+                    var k1 = plugin.name + '_sub_color', k2 = plugin.name + '_sub_outline_color', k3 = plugin.name + '_sub_bg_color', k4 = plugin.name + '_sub_bg_alpha';
+                    var v1 = localStorage.getItem(k1), v2 = localStorage.getItem(k2), v3 = localStorage.getItem(k3), v4 = localStorage.getItem(k4);
+                    v1 = v1 !== null ? JSON.parse(v1) : c1.default;
+                    v2 = v2 !== null ? JSON.parse(v2) : c2.default;
+                    v3 = v3 !== null ? JSON.parse(v3) : c3.default;
+                    v4 = v4 !== null ? JSON.parse(v4) : a1.default;
+                    html += '<div style="margin-bottom:10px;">';
+                    html += '<div style="display:inline-block;width:31%;vertical-align:top;">';
+                    html += '<label style="display:block;font-size:0.8rem;font-weight:500;margin-bottom:3px;">Tamaño fuente</label>';
+                    html += '<input type="number" id="setting-' + key + '" value="' + val + '" min="10" max="40" style="width:70px;padding:12px 10px;border-radius:12px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.15);font-size:0.85rem;font-family:inherit;outline:none;" />';
+                    html += '</div><div style="display:inline-block;width:3%;"></div>';
+                    html += '<div style="display:inline-block;width:31%;vertical-align:top;">';
+                    html += '<label style="display:block;font-size:0.8rem;font-weight:500;margin-bottom:3px;">Color fuente <span id="swatch-' + k1 + '" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-left:4px;border:1px solid #888;background:' + v1 + ';"></span></label>';
+                    html += '<select id="setting-' + k1 + '" onchange="try{document.getElementById(\'swatch-' + k1 + '\').style.background=this.value;}catch(e){}" style="width:100%;padding:12px 16px 12px 12px;border-radius:12px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.15);font-size:0.85rem;font-family:inherit;cursor:pointer;outline:none;">';
+                    for (var c1i = 0; c1i < c1.options.length; c1i++) { html += '<option value="' + c1.options[c1i].value + '"' + (String(v1) === String(c1.options[c1i].value) ? ' selected' : '') + '>' + c1.options[c1i].label + '</option>'; }
+                    html += '</select></div>';
+                    html += '<div style="display:inline-block;width:3%;"></div>';
+                    html += '<div style="display:inline-block;width:32%;vertical-align:top;">';
+                    html += '<label style="display:block;font-size:0.8rem;font-weight:500;margin-bottom:3px;">Color borde <span id="swatch-' + k2 + '" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-left:4px;border:1px solid #888;background:' + v2 + ';"></span></label>';
+                    html += '<select id="setting-' + k2 + '" onchange="try{document.getElementById(\'swatch-' + k2 + '\').style.background=this.value;}catch(e){}" style="width:100%;padding:12px 16px 12px 12px;border-radius:12px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.15);font-size:0.85rem;font-family:inherit;cursor:pointer;outline:none;">';
+                    for (var c2i = 0; c2i < c2.options.length; c2i++) { html += '<option value="' + c2.options[c2i].value + '"' + (String(v2) === String(c2.options[c2i].value) ? ' selected' : '') + '>' + c2.options[c2i].label + '</option>'; }
+                    html += '</select></div>';
+                    html += '</div>';
+                    html += '<div style="margin-bottom:10px;">';
+                    html += '<div style="display:inline-block;width:48%;vertical-align:top;">';
+                    html += '<label style="display:block;font-size:0.8rem;font-weight:500;margin-bottom:3px;">Color fondo <span id="swatch-' + k3 + '" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-left:4px;border:1px solid #888;background:' + v3 + ';"></span></label>';
+                    html += '<select id="setting-' + k3 + '" onchange="try{document.getElementById(\'swatch-' + k3 + '\').style.background=this.value;}catch(e){}" style="width:100%;padding:12px 16px 12px 12px;border-radius:12px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.15);font-size:0.85rem;font-family:inherit;cursor:pointer;outline:none;">';
+                    for (var c3i = 0; c3i < c3.options.length; c3i++) { html += '<option value="' + c3.options[c3i].value + '"' + (String(v3) === String(c3.options[c3i].value) ? ' selected' : '') + '>' + c3.options[c3i].label + '</option>'; }
+                    html += '</select></div>';
+                    html += '<div style="display:inline-block;width:4%;"></div>';
+                    html += '<div style="display:inline-block;width:48%;vertical-align:top;">';
+                    html += '<label style="display:block;font-size:0.8rem;font-weight:500;margin-bottom:3px;">Transparencia fondo</label>';
+                    html += '<input type="number" id="setting-' + k4 + '" value="' + v4 + '" min="0" max="100" oninput="try{document.getElementById(\'range-' + k4 + '\').value=this.value;}catch(e){}" style="width:70px;padding:12px 10px;border-radius:12px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.15);font-size:0.85rem;font-family:inherit;outline:none;" />';
+                    html += '<input type="range" id="range-' + k4 + '" min="0" max="100" value="' + v4 + '" oninput="try{document.getElementById(\'setting-' + k4 + '\').value=this.value;}catch(e){}" style="width:110px;vertical-align:middle;margin-left:8px;" />';
+                    html += '</div>';
+                    html += '</div>';
+                    // Saltar los 4 settings ya pintados (color, borde, fondo, alfa).
+                    var skipIds = { 'sub_color': 1, 'sub_outline_color': 1, 'sub_bg_color': 1, 'sub_bg_alpha': 1 };
+                    while (si + 1 < plugin.settings_schema.length && skipIds[plugin.settings_schema[si + 1].id]) { si++; }
+                    continue;
+                }
+            }
 
             if (s.type === 'select' && s.options) {
                 html += '<div style="margin-bottom:10px;">';
@@ -3670,7 +3826,7 @@ window.showPluginInfo = function(name) {
                 html += '</div>';
             }
         }
-        html += '<button onclick="savePluginSettings(\'' + plugin.name + '\')" style="margin-top:4px;padding:8px 16px;border:none;border-radius:6px;background:var(--accent,#4a9eff);color:#fff;cursor:pointer;font-size:0.85rem;">Guardar configuraci\u00F3n</button>';
+        html += '<div style="margin-top:4px;font-size:0.75rem;color:var(--text-secondary,#999);">Se guarda con el botón inferior Guardar Cambios.</div>';
         html += '</div>';
     }
 
@@ -3688,7 +3844,7 @@ window.showPluginInfo = function(name) {
             '<label style="display:block;margin-bottom:8px;"><span style="display:block;color:#a1a1aa;font-size:12px;margin-bottom:3px;">Subcategorías (ej: series; anime)</span>' +
             '<textarea id="hero-subs" rows="2" placeholder="series; video; anime" style="width:100%;box-sizing:border-box;background:#0d0d0f;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;padding:8px;font-size:13px;resize:vertical;"></textarea></label>' +
             '<div style="display:flex;gap:8px;align-items:center;">' +
-            '<button onclick="saveHeroCats(\'' + plugin.name + '\')" style="padding:8px 14px;border:none;border-radius:6px;background:#e11d48;color:#fff;cursor:pointer;font-size:13px;">Guardar condiciones</button>' +
+            '<span style="font-size:0.75rem;color:var(--text-secondary,#999);">Se guarda con el botón inferior Guardar Cambios.</span>' +
             '<span id="hero-cats-status" style="color:#a1a1aa;font-size:12px;"></span></div>' +
             '</div></div>';
     }
@@ -3728,25 +3884,29 @@ window.loadHeroCats = function(name) {
     });
 };
 
-window.saveHeroCats = function(name) {
+window.saveHeroCats = function(name, silent) {
     var catsEl = document.getElementById('hero-cats');
     var subsEl = document.getElementById('hero-subs');
+    // Sin card visible no hay nada que guardar (evita POST al salir de la página).
+    if (!catsEl && !subsEl) return;
     var st = document.getElementById('hero-cats-status');
-    if (st) st.textContent = 'Guardando...';
+    if (st && !silent) st.textContent = 'Guardando...';
     window.API.ajax({
         method: 'POST',
         url: '/api/plugin/' + encodeURIComponent(name) + '/cats',
         data: { categories: catsEl ? catsEl.value : '', subcategories: subsEl ? subsEl.value : '' },
         success: function(res) {
-            if (st) st.textContent = res && res.ok ? 'Guardado ✓' : 'Error';
-            setTimeout(function() { if (st) st.textContent = ''; }, 2000);
+            if (st && !silent) {
+                st.textContent = res && res.ok ? 'Guardado ✓' : 'Error';
+                setTimeout(function() { if (st) st.textContent = ''; }, 2000);
+            }
             try { if (window.Catalog && window.Catalog.loadPluginCats) window.Catalog.loadPluginCats(); } catch (e) {}
         },
-        error: function() { if (st) st.textContent = 'Error'; }
+        error: function() { if (st && !silent) st.textContent = 'Error'; }
     });
 };
 
-window.savePluginSettings = function(pluginName) {
+window.savePluginSettings = function(pluginName, silent) {
     var plugin = getPluginByName(pluginName);
     if (!plugin || !plugin.settings_schema) return;
     for (var si = 0; si < plugin.settings_schema.length; si++) {
@@ -3770,7 +3930,26 @@ window.savePluginSettings = function(pluginName) {
     if (modeVal !== null) {
         localStorage.setItem('tvcat_preferred_player', JSON.parse(modeVal));
     }
-    alert('Configuraci\u00F3n guardada.');
+    if (!silent) alert('Configuraci\u00F3n guardada.');
+};
+
+// Guarda la config genérica visible (settings_schema en localStorage + hero cats
+// en servidor) sin alertas. Lo llaman Guardar Cambios / Aplicar del footer.
+window.saveCurrentGenericPluginConfig = function() {
+    try {
+        var name = window._genericPluginName;
+        if (!name) return;
+        var plugin = null;
+        try { plugin = getPluginByName(name); } catch (e) {}
+        if (plugin && plugin.settings_schema) {
+            window.savePluginSettings(name, true);
+        }
+        var catsEl = document.getElementById('hero-cats');
+        var subsEl = document.getElementById('hero-subs');
+        if (catsEl || subsEl) {
+            window.saveHeroCats(name, true);
+        }
+    } catch (e) {}
 };
 
 // Drag & Drop para reordenar plugins
@@ -3825,8 +4004,21 @@ function savePluginOrder() {
         url: '/api/plugins/order',
         data: { order: order },
         success: function() {
-            // Tambi\u00E9n actualizar decoratorsOrder en pluginSystem
+            // El tray y los selectores usan _pluginListCache: reordenarlo igual
+            // que la lista de gestión para que todo respete el mismo orden.
+            try {
+                var ordered = [];
+                var unordered = [];
+                for (var k = 0; k < _pluginListCache.length; k++) {
+                    var idx = order.indexOf(_pluginListCache[k].name);
+                    if (idx >= 0) ordered[idx] = _pluginListCache[k];
+                    else unordered.push(_pluginListCache[k]);
+                }
+                _pluginListCache = ordered.filter(Boolean).concat(unordered);
+            } catch (e) {}
+            // También actualizar decoratorsOrder en pluginSystem
             if (window.pluginSystem) {
+                window.pluginSystem.setPluginOrder(order);
                 var decorators = [];
                 for (var i = 0; i < order.length; i++) {
                     var p = getPluginByName(order[i]);
@@ -3836,6 +4028,7 @@ function savePluginOrder() {
                 }
                 window.pluginSystem.setDecoratorOrder(decorators);
             }
+            renderPluginTray();
         }
     });
 }
@@ -4106,6 +4299,46 @@ var _visTree = [];
 var _visAvailable = { plugins: {}, categories: {}, subcategories: {} };
 var _treeBuildSeq = 0;
 
+// Triángulos expandir/colapsar del árbol (2026-09-10): van antes del checkbox.
+// Por defecto plugins expandidos (se ven categorías) y categorías colapsadas
+// (no se ven subcategorías). El estado vive en _treeTwState para sobrevivir a
+// los re-renders de buildCategoryTree (cada toggle de visibilidad reconstruye).
+window._treeTwState = window._treeTwState || {};
+var _treeTwStyle = 'display:inline-block;width:16px;text-align:center;cursor:pointer;font-size:0.6rem;color:#a1a1aa;';
+var _treeTwSpacer = 'display:inline-block;width:16px;';
+function _treeTwEsc(v) {
+    return String(v === undefined || v === null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+}
+function _treeTwDefault(key) {
+    return key.indexOf('cat:') !== 0; // src: expandido, cat: colapsado
+}
+function _treeTwPaint(key, expanded) {
+    var container = document.getElementById('categories-tree-container');
+    if (!container) return;
+    var glyph = expanded ? '▼' : '▶';
+    var spans = container.getElementsByTagName('span');
+    for (var i = 0; i < spans.length; i++) {
+        if (spans[i].getAttribute('data-tkey') === key) spans[i].innerHTML = glyph;
+    }
+    var divs = container.getElementsByTagName('div');
+    for (var j = 0; j < divs.length; j++) {
+        if (divs[j].getAttribute('data-tkids') === key) divs[j].style.display = expanded ? '' : 'none';
+    }
+}
+window.toggleTreeTw = function (ev, el) {
+    ev = ev || window.event;
+    if (ev) {
+        if (ev.stopPropagation) ev.stopPropagation();
+        if (ev.preventDefault) ev.preventDefault();
+        ev.cancelBubble = true;
+    }
+    var key = el.getAttribute('data-tkey');
+    var cur = (window._treeTwState[key] !== undefined) ? window._treeTwState[key] : _treeTwDefault(key);
+    window._treeTwState[key] = !cur;
+    _treeTwPaint(key, !cur);
+    return false;
+};
+
 // Iconos de categorías/subcategorías (2026-09-07, SystemImages): espeja el
 // matching del servidor (listas `;`, minúsculas, `*` comodín, lista vacía = todo).
 window._sysIconsCache = null;
@@ -4192,29 +4425,52 @@ function buildCategoryTree() {
                                 var src = _visTree[s];
                                 if (_visAvailable.plugins[src.source] === false) continue;
                                 var plugState = visPluginState(src, vis);
+                                var srcKey = 'src:' + src.source;
+                                var srcExp = (window._treeTwState[srcKey] !== undefined) ? window._treeTwState[srcKey] : _treeTwDefault(srcKey);
+                                var visCats = [];
+                                for (var c0 = 0; c0 < src.categories.length; c0++) {
+                                    if (_visAvailable.categories[src.categories[c0].name] === false) continue;
+                                    visCats.push(src.categories[c0]);
+                                }
                                 html += '<div class="tree-source">' +
                                     '<label class="tree-item tree-source-label">' +
+                                    (visCats.length
+                                        ? '<span data-tkey="' + _treeTwEsc(srcKey) + '" onclick="toggleTreeTw(event, this)" style="' + _treeTwStyle + '">' + (srcExp ? '▼' : '▶') + '</span>'
+                                        : '<span style="' + _treeTwSpacer + '"></span>') +
                                     '<input type="checkbox" ' + (plugState.checked ? 'checked' : '') + (plugState.indet ? ' data-indet="1"' : '') + ' onchange="toggleSourceVis(\'' + src.source + '\', this)"> ' +
-                                    src.source + '</label></div>';
-                                for (var c = 0; c < src.categories.length; c++) {
-                                    var cat = src.categories[c];
-                                    if (_visAvailable.categories[cat.name] === false) continue;
+                                    src.source + '</label>' +
+                                    '<div data-tkids="' + _treeTwEsc(srcKey) + '"' + (srcExp ? '' : ' style="display:none;"') + '>';
+                                for (var c = 0; c < visCats.length; c++) {
+                                    var cat = visCats[c];
                                     var catState = visCategoryState(cat, vis);
+                                    var catKey = 'cat:' + src.source + '||' + cat.name;
+                                    var catExp = (window._treeTwState[catKey] !== undefined) ? window._treeTwState[catKey] : _treeTwDefault(catKey);
+                                    var visSubs = [];
+                                    for (var u0 = 0; u0 < cat.subcategories.length; u0++) {
+                                        if (_visAvailable.subcategories[cat.name + '||' + cat.subcategories[u0]] === false) continue;
+                                        visSubs.push(cat.subcategories[u0]);
+                                    }
                                     html += '<div style="padding-left:16px;">' +
                                         '<label class="tree-item">' +
+                                        (visSubs.length
+                                            ? '<span data-tkey="' + _treeTwEsc(catKey) + '" onclick="toggleTreeTw(event, this)" style="' + _treeTwStyle + '">' + (catExp ? '▼' : '▶') + '</span>'
+                                            : '<span style="' + _treeTwSpacer + '"></span>') +
                                         '<input type="checkbox" ' + (catState.checked ? 'checked' : '') + (catState.indet ? ' data-indet="1"' : '') + ' onchange="toggleCategoryVis(\'' + cat.name + '\', this)"> ' +
-                                        _sysIconHtml('cat', cat.name, '') + cat.name + '</label></div>';
-                                    for (var u = 0; u < cat.subcategories.length; u++) {
-                                        var sub = cat.subcategories[u];
+                                        _sysIconHtml('cat', cat.name, '') + cat.name + '</label>' +
+                                        '<div data-tkids="' + _treeTwEsc(catKey) + '"' + (catExp ? '' : ' style="display:none;"') + '>';
+                                    for (var u = 0; u < visSubs.length; u++) {
+                                        var sub = visSubs[u];
                                         var subKey = cat.name + '||' + sub;
-                                        if (_visAvailable.subcategories[subKey] === false) continue;
                                         var subChecked = (vis.subcategories || {})[subKey] !== false;
                                         html += '<div style="padding-left:32px;">' +
                                             '<label class="tree-item" style="font-size:0.75rem;">' +
+                                            '<span style="' + _treeTwSpacer + '"></span>' +
                                             '<input type="checkbox" ' + (subChecked ? 'checked' : '') + ' onchange="toggleSubcategoryVis(\'' + subKey + '\', this)"> ' +
                                             _sysIconHtml('sub', cat.name, sub) + sub + '</label></div>';
                                     }
+                                    html += '</div></div>';
                                 }
+                                html += '</div></div>';
                             }
                             container.innerHTML = html;
                             var boxes = container.querySelectorAll('input[type="checkbox"]');
@@ -5096,6 +5352,9 @@ document.addEventListener('DOMContentLoaded', function() {
             var menu = document.getElementById('side-menu');
             if (!menu || !menu.classList.contains('open')) return;
             var target = e.target;
+            // Click en nodo ya desprendido del DOM (re-render durante el click):
+            // no es un click "fuera", ignorar para no cerrar el panel.
+            if (target && !document.contains(target)) return;
             if (target && menu.contains(target)) return;
             var trigger = document.querySelector('.profile-header-btn');
             if (trigger && target && trigger.contains(target)) return;

@@ -9,7 +9,7 @@
   "action_category": "playback",
   "single_button": true,
   "priority": 20,
-  "js": ["TGHirayi_v2.js?v=20260912"],
+  "js": ["TGHirayi_v2.js?v=20260913b"],
   "css": [],
   "applies_to": ["*"],
   "settings_ui": "/plugin-static/tvcat_TGHirayi_v2/config.html",

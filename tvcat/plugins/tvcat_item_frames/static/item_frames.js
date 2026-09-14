@@ -4,11 +4,11 @@
  * Prefs en servidor por usuario-dispositivo. Matching first-wins + default.
  */
 (function() {
-    console.log('[CardFrames] script cargado v1.0.1');
+    console.log('[ItemFrames] script cargado v1.0.1');
     var _sets = [];
     var _borders = {};
     var _defaultBorderId = null;
-    var _prefs = { enabled: true, shine_enabled: true, shine_delay_ms: 800, shine_period_ms: 2600 };
+    var _prefs = { enabled: false, shine_enabled: true, shine_delay_ms: 800, shine_period_ms: 2600 };
     var _ready = false;
     var _pending = [];
     var _isOldTV = false;
@@ -70,7 +70,7 @@
         return _defaultBorderId;
     }
     function imgUrl(borderId, kind) {
-        return '/api/cardframes/img/' + encodeURIComponent(borderId) + '/' + kind + '?v=' + _v;
+        return '/api/itemframes/img/' + encodeURIComponent(borderId) + '/' + kind + '?v=' + _v;
     }
     function getDeviceId() {
         try {
@@ -101,9 +101,9 @@
         if (_ready) { if (cb) cb(); return; }
         if (cb) _pending.push(cb);
         if (_pending.length > 1) return;
-        ajax({ method: 'GET', url: '/api/cardframes/sets',
+        ajax({ method: 'GET', url: '/api/itemframes/sets',
             success: function(res) {
-                console.log('[CardFrames] sets OK', res);
+                console.log('[ItemFrames] sets OK', res);
                 _sets = (res && res.sets) || [];
                 _sets.sort(function(a, b) { return (a.position || 0) - (b.position || 0); });
                 _v = (res && res.v) || 0;
@@ -117,7 +117,7 @@
                 });
             },
             error: function(err) {
-                console.log('[CardFrames] ERROR sets', err);
+                console.log('[ItemFrames] ERROR sets', err);
                 _ready = true;
                 flushPending();
             }
@@ -129,9 +129,12 @@
     }
     function loadPrefs(done) {
         var dev = getDeviceId();
-        ajax({ method: 'GET', url: '/api/cardframes/prefs?device_id=' + encodeURIComponent(dev),
+        ajax({ method: 'GET', url: '/api/itemframes/prefs?device_id=' + encodeURIComponent(dev),
             success: function(res) {
                 if (res && res.prefs) _prefs = res.prefs;
+                // Sincronizar el botón del tray con la pref real (el tray se pintó
+                // con el valor inicial antes de que llegara esta respuesta).
+                try { if (window.renderPluginTray) window.renderPluginTray(); } catch (e) {}
                 if (done) done();
             },
             error: function() { if (done) done(); }
@@ -145,7 +148,7 @@
             var els = grid.querySelectorAll('.grid-item');
             for (var i = 0; i < els.length; i++) {
                 var el = els[i];
-                if (el.getAttribute('data-cf-done')) continue;
+                if (el.getAttribute('data-if-done')) continue;
                 var idx = parseInt(el.getAttribute('data-index') || '0', 10) || 0;
                 var item = (window.Catalog && window.Catalog.currentItems && window.Catalog.currentItems[idx]) || {};
                 try { decorateOne(el, item); } catch (e) {}
@@ -153,15 +156,35 @@
         } catch (e) {}
     }
 
+    // Last-wins: al seleccionar uno nuevo se desmarca cualquier otro (el mouseout
+    // no se dispara si el raton queda quieto y el mando mueve el foco).
+    function deselectOthers(except) {
+        try {
+            var grid = document.getElementById('catalog-grid');
+            if (!grid || !grid.querySelectorAll) return;
+            var sels = grid.querySelectorAll('.grid-item.card-selected');
+            for (var i = 0; i < sels.length; i++) {
+                var o = sels[i];
+                if (o === except) continue;
+                o.className = (' ' + o.className + ' ').split(' card-selected ').join(' ');
+                var ob = o.getAttribute('data-if-border');
+                var oi = o.querySelector ? o.querySelector('.item-frame img') : null;
+                if (oi && ob) oi.src = imgUrl(ob, 'idle');
+                var os = o.querySelector ? o.querySelector('.item-shine') : null;
+                if (os) os.className = 'card-shine';
+            }
+        } catch (e) {}
+    }
+
     function decorateOne(el, item) {
         if (!_prefs.enabled) return;
-        if (el.getAttribute('data-cf-done')) return;
+        if (el.getAttribute('data-if-done')) return;
         var bid = resolveBorderId(item);
         if (!bid) return;
         var cover = el.querySelector ? el.querySelector('.grid-item-cover') : null;
         if (!cover) return;
-        el.setAttribute('data-cf-done', '1');
-        el.setAttribute('data-cf-border', bid);
+        el.setAttribute('data-if-done', '1');
+        el.setAttribute('data-if-border', bid);
         var fr = document.createElement('div');
         fr.className = 'card-frame';
         var im = document.createElement('img');
@@ -179,6 +202,7 @@
         function select() {
             if (!_prefs.enabled) return;
             try {
+                deselectOthers(el);
                 el.className = (el.className + ' card-selected').replace(/\s+/g, ' ');
                 im.src = imgUrl(bid, 'selected');
                 if (sh) {
@@ -210,23 +234,47 @@
 
     if (window.pluginSystem) {
         window.pluginSystem.registerPlugin({
-            name: 'tvcat_card_frames',
+            name: 'tvcat_item_frames',
             type: 'grid-decorator',
-            displayName: 'Marcos de carta',
+            displayName: 'Item Frame',
+            // Se auto-aplica en caliente (refreshItemFrames tras el POST):
+            // el tray no debe recargar el grid.
+            hotEffect: true,
+            // El botón del tray conmuta el EFECTO (prefs servidor), no la carga.
+            isEffectActive: function() { return _prefs.enabled !== false; },
+            toggleEffect: function() {
+                var on = !(_prefs.enabled !== false);
+                _prefs.enabled = on;
+                function applyEnabled() {
+                    try {
+                        var plg = window.pluginSystem ? window.pluginSystem.getPlugin('tvcat_item_frames') : null;
+                        if (plg && plg.refreshItemFrames) plg.refreshItemFrames();
+                    } catch (e) {}
+                    try { if (window.renderPluginTray) window.renderPluginTray(); } catch (e2) {}
+                }
+                try {
+                    ajax({ method: 'POST', url: '/api/itemframes/prefs',
+                        data: { device_id: getDeviceId(), enabled: on },
+                        success: function(res) { if (res && res.prefs) _prefs = res.prefs; applyEnabled(); },
+                        error: function() { applyEnabled(); }
+                    });
+                } catch (e) { applyEnabled(); }
+                return on;
+            },
             onGridItem: function(element, itemData) {
                 ensureInit(function() { try { decorateOne(element, itemData); } catch (e) {} });
             },
-            refreshCardFrames: function() {
+            refreshItemFrames: function() {
                 _ready = false; _sets = []; _defaultBorderId = null; _v = 0;
                 try {
                     var grid = document.getElementById('catalog-grid');
                     if (grid) {
                         var els = grid.querySelectorAll('.grid-item');
                         for (var i = 0; i < els.length; i++) {
-                            els[i].removeAttribute('data-cf-done');
-                            els[i].removeAttribute('data-cf-border');
+                            els[i].removeAttribute('data-if-done');
+                            els[i].removeAttribute('data-if-border');
                             els[i].className = (' ' + els[i].className + ' ').split(' card-selected ').join(' ');
-                            var olds = els[i].querySelectorAll('.card-frame,.card-shine');
+                            var olds = els[i].querySelectorAll('.item-frame,.item-shine');
                             for (var k = olds.length - 1; k >= 0; k--) {
                                 if (olds[k].parentNode) olds[k].parentNode.removeChild(olds[k]);
                             }

@@ -180,6 +180,16 @@
 </div>
 
 <div class="card">
+    <div style="margin-bottom:8px;"><b>Pipeline de episodios</b></div>
+    <div class="muted" style="margin-bottom:6px;">Controla si la descarga y subida de episodios se solapan o van secuencialmente.</div>
+    <label>
+        <input type="checkbox" id="episode-pipeline">
+        <span>Descargar el siguiente episodio mientras se sube el actual</span>
+    </label>
+    <div class="muted" style="margin-top:2px;">Con esta opción, al empezar a subir un episodio se lanza en paralelo la descarga del siguiente. Reduce el tiempo total del job.</div>
+</div>
+
+<div class="card">
     <div style="margin-bottom:8px;"><b>Tama&ntilde;o de bloque de descarga (KB)</b></div>
     <div class="muted" style="margin-bottom:6px;">Tama&ntilde;o del chunk para descargas de Telegram (64-4096 KB).</div>
     <select id="download-chunk-select">
@@ -328,8 +338,11 @@ function loadConfig() {
         // Extracción de archives
         var ea = document.getElementById('extract-archives');
         if (ea) ea.checked = cfg.extract_archives !== false;
-        var apar = document.getElementById('archive-parallel');
+    var apar = document.getElementById('archive-parallel');
+    var epl = document.getElementById('episode-pipeline');
         if (apar) apar.checked = cfg.archive_parallel !== false;
+        var epl = document.getElementById('episode-pipeline');
+        if (epl) epl.checked = cfg.episode_pipeline !== false;
         var mpa = document.getElementById('max-pending-archives');
         if (mpa) mpa.value = String(cfg.max_pending_archives || 5);
         var ap = document.getElementById('archive-passwords');
@@ -462,6 +475,7 @@ function saveConfig(silent) {
         default_sub_lang: ds ? ds.value.trim() : '',
         extract_archives: ea ? ea.checked : true,
         archive_parallel: apar ? apar.checked : true,
+        episode_pipeline: epl ? epl.checked : true,
         max_pending_archives: mpa ? parseInt(mpa.value) || 5 : 5,
         archive_passwords: passwords,
         seven_zip_path: szp ? szp.value.trim() : '',
@@ -688,7 +702,7 @@ document.addEventListener('change', function(e) {
     if (e.target.id === 'credential-select' || e.target.id === 'delay-select' || e.target.id === 'resume-startup' ||
         e.target.id === 'upload-threads-select' || e.target.id === 'pyro-workers-select' || e.target.id === 'download-threads-select' || e.target.id === 'download-chunk-select' ||
         e.target.id === 'real-copy-owner' || e.target.id === 'real-copy-rest' || e.target.id === 'normalize-mp4' || e.target.id === 'streaming-mkv' ||
-        e.target.id === 'extract-archives' || e.target.id === 'archive-parallel' || e.target.id === 'max-pending-archives') {
+        e.target.id === 'extract-archives' || e.target.id === 'archive-parallel' || e.target.id === 'episode-pipeline' || e.target.id === 'max-pending-archives') {
         if (e.target.id === 'real-copy-owner') updateRealCopyGating();
         // Marcar cualquier checkbox de la sección copia desactiva el forward oculto
         if ((e.target.id === 'real-copy-owner' || e.target.id === 'real-copy-rest') && e.target.checked && window._forwardThirdParty) {
