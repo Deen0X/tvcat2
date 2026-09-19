@@ -854,7 +854,8 @@ async def add_to_queue(body: QueueAdd, request: Request):
     except Exception:
         pass
     # 2026-09-12: si el item está enriquecido, el job nace con el nombre
-    # enriquecido (Original title + 🗓año), no con el original del catálogo.
+    # enriquecido, no con el original del catálogo. Los tags editados del cover
+    # mandan sobre el TMDB crudo (api_original_title puede ser el japonés).
     try:
         from services.cover_override_registry import get_enriched_by_item_id as _gebi0
         _row0 = _gebi0(str(job.get("item_id") or ""))
@@ -865,7 +866,8 @@ async def add_to_queue(body: QueueAdd, request: Request):
                 _det0 = _js0.loads(_det0) or {}
             except Exception:
                 _det0 = {}
-        _dn0 = _display_name_from_details(_det0) if _det0 else ""
+        _ct0 = ((_row0 or {}).get("cover_text") or "")
+        _dn0 = _display_name_from_details(_det0, _ct0, str(job.get("title") or "")) if (_det0 or _ct0) else ""
         if _dn0:
             job["title"] = _dn0
     except Exception:
@@ -3548,23 +3550,55 @@ def _download_poster_bytes_sync(url, timeout=25):
     return None
 
 
-def _display_name_from_details(details) -> str:
-    """2026-09-12: nombre visible del job = Original title + 🗓año
-    (sin año → solo título). Fallback al title ES si no hay original."""
+def _title_year_from_cover_tags(text):
+    """Extrae (título, año) de los tags EDITADOS del cover (prioridad usuario).
+    1º 'Original title'/'Título original'; si no, 'Title/Título/Nombre' display
+    (excluye variantes Alt/ES/Latam...). Ignora placeholders {..} y valores cortos.
+    Misma prioridad que el enriquecedor al propagar al catálogo."""
     try:
-        if not isinstance(details, dict):
-            return ""
-        _t = (details.get("api_original_title") or details.get("api_title") or "").strip()
+        import re as _re_t
+        _orig = ""
+        _disp = ""
+        _yr = ""
+        for _ln in (text or "").split("\n"):
+            _l = _ln.strip()
+            if not _l or len(_l) < 2:
+                continue
+            _m = _re_t.match(r"(?i)^(original\s+title|t[ií]tulo\s+original|titulo\s+original)\s*[:=\-]?\s*(.*?)\s*$", _l)
+            if _m:
+                _v = (_m.group(2) or "").strip()
+                if _v and len(_v) >= 2 and "{" not in _v and "}" not in _v and not _orig:
+                    _orig = _v[:200]
+                continue
+            _m2 = _re_t.match(r"(?i)^(year|a[ñn]o)\s*[:=\-]?\s*(\d{4})", _l)
+            if _m2 and not _yr:
+                _yr = _m2.group(2)
+                continue
+            _m3 = _re_t.match(r"(?i)^(t[ií]tulo|titulo|title|nombre)(?!\s+(?:alt\d*|es(?:pa[ñn]a)?|latam|latin[oa]|mx|m[ée]xico|original)\b)\s*[:=\-]?\s*(.*?)\s*$", _l)
+            if _m3:
+                _v3 = (_m3.group(2) or "").strip()
+                if _v3 and len(_v3) >= 2 and "{" not in _v3 and "}" not in _v3 and not _disp:
+                    _disp = _v3[:200]
+        return (_orig or _disp, _yr)
+    except Exception:
+        return ("", "")
+
+
+def _display_name_from_details(details, cover_text="", fallback_title="") -> str:
+    """Nombre visible del job = tags del cover + año (sin año → solo título).
+    Orden: 1º tags editados (Original title/Title + Year),
+    2º título del catálogo. TMDB NO se usa: solo sirve para enriquecer
+    (rellenar el modal); los datos salen del cover (tags).
+    `details` se conserva por firma pero no decide el nombre."""
+    try:
+        _t, _y = _title_year_from_cover_tags(cover_text) if cover_text else ("", "")
+        if not _t:
+            _t = (fallback_title or "").strip()
         if not _t:
             return ""
-        _y = ""
-        try:
-            import re as _re3
-            _m3 = _re3.search(r"(\d{4})", str(details.get("api_year") or ""))
-            if _m3:
-                _y = _m3.group(1)
-        except Exception:
-            pass
+        return "%s🗓%s" % (_t, _y) if _y else _t
+    except Exception:
+        return ""
         return "%s🗓%s" % (_t, _y) if _y else _t
     except Exception:
         return ""

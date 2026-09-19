@@ -171,7 +171,7 @@
                 var oi = o.querySelector ? o.querySelector('.item-frame img') : null;
                 if (oi && ob) oi.src = imgUrl(ob, 'idle');
                 var os = o.querySelector ? o.querySelector('.item-shine') : null;
-                if (os) os.className = 'card-shine';
+                if (os) os.className = 'item-shine';
             }
         } catch (e) {}
     }
@@ -186,7 +186,7 @@
         el.setAttribute('data-if-done', '1');
         el.setAttribute('data-if-border', bid);
         var fr = document.createElement('div');
-        fr.className = 'card-frame';
+        fr.className = 'item-frame';
         var im = document.createElement('img');
         im.alt = '';
         im.src = imgUrl(bid, 'idle');
@@ -196,7 +196,7 @@
         var sh = null;
         if (!_isOldTV && _prefs.shine_enabled) {
             sh = document.createElement('div');
-            sh.className = 'card-shine';
+            sh.className = 'item-shine';
             cover.appendChild(sh);
         }
         function select() {
@@ -206,13 +206,13 @@
                 el.className = (el.className + ' card-selected').replace(/\s+/g, ' ');
                 im.src = imgUrl(bid, 'selected');
                 if (sh) {
-                    sh.className = 'card-shine';
+                    sh.className = 'item-shine';
                     var delay = Math.max(0, _prefs.shine_delay_ms || 0);
                     var period = Math.max(600, _prefs.shine_period_ms || 2600);
                     sh.style['animation-duration'] = period + 'ms';
                     sh.style['animation-delay'] = delay + 'ms';
                     setTimeout(function() {
-                        try { if (el.className.indexOf('card-selected') !== -1) sh.className = 'card-shine shine-go'; } catch (e) {}
+                        try { if (el.className.indexOf('card-selected') !== -1) sh.className = 'item-shine shine-go'; } catch (e) {}
                     }, delay + 30);
                 }
             } catch (e) {}
@@ -221,7 +221,7 @@
             try {
                 el.className = (' ' + el.className + ' ').split(' card-selected ').join(' ');
                 im.src = imgUrl(bid, 'idle');
-                if (sh) sh.className = 'card-shine';
+                if (sh) sh.className = 'item-shine';
             } catch (e) {}
         }
         if (el.addEventListener) {

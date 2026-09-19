@@ -7,7 +7,7 @@
   "iconEmoji": "🖼️",
   "defaultEnabled": true,
   "priority": 50,
-  "js": ["item_frames.js?v=1.0.8"],
+  "js": ["item_frames.js?v=1.0.9"],
   "css": ["item_frames.css?v=1.0.2"],
   "has_interface": true,
   "settings_ui": "/plugin-static/tvcat_item_frames/config.html",

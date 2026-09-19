@@ -1,0 +1,38 @@
+{
+  "name": "tvcat_hide",
+  "displayName": "Ocultos",
+  "description": "Oculta elementos del catálogo (personal por perfil) y bloqueo parental para el perfil child (solo admin).",
+  "type": "heropage-action",
+  "version": "1.0.1",
+  "defaultEnabled": true,
+  "icon": "static/plugin_icon.png",
+  "iconEmoji": "👁️",
+  "js": ["hide.js"],
+  "css": [],
+  "settings_ui": "/plugin-static/tvcat_hide/config.html",
+  "tray": [
+    {
+      "id": "toggle",
+      "label": "Activar/Desactivar ocultos personales",
+      "icon": "static/plugin_button.png",
+      "iconEmoji": "👁️",
+      "action": "config"
+    },
+    {
+      "id": "hide_all",
+      "label": "Ocultar todos los filtrados",
+      "icon": "static/plugin_button2.png",
+      "iconEmoji": "🙈",
+      "action": "config"
+    },
+    {
+      "id": "hide_all_parental",
+      "label": "Ocultar todos los filtrados (Parental)",
+      "icon": "static/plugin_button3.png",
+      "iconEmoji": "🛡️",
+      "action": "config"
+    }
+  ],
+  "has_interface": false,
+  "access": { "admin": true, "user": true, "child": true }
+}

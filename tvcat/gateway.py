@@ -1108,6 +1108,87 @@ async def enrich_config_set(request: Request):
     )
 
 
+# ─── IA (servicio central de LLM: Gemini + compatibles OpenAI, con failover) ───
+@app.get(api_url("/api/ai/config"))
+async def ai_config_get(request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    from services import ai_service
+    return {"providers": ai_service.list_providers(masked=True),
+            "prompts": ai_service.get_prompts()}
+
+
+@app.put(api_url("/api/ai/config"))
+async def ai_config_set(request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    body = await request.json()
+    from services import ai_service
+    out = ai_service.save_providers(body.get("providers") or [])
+    if isinstance(body.get("prompts"), dict):
+        ai_service.save_prompts(body.get("prompts"))
+    return out
+
+
+@app.post(api_url("/api/ai/complete"))
+async def ai_complete(request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s: raise HTTPException(401)
+    body = await request.json()
+    from services import ai_service
+    return ai_service.complete(body.get("prompt") or "",
+                               max_tokens=body.get("max_tokens"),
+                               timeout_s=body.get("timeout_s"))
+
+
+@app.post(api_url("/api/ai/resolve-tags"))
+async def ai_resolve_tags(request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s: raise HTTPException(401)
+    body = await request.json()
+    from services import ai_service
+    return ai_service.resolve_ai_tags(body.get("text") or "",
+                                      context=body.get("context") or {},
+                                      max_tokens=body.get("max_tokens"))
+
+
+@app.post(api_url("/api/ai/test"))
+async def ai_test(request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session",""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    body = await request.json()
+    from services import ai_service
+    # Acepta proveedor inline (probar sin guardar) o id de uno guardado.
+    inline = body.get("provider")
+    if isinstance(inline, dict) and (inline.get("api_key") or inline.get("base_url") or inline.get("kind") == "openai"):
+        inline.setdefault("id", body.get("provider_id") or "inline")
+        inline.setdefault("name", inline.get("name") or "prueba")
+        inline.setdefault("kind", "gemini")
+        inline.setdefault("model", "")
+        inline.setdefault("timeout_s", 60)
+        inline.setdefault("max_tokens", 64)
+        try:
+            kind = (inline.get("kind") or "gemini").lower()
+            if kind == "openai":
+                text = ai_service._openai_complete(inline, body.get("prompt") or "Responde exactamente: OK",
+                                                   60, 64)
+            else:
+                if not inline.get("api_key"):
+                    return {"ok": False, "error": "Sin api_key (escríbela para probar)"}
+                text = ai_service._gemini_complete(inline, body.get("prompt") or "Responde exactamente: OK",
+                                                   60, 64)
+            return {"ok": True, "text": text, "provider_name": inline.get("name") or "prueba"}
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+    return ai_service.test_provider(body.get("provider_id") or "",
+                                    prompt=(body.get("prompt") or "Responde exactamente: OK"))
+
+
 # ─── TransferService (cola de subida/bajada, depuración/programático) ───
 @app.get(api_url("/api/transfer/queue"))
 async def transfer_queue(request: Request):
@@ -1445,6 +1526,16 @@ async def catalog_continue(request: Request, search: str = "", limit: int = 200,
     session = get_session(request.cookies.get("tvcat_session",""))
     if not session: raise HTTPException(401)
     items = get_continue_watching(session.get("profile_id") or session["user_id"], limit=min(limit,200))
+    try:
+        from services.catalog_service import get_conn, get_hidden_sets, filter_hidden_items
+        _hc = get_conn()
+        _h, _b = get_hidden_sets(_hc, user_id=session.get("user_id"),
+                                 profile_id=session.get("profile_id"),
+                                 role=session.get("role", "user"))
+        _hc.close()
+        items = filter_hidden_items(items, _h, _b)
+    except Exception:
+        pass
     items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
     # limitar tras filtrar si se pidió search (mantener límite)
     if search or year_from or year_to or genres:
@@ -1459,6 +1550,16 @@ async def catalog_completed(request: Request, search: str = "", limit: int = 200
     session = get_session(request.cookies.get("tvcat_session",""))
     if not session: raise HTTPException(401)
     items = get_completed(session.get("profile_id") or session["user_id"], limit=min(limit,200))
+    try:
+        from services.catalog_service import get_conn, get_hidden_sets, filter_hidden_items
+        _hc = get_conn()
+        _h, _b = get_hidden_sets(_hc, user_id=session.get("user_id"),
+                                 profile_id=session.get("profile_id"),
+                                 role=session.get("role", "user"))
+        _hc.close()
+        items = filter_hidden_items(items, _h, _b)
+    except Exception:
+        pass
     items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
     if search or year_from or year_to or genres:
         items = items[:min(limit,200)]
@@ -1512,6 +1613,14 @@ async def get_catalog(category: str, request: Request, search: str = "", limit: 
                 ORDER BY uc.title ASC
             """, (profile_id,)).fetchall()
             items = [dict(r) for r in fav_rows]
+            try:
+                from services.catalog_service import get_hidden_sets, filter_hidden_items
+                _h, _b = get_hidden_sets(conn, user_id=s.get("user_id") if s else None,
+                                         profile_id=profile_id,
+                                         role=(s.get("role", "user") if s else "user"))
+                items = filter_hidden_items(items, _h, _b)
+            except Exception:
+                pass
             for item in items:
                 item["fav"] = True
             # Colecciones locales (COL-) en favoritos: fusionar (no están en unified).
@@ -5434,11 +5543,13 @@ def _collection_user_filters(conn, user_id):
     except Exception:
         role, profile_id = "user", None
     try:
-        from services.catalog_service import _apply_content_layer
+        from services.catalog_service import _apply_content_layer, _apply_hidden_layer
         _apply_content_layer(conn, where, params, f"visibility_{user_id}")
         _apply_content_layer(conn, where, params, f"available_{user_id}")
         if role != "admin" and profile_id:
             _apply_content_layer(conn, where, params, f"access_{profile_id}")
+        _apply_hidden_layer(conn, where, params, user_id=user_id,
+                            profile_id=profile_id, role=role)
     except Exception:
         pass
     return where, params
@@ -5467,7 +5578,7 @@ def _collection_key(name, serial):
 def _build_collection_index(conn, user_id):
     """Índice de candidatos (no-colecciones visibles) para matching."""
     import json as _json
-    from services.text_norm import normalize_title
+    from services.text_norm import normalize_title, base_title
     where, params = _collection_user_filters(conn, user_id)
     where.append("COALESCE(is_collection,0) = 0")
     cands = conn.execute(
@@ -5492,6 +5603,10 @@ def _build_collection_index(conn, user_id):
             nn = normalize_title(nm)
             if nn:
                 norm_index.setdefault(nn, []).append(cd)
+                # Base sin año final: 'Vaiana (2016)' también casa exacta con 'Vaiana'.
+                bb = base_title(nm)
+                if bb and bb != nn:
+                    norm_index.setdefault(bb, []).append(cd)
     _extend_index_with_enricher(norm_index, lit_index, cand_list)
     return norm_index, lit_index
 
@@ -5506,7 +5621,7 @@ def _extend_index_with_enricher(norm_index, lit_index, candidates):
     import os as _os
     try:
         from services.cache_keys import key_from_link
-        from services.text_norm import normalize_title
+        from services.text_norm import normalize_title, base_title
     except Exception:
         return
     try:
@@ -5562,6 +5677,9 @@ def _extend_index_with_enricher(norm_index, lit_index, candidates):
             _nn = normalize_title(_nm)
             if _nn:
                 norm_index.setdefault(_nn, []).append(_cd)
+                _bb = base_title(_nm)
+                if _bb and _bb != _nn:
+                    norm_index.setdefault(_bb, []).append(_cd)
 
 
 def _title_year_hint(text):
@@ -5645,8 +5763,12 @@ def _cover_year_hint(link, memo):
 
 def _match_collection_entries(entries, norm_index, lit_index):
     """Resuelve entradas ordenadas contra el índice. Devuelve (items, missing).
-    Título: igualdad normalizada O el candidato contiene la entrada
-    ('Vaiana' casa con 'Vaiana (2016)') — el literal sigue siendo exacto.
+    Reglas de título (normalizado y saneado):
+    - por defecto, IGUALDAD exacta (vale también sin el año final entre
+      paréntesis: 'Vaiana' casa con 'Vaiana (2016)');
+    - `!` inicial, búsqueda ESTRICTA literal (sin saneo);
+    - `*` en el texto, COMODÍN flexible opt-in (todas las partes contenidas).
+    Sin subcadena automática (evita 'Rings' en '...of the Rings...').
     Año: si la entrada lo trae, el candidato gana con año exacto (columna o
     embebido en su título); si el candidato no tiene año en ningún sitio se
     acepta por título (leniente); si lo tiene y difiere, se descarta.
@@ -5698,18 +5820,23 @@ def _match_collection_entries(entries, norm_index, lit_index):
                         raw_pool.append(cd)
             pool = [cd for cd in raw_pool if cd.get("item_id") not in used]
             best, best_score = _best(pool)
-            if not (e or {}).get("literal"):
-                # Sin confirmación exacta (o sin candidatos): el candidato
-                # puede contener la entrada ('Vaiana' en 'Vaiana (2016)').
-                if best is None or (ey and best_score < 2):
-                    if net:
-                        for _k, _lst in (norm_index or {}).items():
-                            if _k != net and net in _k:
-                                for _cd in (_lst or []):
-                                    if _cd not in raw_pool:
-                                        raw_pool.append(_cd)
-                                        if _cd.get("item_id") not in used and _cd not in pool:
-                                            pool.append(_cd)
+            if not (e or {}).get("literal") and "*" in (et or ""):
+                # Comodín explícito: todas las partes deben aparecer en el
+                # nombre del candidato ('Ringu*1998', '*anillos*'). Opt-in.
+                try:
+                    _parts = [normalize_title(_p) for _p in str(et).split("*")]
+                    _parts = [_p for _p in _parts if _p]
+                except Exception:
+                    _parts = []
+                if _parts:
+                    for _k, _lst in (norm_index or {}).items():
+                        if not _k or not all(_p in _k for _p in _parts):
+                            continue
+                        for _cd in (_lst or []):
+                            if _cd not in raw_pool:
+                                raw_pool.append(_cd)
+                                if _cd.get("item_id") not in used and _cd not in pool:
+                                    pool.append(_cd)
                     best, best_score = _best(pool)
             # Desempate por metadatos del cover: la entrada trae año y el
             # mejor es leniente (candidatos sin año) → Year del tag del cover.
@@ -7527,6 +7654,281 @@ async def favorites_list(request: Request):
     session = get_session(request.cookies.get("tvcat_session",""))
     if not session: raise HTTPException(401)
     items = get_favorites(session.get("profile_id") or session["user_id"])
+    try:
+        from services.catalog_service import get_conn, get_hidden_sets, filter_hidden_items
+        _hc = get_conn()
+        _h, _b = get_hidden_sets(_hc, user_id=session.get("user_id"),
+                                 profile_id=session.get("profile_id"),
+                                 role=session.get("role", "user"))
+        _hc.close()
+        items = filter_hidden_items(items, _h, _b)
+    except Exception:
+        pass
+    return {"items": items, "count": len(items)}
+
+# --- API: Ocultos de catálogo (personal + parental) ---
+# Personal: cualquier usuario oculta items de SU perfil (toggle por usuario).
+# Parental: solo admin bloquea items para OTRO perfil (sin toggle, siempre filtra).
+# Solo items (se rechazan COL-).
+def _hidden_session(request: Request):
+    from services.auth_service import get_session
+    return get_session(request.cookies.get("tvcat_session", ""))
+
+
+def _hidden_profile(session):
+    return session.get("profile_id") or session.get("user_id")
+
+
+@app.get(api_url("/api/hidden"))
+async def hidden_list(request: Request):
+    s = _hidden_session(request)
+    if not s: raise HTTPException(401)
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT uc.* FROM unified_catalog uc JOIN tvcat_hidden h ON h.item_id = uc.item_id"
+            " WHERE h.profile_id = ? AND uc.item_id NOT IN"
+            " (SELECT item_id FROM tvcat_blocked WHERE profile_id = ?)"
+            " ORDER BY uc.title ASC",
+            (_hidden_profile(s), _hidden_profile(s))).fetchall()
+        items = [dict(r) for r in rows]
+    except Exception:
+        items = []
+    try: conn.close()
+    except: pass
+    return {"items": items, "count": len(items)}
+
+
+@app.get(api_url("/api/hidden/state"))
+async def hidden_state(request: Request, item_id: str = ""):
+    s = _hidden_session(request)
+    if not s: raise HTTPException(401)
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    try:
+        prof = _hidden_profile(s)
+        blocked = conn.execute("SELECT 1 FROM tvcat_blocked WHERE profile_id=? AND item_id=?",
+                               (prof, item_id)).fetchone()
+        if blocked:
+            return {"hidden": True, "hidden_by": "parental"}
+        own = conn.execute("SELECT 1 FROM tvcat_hidden WHERE profile_id=? AND item_id=?",
+                           (prof, item_id)).fetchone()
+        return {"hidden": bool(own), "hidden_by": "own" if own else None}
+    finally:
+        try: conn.close()
+        except: pass
+
+
+@app.get(api_url("/api/hidden/status"))
+async def hidden_status(request: Request):
+    s = _hidden_session(request)
+    if not s: raise HTTPException(401)
+    from services.catalog_service import get_conn, _hide_enabled
+    conn = get_conn()
+    try:
+        return {"enabled": bool(_hide_enabled(conn, s.get("user_id")))}
+    finally:
+        try: conn.close()
+        except: pass
+
+
+@app.post(api_url("/api/hidden/enabled"))
+async def hidden_enabled(request: Request):
+    s = _hidden_session(request)
+    if not s: raise HTTPException(401)
+    body = await request.json()
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?,?)",
+                 (f"hide_enabled_{s.get('user_id')}", "1" if body.get("enabled") else "0"))
+    conn.commit(); conn.close()
+    return {"success": True, "enabled": bool(body.get("enabled"))}
+
+
+def _hidden_guard(item_id: str, prof) -> Optional[str]:
+    """Valida item ocultable. Retorna error o None."""
+    if not item_id or not str(item_id).strip():
+        return "item_id requerido"
+    if str(item_id).startswith("COL-"):
+        return "Solo items (no colecciones)"
+    return None
+
+
+@app.post(api_url("/api/hidden/toggle"))
+async def hidden_toggle(request: Request):
+    s = _hidden_session(request)
+    if not s: raise HTTPException(401)
+    body = await request.json()
+    item_id = str(body.get("item_id", ""))
+    err = _hidden_guard(item_id, _hidden_profile(s))
+    if err: raise HTTPException(400, err)
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    try:
+        prof = _hidden_profile(s)
+        if conn.execute("SELECT 1 FROM tvcat_blocked WHERE profile_id=? AND item_id=?",
+                        (prof, item_id)).fetchone():
+            raise HTTPException(403, "Bloqueado por parental")
+        row = conn.execute("SELECT 1 FROM tvcat_hidden WHERE profile_id=? AND item_id=?",
+                           (prof, item_id)).fetchone()
+        if row:
+            conn.execute("DELETE FROM tvcat_hidden WHERE profile_id=? AND item_id=?", (prof, item_id))
+            hidden = False
+        else:
+            conn.execute("INSERT INTO tvcat_hidden (profile_id, item_id) VALUES (?,?)", (prof, item_id))
+            hidden = True
+        conn.commit()
+        return {"success": True, "hidden": hidden}
+    finally:
+        try: conn.close()
+        except: pass
+
+
+@app.post(api_url("/api/hidden/unhide"))
+async def hidden_unhide(request: Request):
+    s = _hidden_session(request)
+    if not s: raise HTTPException(401)
+    body = await request.json()
+    item_id = str(body.get("item_id", ""))
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    try:
+        prof = _hidden_profile(s)
+        if conn.execute("SELECT 1 FROM tvcat_blocked WHERE profile_id=? AND item_id=?",
+                        (prof, item_id)).fetchone():
+            raise HTTPException(403, "Bloqueado por parental")
+        conn.execute("DELETE FROM tvcat_hidden WHERE profile_id=? AND item_id=?", (prof, item_id))
+        conn.commit()
+        return {"success": True}
+    finally:
+        try: conn.close()
+        except: pass
+
+
+@app.post(api_url("/api/hidden/bulk"))
+async def hidden_bulk(request: Request):
+    s = _hidden_session(request)
+    if not s: raise HTTPException(401)
+    body = await request.json()
+    ids = [str(x) for x in (body.get("item_ids") or []) if str(x).strip()][:500]
+    mode = body.get("mode", "hide")
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    try:
+        if mode == "block":
+            if s.get("role") != "admin": raise HTTPException(403)
+            target = int(body.get("target_profile") or 0)
+            if not target: raise HTTPException(400, "target_profile requerido")
+            n = 0
+            for iid in ids:
+                if iid.startswith("COL-"): continue
+                conn.execute("INSERT OR IGNORE INTO tvcat_blocked (profile_id, item_id, blocked_by)"
+                             " VALUES (?,?,?)", (target, iid, s.get("user_id")))
+                n += 1
+            conn.commit()
+            return {"success": True, "blocked": n}
+        if mode == "unblock":
+            if s.get("role") != "admin": raise HTTPException(403)
+            pairs = body.get("pairs") or []
+            n = 0
+            if pairs:
+                for p in pairs:
+                    try:
+                        t = int((p or {}).get("profile") or 0)
+                        iid = str((p or {}).get("item_id") or "")
+                    except Exception:
+                        continue
+                    if not t or not iid or iid.startswith("COL-"): continue
+                    conn.execute("DELETE FROM tvcat_blocked WHERE profile_id=? AND item_id=?",
+                                 (t, iid))
+                    n += 1
+            else:
+                target = int(body.get("target_profile") or 0)
+                if not target: raise HTTPException(400, "target_profile requerido")
+                for iid in ids:
+                    if iid.startswith("COL-"): continue
+                    conn.execute("DELETE FROM tvcat_blocked WHERE profile_id=? AND item_id=?",
+                                 (target, iid))
+                    n += 1
+            conn.commit()
+            return {"success": True, "unblocked": n}
+        prof = _hidden_profile(s)
+        n = 0
+        for iid in ids:
+            if iid.startswith("COL-"): continue
+            if mode == "show":
+                conn.execute("DELETE FROM tvcat_hidden WHERE profile_id=? AND item_id=?",
+                             (prof, iid))
+                n += 1
+                continue
+            if conn.execute("SELECT 1 FROM tvcat_blocked WHERE profile_id=? AND item_id=?",
+                            (prof, iid)).fetchone():
+                continue
+            conn.execute("INSERT OR IGNORE INTO tvcat_hidden (profile_id, item_id) VALUES (?,?)",
+                         (prof, iid))
+            n += 1
+        conn.commit()
+        if mode == "show":
+            return {"success": True, "shown": n}
+        return {"success": True, "hidden": n}
+    finally:
+        try: conn.close()
+        except: pass
+
+
+@app.post(api_url("/api/hidden/block"))
+async def hidden_block(request: Request):
+    s = _hidden_session(request)
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    body = await request.json()
+    item_id = str(body.get("item_id", ""))
+    target = int(body.get("target_profile") or 0)
+    err = _hidden_guard(item_id, target)
+    if err or not target: raise HTTPException(400, err or "target_profile requerido")
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    conn.execute("INSERT OR IGNORE INTO tvcat_blocked (profile_id, item_id, blocked_by)"
+                 " VALUES (?,?,?)", (target, item_id, s.get("user_id")))
+    conn.commit(); conn.close()
+    return {"success": True}
+
+
+@app.post(api_url("/api/hidden/unblock"))
+async def hidden_unblock(request: Request):
+    s = _hidden_session(request)
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    body = await request.json()
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    conn.execute("DELETE FROM tvcat_blocked WHERE profile_id=? AND item_id=?",
+                 (int(body.get("target_profile") or 0), str(body.get("item_id", ""))))
+    conn.commit(); conn.close()
+    return {"success": True}
+
+
+@app.get(api_url("/api/hidden/blocked"))
+async def hidden_blocked(request: Request, profile: int = 0):
+    s = _hidden_session(request)
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    from services.catalog_service import get_conn
+    conn = get_conn()
+    try:
+        if int(profile):
+            rows = conn.execute(
+                "SELECT uc.*, b.profile_id AS blocked_profile FROM unified_catalog uc"
+                " JOIN tvcat_blocked b ON b.item_id = uc.item_id"
+                " WHERE b.profile_id = ? ORDER BY uc.title ASC", (int(profile),)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT uc.*, b.profile_id AS blocked_profile FROM unified_catalog uc"
+                " JOIN tvcat_blocked b ON b.item_id = uc.item_id"
+                " ORDER BY uc.title ASC").fetchall()
+        items = [dict(r) for r in rows]
+    except Exception:
+        items = []
+    try: conn.close()
+    except: pass
     return {"items": items, "count": len(items)}
 
 # --- API: Comentarios globales por título (2026-09-08) ---
@@ -8451,6 +8853,26 @@ async def test_userbot_session(session_id: int, request: Request):
     sess_data = get_session(session_id)
     if not sess_data:
         return {"success": False, "error": "Sesión no encontrada"}
+    # NO crear un segundo cliente con la misma clave (probar quemaba la sesión
+    # si el pool la tenía viva: AUTH_KEY_DUPLICATED). Si el pool ya usa esta
+    # misma session_string, probar sobre el wrapper vivo; si es otra clave,
+    # cliente temporal dedicado (sin conflicto).
+    try:
+        from services.userbot_service import get_active_client
+        _ctype = sess_data.get("client_type") or "telethon"
+        _want = str(sess_data.get("session_string") or "")
+        _wrapper = await get_active_client(_ctype)
+        _wraw = getattr(_wrapper, "_client", None) if _wrapper else None
+        _wss = str(((getattr(_wrapper, "session_data", None) or {}).get("session_string")) or "")
+        if _wraw is not None and _want and _wss == _want:
+            try:
+                import asyncio as _aio
+                me = await _aio.wait_for(_wraw.get_me(), timeout=20)
+                return {"success": True, "message": f"Conectado como @{getattr(me, 'username', None) or getattr(me, 'first_name', '')} (pool compartido)"}
+            except Exception as e:
+                return {"success": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+    except Exception:
+        pass
     try:
         client = UserbotClient(sess_data)
         await client.connect()
@@ -8479,6 +8901,9 @@ async def userbot_send_code(request: Request):
     if not phone or not api_id or not api_hash:
         return {"success": False, "error": "Teléfono, API ID y API Hash requeridos"}
     try:
+        import time as _t
+        _t0 = _t.perf_counter()
+        print(f" [AUTH] send_code {client_type} phone=***{str(phone)[-4:]} api_id={api_id}", flush=True)
         auth_key = f"{phone}|{client_type}"
         # Desconectar sesión temporal anterior del mismo tipo si existe
         if auth_key in _auth_sessions:
@@ -8492,15 +8917,21 @@ async def userbot_send_code(request: Request):
         temp = {"client_type": client_type, "api_id": api_id, "api_hash": api_hash, "session_string": ""}
         ubot = UserbotClient(temp)
         await ubot.connect()
+        print(f" [AUTH] conectado a Telegram en {_t.perf_counter()-_t0:.1f}s", flush=True)
 
         # Cada cliente solicita su PROPIO código SMS (auth_key independiente).
         # No se reutiliza el phone_code_hash entre Telethon y Pyrofork: cada login
         # real necesita su propio código.
+        _t1 = _t.perf_counter()
         result = await ubot.send_code_request(phone)
         pch = result.get("phone_code_hash", "")
+        ctype = result.get("code_type", "?")
+        print(f" [AUTH] send_code_request OK en {_t.perf_counter()-_t1:.1f}s"
+              f" total={_t.perf_counter()-_t0:.1f}s code_type={ctype}"
+              f" phone_code_hash={'sí' if pch else 'NO'}", flush=True)
 
         _auth_sessions[auth_key] = {"client": ubot, "phone_code_hash": pch}
-        return {"success": True, "phone_code_hash": pch, "client_type": client_type}
+        return {"success": True, "phone_code_hash": pch, "client_type": client_type, "code_type": ctype}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

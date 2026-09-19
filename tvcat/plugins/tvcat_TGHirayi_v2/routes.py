@@ -61,6 +61,12 @@ _archive_slot_lock = asyncio.Lock()
 _archive_slot_owner: Optional[str] = None   # job_id del archive en processing
 _archive_tasks: Dict[str, asyncio.Task] = {}  # job_id -> task en background
 
+# Lock del refresh pyro: prefetch y subida van en paralelo compartiendo el
+# MISMO wrapper. Sin esto, dos tareas veían el cliente caído y lo
+# desconectaban/reconectaban a la vez: una se quedaba con el raw viejo
+# (desconectado → "has not been started yet") mientras la otra lo rotaba.
+_refresh_lock = asyncio.Lock()
+
 # ─── Log de consola por job (vista "terminal" de archives en la UI) ──
 _job_logs: Dict[str, deque] = {}
 _JOB_LOG_MAX = 800  # líneas retenidas por job
@@ -398,7 +404,15 @@ def _svc():
 
 
 def _svc_creds(job: dict = None) -> dict:
-    """Credenciales de la sesión elegida en la config (o defecto del servicio)."""
+    """Credenciales de la sesión elegida en la config (o defecto del servicio).
+    client_type = ajuste global (Comportamiento Telegram), NO telethon fijo:
+    antes forzaba telethon en TODAS las llamadas al servicio aunque el ajuste
+    dijera pyrogram."""
+    try:
+        from tvcat.services.userbot_service import get_preferred_client_type
+        ctype = get_preferred_client_type()
+    except Exception:
+        ctype = "telethon"
     try:
         name = (_load_config().get("credential_name") or "").strip()
     except Exception:
@@ -406,29 +420,66 @@ def _svc_creds(job: dict = None) -> dict:
     if name:
         try:
             from tvcat.services.userbot_service import get_session_by_name
-            s = get_session_by_name(name, "telethon")
+            s = get_session_by_name(name, ctype)
             if s and s.get("session_string"):
                 return {"tg_user_id": s.get("tg_user_id"),
-                        "client_type": "telethon",
+                        "client_type": ctype,
                         "session_string": s.get("session_string"),
                         "api_id": s.get("api_id"), "api_hash": s.get("api_hash")}
         except Exception:
             pass
-    return {"client_type": "telethon"}
+    return {"client_type": ctype}
+
+
+def _raw_kind(raw) -> str:
+    """Tipo del cliente crudo: telethon (get_input_entity) o pyrogram."""
+    try:
+        if raw is not None and hasattr(raw, "get_input_entity"):
+            return "telethon"
+        if raw is not None:
+            return "pyrogram"
+    except Exception:
+        pass
+    return "telethon"
 
 
 async def _get_telegram_client():
-    """LEGACY (solo bulk local que aún no migra): NO usar en código nuevo."""
-    from tvcat.services.userbot_service import get_active_client
-    wrapper = await get_active_client("telethon")
-    if not wrapper:
-        raise ValueError("No se pudo obtener cliente Telethon")
-    # UserbotClient._client es el TelegramClient subyacente
-    raw = getattr(wrapper, '_client', wrapper)
-    if not raw:
-        raise ValueError("El cliente no expone _client")
-    print("[TGHirayi_v2] Cliente obtenido del pool", flush=True)
-    return raw
+    """LEGACY (solo bulk local que aún no migra): NO usar en código nuevo.
+    Respeta el ajuste global; cae al otro tipo si el preferido no existe.
+    Casi todos los consumidores lo reciben como parámetro vestigial (usan
+    _svc()/_ft por dentro); solo los helpers de topics lo necesitaban."""
+    from tvcat.services.userbot_service import get_active_client, get_preferred_client_type
+    try:
+        preferred = get_preferred_client_type()
+    except Exception:
+        preferred = "telethon"
+    order = [preferred] + (["pyrogram"] if preferred == "telethon" else ["telethon"])
+    last_err = None
+    for ctype in order:
+        try:
+            wrapper = await get_active_client(ctype)
+        except Exception as e:
+            last_err = e
+            continue
+        if not wrapper:
+            continue
+        # UserbotClient._client es el cliente subyacente
+        raw = getattr(wrapper, '_client', wrapper)
+        if not raw:
+            continue
+        try:
+            # Validación inmediata: sesión quemada fuera aquí, no en el job.
+            await raw.get_me()
+        except Exception as e:
+            last_err = e
+            print(f"[TGHirayi_v2] Sesión {ctype} no válida ({type(e).__name__}), probando otra", flush=True)
+            continue
+        if ctype != preferred:
+            print(f"[TGHirayi_v2] Cliente {ctype} (fallback, preferido {preferred} no disponible)", flush=True)
+        else:
+            print("[TGHirayi_v2] Cliente obtenido del pool", flush=True)
+        return raw
+    raise ValueError(f"No se pudo obtener cliente Telegram ({last_err})")
 
 
 async def _get_pyrogram_client():
@@ -451,19 +502,16 @@ async def _get_pyrogram_client():
 async def _refresh_pyrogram_client():
     """Reconecta el wrapper pyro del pool y devuelve el raw fresco.
     Solo para paths de fallo (cliente muerto). Si el cliente sigue vivo, no se
-    toca (desconectar mataría el storage bajo otras tareas en vuelo)."""
+    toca (desconectar mataría el storage bajo otras tareas en vuelo).
+    Serializado con _refresh_lock: el prefetch y la subida comparten wrapper."""
     from tvcat.services.userbot_service import get_active_client
-    wrapper = await get_active_client("pyrogram")
-    if not wrapper:
-        raise ValueError("No se pudo obtener cliente Pyrogram")
-    try:
+    async with _refresh_lock:
+        wrapper = await get_active_client("pyrogram")
+        if not wrapper:
+            raise ValueError("No se pudo obtener cliente Pyrogram")
+        from tvcat.services.userbot_service import client_is_alive
         raw = getattr(wrapper, '_client', None)
-        alive = False
-        try:
-            alive = bool(raw is not None and await raw.is_connected())
-        except Exception:
-            alive = False
-        if not alive:
+        if not client_is_alive(raw):
             try:
                 await wrapper.disconnect()
             except Exception:
@@ -474,13 +522,52 @@ async def _refresh_pyrogram_client():
                 pass
             await wrapper.connect()
             raw = getattr(wrapper, '_client', wrapper)
-    except Exception:
-        pass
-    raw = getattr(wrapper, '_client', wrapper)
-    if not raw:
-        raise ValueError("El cliente Pyrogram no expone _client")
-    print(f"[TGHirayi_v2] Cliente Pyrogram refrescado", flush=True)
-    return raw
+            # Verificar de verdad (un connect que falla en silencio dejaba el
+            # raw viejo y el retry repetía el mismo error en bucle).
+            try:
+                _me = await asyncio.wait_for(raw.get_me(), timeout=20)
+                try:
+                    raw.me = _me
+                except Exception:
+                    pass
+            except Exception as _e_me:
+                raise RuntimeError(f"Refresh pyro sin conexion real: {type(_e_me).__name__}: {str(_e_me)[:150]}")
+        raw = getattr(wrapper, '_client', wrapper)
+        if not raw:
+            raise ValueError("El cliente Pyrogram no expone _client")
+        print(f"[TGHirayi_v2] Cliente Pyrogram refrescado", flush=True)
+        return raw
+
+
+async def _file_info_resilient(chat, mid, job, what=""):
+    """get_file_info con 1 reintento tras refresh ante error de TRANSPORTE.
+    Devuelve (info|None, transport_ok: bool, err: str).
+    transport_ok=False => falló el CLIENTE (NO dictaminar borrado: reintentará
+    al reanudar). Solo info None con transport_ok=True = sin media real."""
+    try:
+        info = await _svc().get_file_info(chat, int(mid), **_svc_creds(job))
+    except Exception as e:
+        info = {"_transport_error": f"{type(e).__name__}: {str(e)[:150]}"}
+    if isinstance(info, dict) and info.get("_transport_error"):
+        err = str(info["_transport_error"])
+        if _is_auth_dead(err):
+            raise RuntimeError("TGSESSION_DEAD: " + err[:200])
+        print(f"[TGHirayi_v2] {what} transporte fallo ({err}), refresh+reintento",
+              flush=True)
+        if "flood" not in err.lower():
+            try:
+                await asyncio.wait_for(_refresh_pyrogram_client(), 30)
+            except Exception as e:
+                print(f"[TGHirayi_v2] {what} refresh fallo: {e}", flush=True)
+        await asyncio.sleep(3)
+        try:
+            info = await _svc().get_file_info(chat, int(mid), **_svc_creds(job))
+        except Exception as e:
+            return None, False, f"{type(e).__name__}: {str(e)[:150]}"
+        if isinstance(info, dict) and info.get("_transport_error"):
+            return None, False, str(info["_transport_error"])
+        return info, True, ""
+    return info, True, ""
 
 
 def list_sessions_raw():
@@ -769,6 +856,53 @@ async def delete_destination(did: str, request: Request):
 
 
 # ─── Endpoints de Cola ────────────────────────────────────────────
+def _job_topic_links(job, db):
+    """[{dest_id, dest_name, topic_id, topic_name, url}] para el badge [Topic]
+    de la cola. Solo lectura (no se persiste). url = t.me/c/bare/topic."""
+    out = []
+    try:
+        topics = job.get("_topics") or {}
+        names = job.get("_topic_names") or {}
+        dests = (db or {}).get("destinations") or {}
+        # Índice por channel_id para claves antiguas que usan el canal
+        # en vez del id de destino (ej. job 323: {'-100...': 1649}).
+        import re as _re
+        _by_channel = {}
+        try:
+            for _did, _d in (dests or {}).items():
+                if isinstance(_d, dict) and _d.get("channel_id"):
+                    _by_channel[str(_d.get("channel_id"))] = (str(_did), _d)
+        except Exception:
+            pass
+        for did, tid in topics.items():
+            try:
+                tid = int(tid)
+            except Exception:
+                continue
+            if not tid:
+                continue
+            d = dests.get(str(did)) or {}
+            _real_did = str(did)
+            if not d and str(did) in _by_channel:
+                _real_did, d = _by_channel[str(did)]
+            ch = str(d.get("channel_id") or "")
+            if not ch and _re.fullmatch(r"-?\d+", str(did) or ""):
+                # La clave ya es un channel_id (-100...): úsala directo.
+                ch = str(did)
+            bare = ch.lstrip("-")
+            if bare.startswith("100"):
+                bare = bare[3:]
+            url = f"https://t.me/c/{bare}/{tid}" if bare.isdigit() else ""
+            out.append({"dest_id": _real_did,
+                        "dest_name": d.get("name") or did,
+                        "topic_id": tid,
+                        "topic_name": names.get(str(did)) or names.get(_real_did) or "",
+                        "url": url})
+    except Exception:
+        pass
+    return out
+
+
 @router.get("/api/telegram-copy-v2/queue")
 async def list_queue(request: Request):
     session = _session_user(request)
@@ -837,6 +971,11 @@ async def list_queue(request: Request):
             return _j
         _c = {k: v for k, v in _j.items() if k != "cover_poster_b64"}
         _c["cover_thumb"] = bool((_j.get("cover_poster_b64") or "").strip())
+        # Enlaces a topics resueltos (solo lectura: se calcula al servir).
+        try:
+            _c["_topic_links"] = _job_topic_links(_j, db)
+        except Exception:
+            _c["_topic_links"] = []
         try:
             if _j.get("status") not in _TERMINAL_STATUSES and (_j.get("only_episode_msgs") or _j.get("skip_episode_msgs")):
                 _c["in_scope_total"] = _job_episode_count(_j)
@@ -912,7 +1051,8 @@ async def add_to_queue(body: QueueAdd, request: Request):
     except Exception:
         pass
     # 2026-09-12: si el item está enriquecido, el job nace con el nombre
-    # enriquecido (Original title + 🗓año), no con el original del catálogo.
+    # enriquecido, no con el original del catálogo. Los tags editados del cover
+    # mandan sobre el TMDB crudo (api_original_title puede ser el japonés).
     try:
         from services.cover_override_registry import get_enriched_by_item_id as _gebi0
         _row0 = _gebi0(str(job.get("item_id") or ""))
@@ -923,7 +1063,8 @@ async def add_to_queue(body: QueueAdd, request: Request):
                 _det0 = _js0.loads(_det0) or {}
             except Exception:
                 _det0 = {}
-        _dn0 = _display_name_from_details(_det0) if _det0 else ""
+        _ct0 = ((_row0 or {}).get("cover_text") or "")
+        _dn0 = _display_name_from_details(_det0, _ct0, str(job.get("title") or "")) if (_det0 or _ct0) else ""
         if _dn0:
             job["title"] = _dn0
     except Exception:
@@ -2112,7 +2253,7 @@ async def _process_job(job: dict, db: dict):
                         _stid = await _topic_find_cached(client, _sd, job.get("title", ""), job)
                     except Exception:
                         _stid = None
-                    if _stid and await _verify_topic_alive(client, _sd, int(_stid)):
+                    if _stid and await _verify_topic_alive(client, _sd, int(_stid), job):
                         job["_omitted"][_skey] = int(_stid)
                         _dkey = str(_sd.get("id") or _sd.get("channel_id") or _sd.get("name") or 'dest')
                         job["_topics"][_dkey] = int(_stid)
@@ -2381,6 +2522,8 @@ async def _process_job(job: dict, db: dict):
                     job["_ul_ep"] = ul_ep["n"]
                     job["upload_started"] = time.time()
                     job.pop("upload_finished", None)
+                if pct >= 100 and not job.get("upload_finished"):
+                    job["upload_finished"] = time.time()
             if kind == "download":
                 job["download_progress"] = pct
                 job["download_episode"] = dl_ep["n"]
@@ -2433,6 +2576,8 @@ async def _process_job(job: dict, db: dict):
                     media_data = await next_dl_task
                     next_dl_task = None
                     job["download_progress"] = 100.0
+                    if not job.get("download_finished"):
+                        job["download_finished"] = time.time()
                     _persist_job(job)
                 else:
                     job["current_episode"] = ep_num
@@ -2441,9 +2586,11 @@ async def _process_job(job: dict, db: dict):
                     _persist_job(job)
                     print(f"[TGHirayi_v2] Descargando episodio {ep_num}/{total}", flush=True)
                     media_data = await _download_episode_media(client, episode, source_channel_id, _progress,
-                                                               normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
-                                                               streaming_mkv=streaming_mkv, job=job)
+                                                                normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
+                                                                streaming_mkv=streaming_mkv, job=job)
                     job["download_progress"] = 100.0
+                    if not job.get("download_finished"):
+                        job["download_finished"] = time.time()
                     _persist_job(job)
 
                 # Lanzar descarga del SIGUIENTE episodio en paralelo (si el
@@ -2464,6 +2611,9 @@ async def _process_job(job: dict, db: dict):
             ul_ep["n"] = ep_num
             job["status_text"] = f"Procesando ep.{_disp_ep(ep_num)}..."
             job["upload_progress"] = 0.0
+            job.pop("upload_finished", None)
+            # La subida aún no empezó: no arrastrar % del episodio anterior.
+            # (Si el episodio es copia telegram, el final del episodio lo pone a 100.)
 
             # ── Cover justo antes del primer vídeo real (todos los flujos) ──
             # Solo se verifica/copia para el PRIMER episodio; el resto lo da por
@@ -2512,7 +2662,25 @@ async def _process_job(job: dict, db: dict):
             # Si sigue sin media: NO intentar subidas ni copias (generaba errores
             # confusos y mensajes sueltos). Tras 3 pasadas sin media el origen no
             # tiene documento (¿borrado?) → error claro en vez de loop infinito.
+            # Transporte caído (flag de _download_episode_media): NO cuenta como
+            # fallo de media — a fallidos para reintentar al reanudar, sin
+            # dictaminar "borrado".
             if first_real and not media_data:
+                _trm = None
+                try:
+                    _trm = (job.get("_transport_retry") or {}).pop(
+                        str(episode.get("telegram_msg_id") or episode.get("msg_id")), None)
+                    if _trm is not None:
+                        _persist_job(job)
+                except Exception:
+                    _trm = None
+                if _trm is not None:
+                    print(f"[TGHirayi_v2] ep.{ep_num} transporte caido ({_trm}), a fallidos (reintentara al reanudar)",
+                          flush=True)
+                    job["status_text"] = f"Ep.{ep_num} sin conexion, reintentando al reanudar"
+                    _failed_eps.append(ep_num)
+                    _persist_job(job)
+                    continue
                 _dlf = job.setdefault("_dl_fails", {})
                 _dlf[str(ep_num)] = int(_dlf.get(str(ep_num), 0) or 0) + 1
                 if _dlf[str(ep_num)] >= 3:
@@ -2558,6 +2726,20 @@ async def _process_job(job: dict, db: dict):
                             topic_id = (job.get("_omitted") or {}).get(_okey)
                         else:
                             topic_id = await _resolve_topic_id_async(client, dest, job["title"], job)
+
+                        # Anti-General: en topo 2/3 sin topic NO se envía nada.
+                        # (El cover ya tiene su propio guard; esto cubre episodios,
+                        # forwards y copias.) Se marca error visible y se pausa el
+                        # job: reenviar a General "porque sí" esparce basura.
+                        if not _is_omit and int(dest.get("topology", 1)) in (2, 3) and not topic_id:
+                            job["status"] = "error"
+                            job["error"] = (f"Sin topic en {dest.get('name', '?')} "
+                                            f"(topo {dest.get('topology')}) para '{job.get('title', '')}': "
+                                            f"no se envía a General. Revisa topics/sesión y reencola.")
+                            job["status_text"] = job["error"]
+                            _persist_job(job)
+                            print(f"[TGHirayi_v2] {job['error']}", flush=True)
+                            return
 
                         if _is_omit:
                             _dn = dest.get('name', '?')
@@ -2670,10 +2852,32 @@ async def _process_job(job: dict, db: dict):
                 (job.get("_dl_fails") or {}).pop(str(ep_num), None)
             except Exception:
                 pass
+            # Override "Siguiente" consumido: el episodio pedido ya subió →
+            # vuelve a auto para que una reanudación posterior no salte atrás.
+            try:
+                _ov = job.get("next_episode")
+                if isinstance(_ov, int) and _ov > 0 and ep_num >= _ov:
+                    job.pop("next_episode", None)
+                    print(f"[TGHirayi_v2] Override siguiente={_ov} consumido "
+                          f"(ep.{ep_num} OK) → auto", flush=True)
+            except Exception:
+                pass
             job["upload_finished"] = time.time()
+            job["upload_progress"] = 100.0
+            # Cierre de episodio: ambas fases quedan en 100% aunque el fichero
+            # fuese tan pequeño que los callbacks throttled (1s) no llegaron
+            # al final, o el episodio fuese copia telegram (sin transferencia).
+            if not job.get("download_finished"):
+                job["download_finished"] = time.time()
+            job["download_progress"] = 100.0
             # Cover confirmado: llegar aquí implica que el episodio se subió a todos los
             # destinos sin error → el cover ya está pegado a su primer vídeo.
             job["_cover_done"] = True
+            # Progreso en esta pasada (resetea el cortacircuitos de transporte).
+            try:
+                job["_pass_ok"] = int(job.get("_pass_ok") or 0) + 1
+            except Exception:
+                job["_pass_ok"] = 1
             _persist_job(job)
 
             # Limpiar caché del episodio ya subido con éxito. Solo se conserva el
@@ -2699,7 +2903,29 @@ async def _process_job(job: dict, db: dict):
 
         # Episodios fallidos sin media: NO completar (quedarían fuera para siempre).
         # Se reencola desde el primero fallido para reintentarlos.
+        # Cortacircuitos: 3 pasadas seguidas sin completar NADA (transporte
+        # muerto) → error visible en vez de bucle caliente 49→52→49 que
+        # aporrea Telegram y escala FloodWaits.
         if _failed_eps:
+            _made = 0
+            try:
+                _made = int(job.pop("_pass_ok", 0) or 0)
+            except Exception:
+                _made = 0
+            if _made:
+                job["_transport_cycles"] = 0
+            else:
+                job["_transport_cycles"] = int(job.get("_transport_cycles") or 0) + 1
+            if int(job.get("_transport_cycles") or 0) >= 3:
+                job["status"] = "error"
+                job["error"] = ("Transporte Telegram caído: 3 pasadas sin completar ningún "
+                                f"episodio (fallidos {sorted(_failed_eps)}). Revisa sesión/conexión "
+                                "y reanuda la cola.")
+                job["status_text"] = job["error"]
+                job["_transport_cycles"] = 0
+                _persist_job(job)
+                print(f"[TGHirayi_v2] Job {job['id']} a ERROR por transporte: {job['error']}", flush=True)
+                return
             _first_failed = min(_failed_eps)
             job["status"] = "queued"
             job["current_episode"] = _first_failed
@@ -2761,9 +2987,13 @@ def _resolve_topic_id(dest: dict, title: str) -> Optional[int]:
 
 
 async def _list_forum_topics(client, dest: dict, job: dict = None) -> list:
-    """Topics del canal foro vía servicio central. Devuelve [{id, title}]."""
+    """Topics del canal foro vía servicio central. Devuelve [{id, title}].
+    SIEMPRE por Telethon (decisión 2026-09: pyrofork no es fiable para topics;
+    el ajuste global no aplica aquí)."""
     try:
-        items = await _svc().list_forum_topics(dest["channel_id"], **_svc_creds(job))
+        creds = _svc_creds(job)
+        creds["client_type"] = "telethon"
+        items = await _svc().list_forum_topics(dest["channel_id"], **creds)
         return items or []
     except Exception as e:
         print(f"[TGHirayi_v2] Error listando topics: {e}", flush=True)
@@ -2771,14 +3001,26 @@ async def _list_forum_topics(client, dest: dict, job: dict = None) -> list:
 
 
 async def _create_forum_topic(client, dest: dict, title: str, job: dict = None) -> Optional[int]:
-    """Crea un topic vía servicio central y devuelve su topic_id."""
+    """Crea un topic vía servicio central y devuelve su topic_id.
+    Preferido primero (Comportamiento Telegram), fallback al otro: antes era
+    SIEMPRE telethon y en instancias sin sesión telethon válida NUNCA se podía
+    crear un topic borrado (Anti-General). Pyro lo crea por raw igual."""
     try:
-        tid = await _svc().create_forum_topic(dest["channel_id"], title, **_svc_creds(job))
-        if tid:
-            print(f"[TGHirayi_v2] Topic creado: '{title}' -> {tid}", flush=True)
-            return int(tid)
-    except Exception as e:
-        print(f"[TGHirayi_v2] Error creando topic: {e}", flush=True)
+        from tvcat.services.userbot_service import get_preferred_client_type
+        preferred = get_preferred_client_type()
+    except Exception:
+        preferred = "telethon"
+    order = [preferred] + (["telethon"] if preferred == "pyrogram" else ["pyrogram"])
+    for ctype in order:
+        try:
+            creds = _svc_creds(job)
+            creds["client_type"] = ctype
+            tid = await _svc().create_forum_topic(dest["channel_id"], title, **creds)
+            if tid:
+                print(f"[TGHirayi_v2] Topic creado ({ctype}): '{title}' -> {tid}", flush=True)
+                return int(tid)
+        except Exception as e:
+            print(f"[TGHirayi_v2] Error creando topic ({ctype}): {e}", flush=True)
     return None
 
 
@@ -2809,16 +3051,9 @@ def _topics_to_map(items) -> dict:
     return m
 
 async def _fetch_recent_topics(client, dest: dict, limit: int = 100, job: dict = None) -> list:
-    # Delta rápido: 1 sola página vía cliente directo; fallback al servicio.
-    try:
-        from telethon.tl.functions.messages import GetForumTopicsRequest
-        entity = await client.get_entity(int(dest["channel_id"]))
-        peer = await client.get_input_entity(entity)
-        res = await client(GetForumTopicsRequest(
-            peer=peer, offset_date=0, offset_id=0, offset_topic=0, limit=int(limit)))
-        return list(getattr(res, 'topics', []) or [])
-    except Exception:
-        return await _list_forum_topics(client, dest, job)
+    # Vía servicio central (throttle+cola). El fast path crudo Telethon murió
+    # con el ajuste global a pyrogram: GetForumTopicsRequest no existe en pyro.
+    return await _list_forum_topics(client, dest, job)
 
 async def _get_topics_map_cached(client, dest: dict, job: dict = None) -> dict:
     """Mapa {norm_title: topic_id} con TTL. Completa al expirar; delta 100 en ventana vigente."""
@@ -2881,26 +3116,48 @@ async def _topic_find_cached(client, dest: dict, title: str, job: dict = None) -
         print(f"[TGHirayi_v2] Error buscando topic en caché: {e}", flush=True)
     return None
 
-async def _verify_topic_alive(client, dest: dict, topic_id: int) -> bool:
-    """Verificación viva antes de saltar: confirma que el topic_id sigue existiendo."""
+async def _verify_topic_alive(client, dest: dict, topic_id: int, job: dict = None) -> bool:
+    """Verificación viva antes de saltar: confirma que el topic_id sigue existiendo.
+    Vía servicio + Telethon forzado (igual que listado). Fail-safe: ante error se sube."""
     try:
-        from telethon.tl.functions.messages import GetForumTopicsByIDRequest as _GTB
-    except Exception:
-        return True  # Sin API de verificación: confía en caché
-    try:
-        entity = await client.get_entity(int(dest["channel_id"]))
-        peer = await client.get_input_entity(entity)
-        res = await client(_GTB(peer=peer, topics=[int(topic_id)]))
-        topics = list(getattr(res, 'topics', []) or [])
-        return len(topics) > 0
+        creds = _svc_creds(job)
+        creds["client_type"] = "telethon"
+        items = await _svc().list_forum_topics(dest["channel_id"], **creds)
+        for t in items or []:
+            tid = (t.get("id") if isinstance(t, dict) else getattr(t, 'id', None))
+            if tid is not None and int(tid) == int(topic_id):
+                return True
+        return False
     except Exception as e:
         print(f"[TGHirayi_v2] Error verificando topic {topic_id}: {e} → se sube (fail-safe)", flush=True)
         return False
 
 async def _get_topic_episode_msg_ids(client, dest: dict, topic_id: int) -> List[int]:
-    """msg_ids de episodios (vídeos) del topic existente en dest-0, orden ASC. F6."""
+    """msg_ids de episodios (vídeos) del topic existente en dest-0, orden ASC. F6.
+    Telethon: iter_messages con reply_to. Pyrogram: get_chat_history +
+    filtro por reply_to_top_message_id/message_thread_id. Sin cliente útil
+    devuelve [] (el omit-src usa la vía normal). Nunca lanza."""
     out: List[int] = []
     try:
+        if _raw_kind(client) != "telethon":
+            # Pyrogram: paseo del historial filtrando por topic.
+            async for msg in client.get_chat_history(int(dest["channel_id"]), limit=5000):
+                try:
+                    tid = (getattr(msg, "reply_to_top_message_id", None)
+                           or getattr(msg, "message_thread_id", None)
+                           or getattr(msg, "reply_to_message_id", None))
+                    if tid is not None and int(tid) != int(topic_id):
+                        continue
+                    media = getattr(msg, "media", None)
+                    doc = getattr(media, "document", None) if media else None
+                    if doc is None:
+                        doc = getattr(msg, "document", None)
+                    if doc is not None:
+                        out.append(int(getattr(msg, 'id', 0)))
+                except Exception:
+                    continue
+            out = sorted([i for i in out if i])
+            return out
         entity = await client.get_entity(int(dest["channel_id"]))
         async for msg in client.iter_messages(entity, reply_to=int(topic_id), limit=5000):
             try:
@@ -2932,7 +3189,37 @@ async def _resolve_topic_id_async(client, dest: dict, title: str, job: dict) -> 
     dest_key = str(dest.get("id") or dest.get("channel_id") or dest.get("name") or 'dest')
     cached = job.setdefault("_topics", {})
     if dest_key in cached:
-        return cached[dest_key]
+        # Validar UNA vez por job (flag): un id cacheado de otra época puede
+        # estar borrado en Telegram (responder a un topic muerto cae a General
+        # en silencio). Si no está vivo, se descarta y se re-resuelve.
+        if job.get("_topics_verified"):
+            return cached[dest_key]
+        try:
+            alive_items = await _svc().list_forum_topics(dest["channel_id"], **_svc_creds(job))
+            alive_ids = {int(t.get("id")) for t in (alive_items or []) if (t.get("id") if isinstance(t, dict) else getattr(t, "id", None))}
+            if int(cached[dest_key]) in alive_ids:
+                job["_topics_verified"] = True
+                _persist_job(job)
+                if not job.get("_topics_traced"):
+                    job["_topics_traced"] = True
+                    try:
+                        _tn = next((t.get("title") for t in (alive_items or [])
+                                    if int(t.get("id")) == int(cached[dest_key])), "")
+                    except Exception:
+                        _tn = ""
+                    job.setdefault("_topic_names", {})[dest_key] = _tn
+                    _persist_job(job)
+                    print(f"[TGHirayi_v2] Topic verificado '{title}' -> {cached[dest_key]} "
+                          f"({_tn}) en {dest.get('name', '?')}", flush=True)
+                return cached[dest_key]
+            print(f"[TGHirayi_v2] Topic cacheado {cached[dest_key]} ya no existe en "
+                  f"{dest.get('name', '?')}: re-resolviendo", flush=True)
+        except Exception as e:
+            print(f"[TGHirayi_v2] Sin verificación de topic cacheado ({e}): se re-resuelve",
+                  flush=True)
+        cached.pop(dest_key, None)
+        job.pop("_topics_verified", None)
+        _persist_job(job)
 
     tid = await _topic_find_cached(client, dest, title, job)
 
@@ -2944,9 +3231,20 @@ async def _resolve_topic_id_async(client, dest: dict, title: str, job: dict) -> 
         except Exception as e:
             print(f"[TGHirayi_v2] Error creando topic '{title}': {e}", flush=True)
 
+    if not tid:
+        # Anti-General: topo 3 sin topic (ni encontrado ni creado) NO devuelve
+        # None en silencio: se registra fuerte para no esparcir a General.
+        print(f"[TGHirayi_v2] Topic NO resuelto para '{title}' (topo 3) → General NO permitido",
+              flush=True)
+
     if tid:
         cached[dest_key] = int(tid)
+        job["_topics_verified"] = True
+        job.setdefault("_topic_names", {})[dest_key] = title
+        job["_topics_traced"] = True
         _persist_job(job)
+        print(f"[TGHirayi_v2] Topic resuelto '{title}' -> {int(tid)} "
+              f"en {dest.get('name', '?')}", flush=True)
     return int(tid) if tid else None
 
 
@@ -3423,7 +3721,7 @@ async def _download_archive_files(client, episodes, source_channel_id, workdir, 
             try:
                 got = await _ft.download_file(client, chat_id, msg_id, tmp_dl,
                                               threads=dl_threads, progress=_dl_progress,
-                                              client_type="telethon")
+                                              client_type=_raw_kind(client))
                 if got and os.path.isfile(tmp_dl) and os.path.getsize(tmp_dl) == doc_size:
                     completed = True
             except Exception as e:
@@ -3567,23 +3865,55 @@ def _download_poster_bytes_sync(url, timeout=25):
     return None
 
 
-def _display_name_from_details(details) -> str:
-    """2026-09-12: nombre visible del job = Original title + 🗓año
-    (sin año → solo título). Fallback al title ES si no hay original."""
+def _title_year_from_cover_tags(text):
+    """Extrae (título, año) de los tags EDITADOS del cover (prioridad usuario).
+    1º 'Original title'/'Título original'; si no, 'Title/Título/Nombre' display
+    (excluye variantes Alt/ES/Latam...). Ignora placeholders {..} y valores cortos.
+    Misma prioridad que el enriquecedor al propagar al catálogo."""
     try:
-        if not isinstance(details, dict):
-            return ""
-        _t = (details.get("api_original_title") or details.get("api_title") or "").strip()
+        import re as _re_t
+        _orig = ""
+        _disp = ""
+        _yr = ""
+        for _ln in (text or "").split("\n"):
+            _l = _ln.strip()
+            if not _l or len(_l) < 2:
+                continue
+            _m = _re_t.match(r"(?i)^(original\s+title|t[ií]tulo\s+original|titulo\s+original)\s*[:=\-]?\s*(.*?)\s*$", _l)
+            if _m:
+                _v = (_m.group(2) or "").strip()
+                if _v and len(_v) >= 2 and "{" not in _v and "}" not in _v and not _orig:
+                    _orig = _v[:200]
+                continue
+            _m2 = _re_t.match(r"(?i)^(year|a[ñn]o)\s*[:=\-]?\s*(\d{4})", _l)
+            if _m2 and not _yr:
+                _yr = _m2.group(2)
+                continue
+            _m3 = _re_t.match(r"(?i)^(t[ií]tulo|titulo|title|nombre)(?!\s+(?:alt\d*|es(?:pa[ñn]a)?|latam|latin[oa]|mx|m[ée]xico|original)\b)\s*[:=\-]?\s*(.*?)\s*$", _l)
+            if _m3:
+                _v3 = (_m3.group(2) or "").strip()
+                if _v3 and len(_v3) >= 2 and "{" not in _v3 and "}" not in _v3 and not _disp:
+                    _disp = _v3[:200]
+        return (_orig or _disp, _yr)
+    except Exception:
+        return ("", "")
+
+
+def _display_name_from_details(details, cover_text="", fallback_title="") -> str:
+    """Nombre visible del job = tags del cover + año (sin año → solo título).
+    Orden: 1º tags editados (Original title/Title + Year),
+    2º título del catálogo. TMDB NO se usa: solo sirve para enriquecer
+    (re Cinem... rellenar el modal); los datos salen del cover (tags).
+    `details` se conserva por firma pero no decide el nombre."""
+    try:
+        _t, _y = _title_year_from_cover_tags(cover_text) if cover_text else ("", "")
+        if not _t:
+            _t = (fallback_title or "").strip()
         if not _t:
             return ""
-        _y = ""
-        try:
-            import re as _re3
-            _m3 = _re3.search(r"(\d{4})", str(details.get("api_year") or ""))
-            if _m3:
-                _y = _m3.group(1)
-        except Exception:
-            pass
+        return "%s🗓%s" % (_t, _y) if _y else _t
+    except Exception:
+        return ""
         return "%s🗓%s" % (_t, _y) if _y else _t
     except Exception:
         return ""
@@ -3847,8 +4177,16 @@ async def _copy_cover_to_destinations(job, client, cover_messages, destinations,
             poster_bytes = _bp
     for dest in destinations:
         topic_id = await _resolve_topic_id_async(client, dest, job["title"], job)
+        # Anti-General: en topo 2/3 sin topic resuelto NO se publica (ni cover).
+        # Publicar en General "porque sí" deja basura imposible de conciliar;
+        # se salta con aviso y el job lo reintentará (el topic se crea entonces).
+        _topo = dest.get("topology", 1)
+        if _topo in (2, 3) and not topic_id:
+            print(f"[TGHirayi_v2] Cover NO copiado a {dest.get('name', '?')}: sin topic "
+                  f"(topo {_topo}); se reintentará", flush=True)
+            continue
         _dids = await _copy_messages_to_destination(client, cover_messages, dest, topic_id, delay,
-                                            cover_text_override=cover_override, poster_bytes=poster_bytes, job=job)
+                                                    cover_text_override=cover_override, poster_bytes=poster_bytes, job=job)
         cover_ids[str(dest.get("channel_id"))] = [i for i in _dids if i]
         await asyncio.sleep(delay)
     return cover_ids
@@ -3858,6 +4196,8 @@ async def _verify_cover_uploaded(job, client, destinations) -> bool:
     """Verifica que el cover exista REALMENTE en cada destino (solo primer episodio).
     Usa los msg_id registrados en `job['_cover_msg_ids']` al copiar; si no hay
     registro o ningún mensaje existe → NO verificado (hay que copiarlo).
+    Además exige el TOPIC correcto en topo 2/3: un cover viejo en General NO
+    valida (si no, nunca se re-copiaría al topic).
     Fail-closed: ante la duda se re-copia (un cover duplicado es menos grave
     que un título sin cover)."""
     try:
@@ -3873,6 +4213,13 @@ async def _verify_cover_uploaded(job, client, destinations) -> bool:
             return False
         if not ids:
             return False
+        # Topic esperado (cacheado en el job por el resolve previo; barato).
+        exp_topic = None
+        try:
+            if int(dest.get("topology", 1)) in (2, 3):
+                exp_topic = await _resolve_topic_id_async(client, dest, job.get("title", ""), job)
+        except Exception:
+            exp_topic = None
         try:
             # fetch_one devuelve dict o None (servicio central, con caché)
             ok = False
@@ -3881,9 +4228,19 @@ async def _verify_cover_uploaded(job, client, destinations) -> bool:
                     _m = await _svc().fetch_one(dest["channel_id"], int(_id), **_svc_creds(job))
                 except Exception:
                     _m = None
-                if _m is not None:
-                    ok = True
-                    break
+                if _m is None:
+                    continue
+                if exp_topic:
+                    try:
+                        _mt = int((_m or {}).get("topic_id") or 0)
+                    except Exception:
+                        _mt = 0
+                    if _mt != int(exp_topic):
+                        print(f"[TGHirayi_v2] Cover {_id} existe pero en topic {_mt}, "
+                              f"no en {exp_topic}: re-copiando", flush=True)
+                        continue
+                ok = True
+                break
             if not ok:
                 print(f"[TGHirayi_v2] Cover no encontrado en {dest.get('channel_id')} (ids={ids}), re-copiando", flush=True)
                 return False
@@ -4504,7 +4861,7 @@ def _ffprobe_tracks(file_path: str) -> dict:
     try:
         r = subprocess.run(
             [probe, "-v", "error",
-             "-show_entries", "stream=index,codec_type:stream_tags=language,title:stream_disposition=default,forced",
+             "-show_entries", "stream=index,codec_type,codec_name:stream_tags=language,title:stream_disposition=default,forced",
              "-of", "json", file_path],
             capture_output=True, timeout=60)
         d = _json.loads((r.stdout or b"{}").decode("utf-8", errors="replace"))
@@ -4516,6 +4873,7 @@ def _ffprobe_tracks(file_path: str) -> dict:
         disp = s.get("disposition", {}) or {}
         entry = {
             "index": s.get("index"),
+            "codec": (s.get("codec_name") or "").lower(),
             "title": tags.get("title") or "",
             "language": tags.get("language") or "",
             "default": bool(disp.get("default")),
@@ -4775,6 +5133,52 @@ def _find_stream_by_lang(file_path: str, stream_type: str, lang_code: str) -> Op
         if _normalize_lang_text(t.get("title") or "") in candidates:
             return int(t["index"])
     return None
+
+
+# Códecs de audio que una SmartTV vieja reproduce sin transcodificar.
+_TV_SAFE_AUDIO = {"aac", "mp3", "ac3", "eac3"}
+
+
+def _audio_already_ok(file_path: str, audio_lang: str) -> bool:
+    """True si NO hay que tocar el audio: sin preferencia, o la pista que ya
+    sonaría por defecto es del idioma pedido en códec compatible TV (o hay una
+    única pista compatible). Evita el remapeo + transcode a AAC cuando el
+    fichero ya viene bien (caso típico: MKV con default spa/AAC)."""
+    if not (audio_lang or "").strip():
+        return True
+    try:
+        tracks = (_ffprobe_tracks(file_path) or {}).get("audio") or []
+    except Exception:
+        return False
+    if not tracks:
+        return False
+    if len(tracks) == 1 and (tracks[0].get("codec") or "") in _TV_SAFE_AUDIO:
+        return True
+    try:
+        candidates = set(_lang_code_to_candidates(audio_lang))
+    except Exception:
+        return False
+    for t in tracks:
+        if not t.get("default"):
+            continue
+        lang_ok = (_normalize_lang_text(t.get("language") or "") in candidates
+                   or _normalize_lang_text(t.get("title") or "") in candidates)
+        if lang_ok and (t.get("codec") or "") in _TV_SAFE_AUDIO:
+            return True
+        return False  # hay default pero no vale → hay que trabajar
+    return False  # sin default marcado → comportamiento clásico
+
+
+def _wanted_audio_missing(file_path: str, audio_lang: str) -> bool:
+    """True si hay preferencia de audio pero NINGUNA pista coincide: no hay
+    nada que seleccionar, así que no se remapea ni transcodifica (faststart y
+    copia total). La preferencia elige si existe; si no, se conserva todo."""
+    if not (audio_lang or "").strip():
+        return False
+    try:
+        return _find_stream_by_lang(file_path, "audio", audio_lang) is None
+    except Exception:
+        return False
 
 
 def _pid_alive(pid):
@@ -5146,10 +5550,13 @@ def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_
     need_encode = sub_lang != "" or file_size > max_bytes or (not is_mp4 and not mkv_directo)
     rc = 0
 
-    if mkv_directo and not audio_lang and not sub_lang and file_size <= max_bytes:
-        # MKV en modo streaming sin cambios de pista.
-        # Remux rapido con cues_to_front para que el indice de seek este al inicio
-        # (requerido para HLS y seek en SmartTV antigua).
+    if mkv_directo and not sub_lang and file_size <= max_bytes \
+            and (_audio_already_ok(input_path, audio_lang)
+                 or _wanted_audio_missing(input_path, audio_lang)):
+        # MKV en modo streaming sin cambios de pista (o con el default ya en
+        # el idioma pedido y códec compatible: no hay que remapear ni pasar a
+        # AAC). Remux rapido con cues_to_front para que el indice de seek este
+        # al inicio (requerido para HLS y seek en SmartTV antigua).
         out_path = input_path + ".faststart.mkv"
         cmd_cues = [ffmpeg, "-y", "-i", input_path, "-c", "copy", "-cues_to_front", "true", out_path]
         log("MKV streaming: remux con cues_to_front...")
@@ -5705,6 +6112,13 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
     # Extraer chat_id del telegram_link (mismo metodo que el reproductor)
     chat_id = _extract_channel_id(episode.get("telegram_link", "")) or source_channel_id
     msg_id = episode.get("telegram_msg_id") or episode.get("msg_id")
+    if job is not None:
+        # Limpiar marca de transporte de un intento anterior: si esta pasada
+        # tiene éxito, no debe quedar rastro para la siguiente.
+        try:
+            (job.get("_transport_retry") or {}).pop(str(msg_id), None)
+        except Exception:
+            pass
     if not chat_id or not msg_id:
         print(f"[TGHirayi_v2] _download_episode_media: sin chat_id o msg_id (link={episode.get('telegram_link','')})", flush=True)
         return result
@@ -5859,10 +6273,35 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
             "width": w,
             "height": h,
         })
+        if job is not None:
+            # Hit de caché: no hay callbacks de descarga; cerrar fase aquí para
+            # que la barra quede en 100% (y el cronómetro congelado) durante
+            # la recodificación/subida posterior.
+            try:
+                if progress_callback:
+                    progress_callback("download", len(data), max(len(data), 1))
+            except Exception:
+                pass
+            job["download_progress"] = 100.0
+            if not job.get("download_finished"):
+                job["download_finished"] = time.time()
+            _persist_job(job)
         return result
 
     try:
-        info = await _svc().get_file_info(chat_id, int(msg_id), **_svc_creds(job))
+        info, _tok, _terr = await _file_info_resilient(
+            chat_id, int(msg_id), job, f"ep.{msg_id}")
+        if not _tok:
+            # Transporte caído (NO borrado): marcar para reintento al reanudar
+            # sin contar como fallo de media (no debe dictaminar "borrado").
+            try:
+                job.setdefault("_transport_retry", {})[str(msg_id)] = _terr
+                _persist_job(job)
+            except Exception:
+                pass
+            print(f"[TGHirayi_v2] ep.{msg_id} transporte caido ({_terr}), reintentara al reanudar",
+                  flush=True)
+            return result
         if not info or not info.get("size"):
             # El servicio devuelve None tanto si falta media como si falló el
             # transporte. Si la BD espera fichero, sondear el MISMO cliente que
@@ -5875,7 +6314,9 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
                 _exp_sz = 0
             if _exp_sz > 0 and not (_svc_creds(job) or {}).get("session_string"):
                 try:
-                    _svc_pool_cli = await asyncio.wait_for(_svc().pool.get_client(None, "telethon"), timeout=25)
+                    from tvcat.services.userbot_service import get_preferred_client_type
+                    _sond_type = get_preferred_client_type()
+                    _svc_pool_cli = await asyncio.wait_for(_svc().pool.get_client(None, _sond_type), timeout=25)
                     await asyncio.wait_for(_svc_pool_cli.get_me(), timeout=25)
                 except Exception as _e_me:
                     if _is_auth_dead(str(_e_me)):
@@ -5951,12 +6392,37 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
                 print(f"[TGHirayi_v2] [CACHE] .raw de ep.{msg_id} incompleto ({os.path.getsize(raw_cache)}/{_exp_size}), redescargando", flush=True)
                 use_cache = None
 
+        _skip_norm = False  # se activa si el caché ya es el MP4 final
         if use_cache:
             with open(use_cache, 'rb') as f:
                 data = f.read()
             file_size = len(data)
             if use_cache == mp4_cache and os.path.splitext(fname)[1].lower() not in ('.mp4', '.m4v'):
                 fname = os.path.splitext(fname)[0] + '.mp4'
+            # Si el caché ya es el fichero final (MP4 normalizado, o MKV en
+            # streaming ya remapeado) y no es más viejo que el .raw del que
+            # deriva, no hay nada que recodificar: saltar el bloque de
+            # normalización de abajo (en requeues era tiempo perdido).
+            try:
+                _mp4_ok = bool(use_cache == mp4_cache and os.path.isfile(mp4_cache))
+                _mkv_ok = bool(streaming_mkv and use_cache == mkv_cache
+                               and os.path.isfile(mkv_cache))
+                _fresh = (not os.path.isfile(raw_cache)
+                          or os.path.getmtime(use_cache) >= os.path.getmtime(raw_cache))
+                _skip_norm = bool((_mp4_ok or _mkv_ok) and _fresh)
+            except Exception:
+                _skip_norm = False
+            if job is not None:
+                # Hit de caché (segundo punto): cerrar fase de descarga aquí.
+                try:
+                    if progress_callback:
+                        progress_callback("download", file_size, max(file_size, 1))
+                except Exception:
+                    pass
+                job["download_progress"] = 100.0
+                if not job.get("download_finished"):
+                    job["download_finished"] = time.time()
+                _persist_job(job)
         else:
             # Descargar a disco (caché) — NO se elimina tras usar (reutilizable ante fallos)
             print(f"[TGHirayi_v2] Descargando ep.{msg_id} a caché...", flush=True)
@@ -5979,7 +6445,7 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
                 if _pyro_dl is not None:
                     _dc, _dt = _pyro_dl, "pyrogram"
                 else:
-                    _dc, _dt = client, "telethon"
+                    _dc, _dt = client, _raw_kind(client)
                 if job is not None:
                     job["dl_client"] = _dt
                 try:
@@ -6051,8 +6517,29 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
                         pass
                 return result
 
-            # Normalización MP4 (solo vídeo y si está activa) → guarda en caché .mp4
-            if normalize_mp4 and is_video and file_size > 1024:
+            # Descarga real terminada (antes de normalizar): la barra debe quedar
+            # en 100% durante toda la fase de recodificación, aunque el fichero
+            # fuese tan pequeño que los callbacks throttled solo llegaron al 2%.
+            if job is not None:
+                try:
+                    if progress_callback:
+                        progress_callback("download", file_size, max(file_size, 1))
+                except Exception:
+                    pass
+                job["download_progress"] = 100.0
+                if not job.get("download_finished"):
+                    job["download_finished"] = time.time()
+                _persist_job(job)
+
+            # Normalización MP4 (solo vídeo y si está activa) → guarda en caché .mp4.
+            # Si el caché ya ERA el MP4 normalizado, saltar (recodificar de
+            # nuevo en cada reanudación es tiempo perdido).
+            if _skip_norm:
+                print(f"[TGHirayi_v2] [NORM] caché final válido, sin recodificar", flush=True)
+                if job is not None:
+                    job["encode_progress"] = 100.0
+                    _persist_job(job)
+            elif normalize_mp4 and is_video and file_size > 1024:
                 def _norm_log(m):
                     print(f"[TGHirayi_v2] [NORM] {m}", flush=True)
                 _norm_last = [0.0]
@@ -6222,6 +6709,129 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
 # Ver download_file / upload_file.
 
 
+async def _preferred_uploader(job, timeout=8):
+    """(raw, kind) para subir UN episodio: preferido primero (Comportamiento),
+    fallback al otro. Se llama POR EPISODIO: si el preferido vuelve, se vuelve
+    a él (sin quedarse clavado en el fallback todo el job). Valida con get_me
+    y pone en cuarentena la sesión quemada para no aporrear Telegram."""
+    from tvcat.services.userbot_service import (
+        get_active_client, get_preferred_client_type, quarantine_session)
+    try:
+        preferred = get_preferred_client_type()
+    except Exception:
+        preferred = "pyrogram"
+    order = [preferred] + (["telethon"] if preferred == "pyrogram" else ["pyrogram"])
+    last_err = None
+    for ctype in order:
+        try:
+            wrapper = await asyncio.wait_for(get_active_client(ctype), timeout=timeout)
+            raw = getattr(wrapper, "_client", None)
+            if raw is None:
+                continue
+            try:
+                await asyncio.wait_for(raw.get_me(), timeout=timeout)
+            except Exception as e:
+                last_err = e
+                _tn = type(e).__name__
+                if "AuthKeyDuplicated" in _tn or "AuthKeyUnregistered" in _tn:
+                    try:
+                        _sd = getattr(wrapper, "session_data", None) or {}
+                        quarantine_session(_sd.get("tg_user_id"), ctype, _tn)
+                    except Exception:
+                        pass
+                continue
+            if ctype != preferred:
+                print(f"[TGHirayi_v2] Subida con {ctype} (preferido {preferred} no disponible)", flush=True)
+            return raw, ctype
+        except Exception as e:
+            last_err = e
+            continue
+    raise ValueError(f"Sin cliente Telegram disponible ({last_err})")
+
+
+async def _delete_upload(uploader, kind, channel_id, mid):
+    """Borra un upload malo para no duplicar al reintentar. Best-effort."""
+    try:
+        if kind == "pyrogram":
+            await uploader.delete_messages(int(channel_id), int(mid))
+        else:
+            try:
+                entity = await uploader.get_entity(int(channel_id))
+            except Exception:
+                entity = int(channel_id)
+            await uploader.delete_messages(entity, int(mid))
+        return True
+    except Exception as e:
+        print(f"[TGHirayi_v2] No se pudo borrar el upload malo {mid}: {e}", flush=True)
+        return False
+
+
+async def _verify_video_upload(channel_id, mid, expect_video, expect_thumb, sent_dims, job):
+    """Post-subida: un vídeo debe quedar como vídeo (attrs+streaming), no como
+    documento. Comprueba dimensiones/thumb del mensaje creado. True = OK."""
+    if not expect_video or not mid:
+        return True
+    try:
+        info, _tok, _terr = await _file_info_resilient(
+            channel_id, int(mid), job, f"verify {mid}")
+    except Exception as e:
+        print(f"[TGHirayi_v2] Sin verificación post-subida ({e}), se acepta", flush=True)
+        return True
+    if not _tok:
+        # Transporte caído tras reintento: los bytes se subieron bien (el
+        # envío no dio error); NO borrar un upload bueno por no poder leerlo.
+        print(f"[TGHirayi_v2] Verify {mid} sin conexion ({_terr}), se acepta", flush=True)
+        return True
+    if not info:
+        return False
+    sw, sh, sd = sent_dims
+    gw = int(info.get("width") or 0)
+    gh = int(info.get("height") or 0)
+    gd = int(info.get("duration") or 0)
+    if (sw or sh or sd) and not (gw or gh or gd):
+        print(f"[TGHirayi_v2] Upload {mid} sin attrs de vídeo (enviado w={sw} h={sh} d={sd}) → documento",
+              flush=True)
+        return False
+    if expect_thumb and not info.get("has_thumb"):
+        print(f"[TGHirayi_v2] Upload {mid} sin thumb (se envió uno) → reintento", flush=True)
+        return False
+    return True
+
+
+_VIDEO_EXTS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v",
+                ".ts", ".mpeg", ".mpg")
+
+
+def _upload_name_for(fname, mime, w, h, tmp_path, msg_id):
+    """Nombre + es_video garantizados para subir: NFKC (puntos fullwidth →
+    ascii), y si la extensión no es de vídeo pero el contenido sí lo es
+    (mime video/* o dimensiones reales), se fuerza extensión válida.
+    Evita que un vídeo acabe como documento adjunto por un nombre raro."""
+    import unicodedata
+    name = unicodedata.normalize("NFKC", str(fname or "")).strip().rstrip(" .")
+    if not name:
+        name = f"ep{int(msg_id or 0)}"
+    ext = os.path.splitext(name)[1].lower()
+    if ext in _VIDEO_EXTS:
+        return name, True
+    content_video = ((mime or "").lower().startswith("video/")
+                     or bool(int(w or 0) or int(h or 0)))
+    if content_video:
+        # Extensión del fichero real si es de vídeo; si no, .mp4.
+        disk_ext = ""
+        try:
+            disk_ext = os.path.splitext(tmp_path or "")[1].lower()
+        except Exception:
+            pass
+        if disk_ext not in _VIDEO_EXTS:
+            disk_ext = ".mkv" if "matroska" in (mime or "").lower() else ".mp4"
+        base = os.path.splitext(name)[0].rstrip(" .") or f"ep{int(msg_id or 0)}"
+        name = base + disk_ext
+        print(f"[TGHirayi_v2] Nombre normalizado para vídeo: '{fname}' → '{name}'", flush=True)
+        return name, True
+    return name, False
+
+
 async def _upload_episode_to_destination(client, pyro_client, episode: dict, media_data: list, dest: dict, topic_id, delay: float, progress_callback=None, job: dict = None) -> List[int]:
     """Sube un episodio (texto + ficheros) a un destino.
     F3: si hay sesión Pyrofork, subida rápida directa desde disco (cualquier tamaño).
@@ -6275,50 +6885,54 @@ async def _upload_episode_to_destination(client, pyro_client, episode: dict, med
 
                 # Guardar en archivo temporal o usar file_path directo (evitar 3GB en RAM)
                 import tempfile as _tmp
-                fname = md.get("file_name", "video.mp4")
+                _raw_fname = md.get("file_name") or "video.mp4"
                 _fpath = md.get("file_path")
                 _is_temp = True
                 if _fpath and os.path.isfile(_fpath):
                     tmp_name = _fpath
                     _is_temp = False
                 else:
-                    tmp = _tmp.NamedTemporaryFile(suffix='_' + fname, delete=False)
+                    tmp = _tmp.NamedTemporaryFile(suffix='_' + str(_raw_fname), delete=False)
                     data_bytes = md.get("data") or b""
                     if data_bytes:
                         tmp.write(data_bytes)
                     tmp.close()
                     tmp_name = tmp.name
                     _is_temp = True
+                # Nombre garantizado: NFKC + extensión válida si el contenido es
+                # vídeo (mime/dimensiones), aunque el nombre original sea raro.
+                fname, _fname_is_video = _upload_name_for(
+                    _raw_fname, md.get("mime_type"),
+                    md.get("width"), md.get("height"), tmp_name,
+                    episode.get("telegram_msg_id") or episode.get("msg_id"))
                 try:
-                    # v2: subida centralizada (servicio core). Pyro primero si hay
-                    # sesión (fast multi-sesión, cualquier tamaño incl. >1.9GB),
-                    # si no Telethon (directo/paralelo). Mismos términos.
+                    # v2: subida centralizada (servicio core) con selección POR
+                    # EPISODIO: preferido primero, fallback al otro; si el
+                    # preferido vuelve, se vuelve a él (sin latch global).
                     from tvcat.services import file_transfer as _ft
-                    _pyro_up = pyro_client
-                    if _pyro_up is None and _PYRO_FAST_OK is not False:
-                        try:
-                            _pyro_up = await asyncio.wait_for(_get_pyrogram_client(), 12)
-                            globals()["_PYRO_FAST_OK"] = True
-                        except Exception:
-                            globals()["_PYRO_FAST_OK"] = False
-                            _pyro_up = None
-                    if _pyro_up is not None:
-                        _uc, _ut = _pyro_up, "pyrogram"
-                    else:
-                        _uc, _ut = client, "telethon"
+                    _uc, _ut = await _preferred_uploader(job)
                     if job is not None:
                         job["ul_client"] = _ut
-                    try:
-                        _mid = await _ft.upload_file(
-                            _uc, channel_id, tmp_name, fname, caption=text or None,
+
+                    async def _once(_uc0, _ut0):
+                        print(f"[TGHirayi_v2] _once md_fname={md.get('file_name')!r} "
+                              f"send_fname={fname!r} video={bool(_fname_is_video)} "
+                              f"thumb={bool(md.get('thumb_data'))} "
+                              f"{int(md.get('width', 0) or 0)}x{int(md.get('height', 0) or 0)} "
+                              f"d={int(md.get('duration', 0) or 0)} via={_ut0}", flush=True)
+                        return await _ft.upload_file(
+                            _uc0, channel_id, tmp_name, fname, caption=text or None,
                             thumb_bytes=md.get("thumb_data"),
-                            is_video=_is_video_file(fname),
+                            is_video=_fname_is_video,
                             duration=int(md.get("duration", 0) or 0),
                             width=int(md.get("width", 0) or 0),
                             height=int(md.get("height", 0) or 0),
                             reply_to_msg_id=topic_id if topic_id else None,
                             threads=threads, part_size_kb=part_size_kb,
-                            progress=_ul_progress, client_type=_ut)
+                            progress=_ul_progress, client_type=_ut0)
+
+                    try:
+                        _mid = await _once(_uc, _ut)
                     except Exception as _e_ul:
                         # Cliente muerto a mitad de subida (storage cerrado,
                         # desconexión, blip): refrescar y reintentar una vez.
@@ -6329,18 +6943,29 @@ async def _upload_episode_to_destination(client, pyro_client, episode: dict, med
                                 "Connection lost", "ConnectionError",
                                 "socket", "Server closed", "Timeout")):
                             _uc = await asyncio.wait_for(_refresh_pyrogram_client(), 30)
-                            _mid = await _ft.upload_file(
-                                _uc, channel_id, tmp_name, fname, caption=text or None,
-                                thumb_bytes=md.get("thumb_data"),
-                                is_video=_is_video_file(fname),
-                                duration=int(md.get("duration", 0) or 0),
-                                width=int(md.get("width", 0) or 0),
-                                height=int(md.get("height", 0) or 0),
-                                reply_to_msg_id=topic_id if topic_id else None,
-                                threads=threads, part_size_kb=part_size_kb,
-                                progress=_ul_progress, client_type="pyrogram")
+                            _ut = "pyrogram"
+                            if job is not None:
+                                job["ul_client"] = _ut
+                            _mid = await _once(_uc, _ut)
                         else:
                             raise
+                    # Verificación: un vídeo debe quedar como vídeo (no documento).
+                    _exp_video = bool(_fname_is_video)
+                    _exp_thumb = bool(md.get("thumb_data"))
+                    _dims = (int(md.get("width", 0) or 0), int(md.get("height", 0) or 0),
+                             int(md.get("duration", 0) or 0))
+                    if _mid and not await _verify_video_upload(
+                            channel_id, _mid, _exp_video, _exp_thumb, _dims, job):
+                        await _delete_upload(_uc, _ut, channel_id, _mid)
+                        _uc, _ut = await _preferred_uploader(job)
+                        if job is not None:
+                            job["ul_client"] = _ut
+                        _mid = await _once(_uc, _ut)
+                        if _mid and not await _verify_video_upload(
+                                channel_id, _mid, _exp_video, _exp_thumb, _dims, job):
+                            await _delete_upload(_uc, _ut, channel_id, _mid)
+                            raise RuntimeError(
+                                "El vídeo quedó como documento sin attrs (2 intentos)")
                     if _mid:
                         sent_ids.append(int(_mid))
                         print(f"[TGHirayi_v2] Subida central OK ({fsize/(1024*1024):.1f} MB, {_ut})", flush=True)
@@ -6366,6 +6991,22 @@ async def _upload_episode_to_destination(client, pyro_client, episode: dict, med
             except Exception as e:
                 print(f"[TGHirayi_v2] Error sending text: {e}", flush=True)
                 raise
+    # Fichero pequeño = subida en <1s: el callback throttled pudo quedarse en
+    # 2%. Cerrar fase aquí para que la barra marque 100% y el cronómetro pare.
+    if job is not None and sent_ids:
+        try:
+            if progress_callback:
+                from telethon import helpers as _tl_helpers
+                await _tl_helpers._maybe_await(progress_callback("upload", 100, 100))
+        except Exception:
+            pass
+        try:
+            job["upload_progress"] = 100.0
+            if not job.get("upload_finished"):
+                job["upload_finished"] = time.time()
+            _persist_job(job)
+        except Exception:
+            pass
 
     return sent_ids
 

@@ -548,7 +548,17 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
         collection_msg_date = 0
 
     effective_group = group_title or title
-    group_title_flat = re.sub(r"[^a-zA-Z0-9]", "", effective_group).lower()
+    # Main Title explícito = flat directo (conserva unicode: リング no se
+    # vacía). Solo sin Main Title se calcula con la regla ASCII clásica.
+    _main_raw = None
+    try:
+        _main_raw = ((metadata or {}).get("main_title_raw") or "").strip() or None
+    except Exception:
+        _main_raw = None
+    if _main_raw:
+        group_title_flat = re.sub(r"[^\w]", "", _main_raw, flags=re.UNICODE).lower() or re.sub(r"[^a-zA-Z0-9]", "", effective_group).lower()
+    else:
+        group_title_flat = re.sub(r"[^a-zA-Z0-9]", "", effective_group).lower()
     item_id = f"USER-{group_title_flat[:15]}-{telegram_msg_id}"
     tag = _make_tag(title)
 
@@ -556,6 +566,8 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
     info_parts = [f"Tag: {tag}", f"Title: {title}"] if tag else [f"Title: {title}"]
     if metadata:
         for k, v in metadata.items():
+            if k == "main_title_raw":
+                continue
             info_parts.append(f"{k}: {v}")
     info = "\n".join(info_parts)
 
@@ -682,9 +694,11 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
                 (actual_title, effective_group, group_title_flat, cat_id)
             )
 
-    # Contador de episodios en memoria (como en tvcat1)
-    episode_counter = 0
-
+    # Numeración = posición en el bloque (idx+1, orden de mensaje). El contador
+    # solo-de-nuevos colisionaba: en un reescaneo los existentes hacían
+    # `continue` sin avanzar el contador y el primer fichero nuevo se insertaba
+    # con un número ya usado (ej. saga con 1,1,2,3...). Tras insertar se
+    # normaliza todo el ítem por telegram_msg_id (repara duplicados viejos).
     for idx, msg in enumerate(files):
         # Verificar si ya existe este episodio para este ítem
         cursor.execute("SELECT id FROM item_episodes WHERE (item_id = ? OR item_id = ?) AND telegram_msg_id = ?", (cat_id, item_id, msg.id))
@@ -719,8 +733,8 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
             except Exception:
                 pass
 
-        episode_counter += 1
-        ep_title = (msg.text or file_name or f"Episodio {episode_counter}").split("\n")[0][:80]
+        ep_number = idx + 1
+        ep_title = (msg.text or file_name or f"Episodio {ep_number}").split("\n")[0][:80]
         ep_link = (
             f"https://t.me/c/{str(msg.chat_id).replace('-100', '')}/{msg.id}"
             if hasattr(msg, "chat_id")
@@ -730,9 +744,28 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
             """INSERT INTO item_episodes
                (item_id, episode_number, season_number, title, telegram_msg_id, telegram_link, duration, file_size, file_name, caption, tg_user_id, is_mkv)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (cat_id, episode_counter, 1, ep_title, msg.id, ep_link, duration, file_size, file_name, msg.text or "", tg_user_id,
+            (cat_id, ep_number, 1, ep_title, msg.id, ep_link, duration, file_size, file_name, msg.text or "", tg_user_id,
              1 if (file_name or "").lower().endswith(".mkv") else 0),
         )
+
+    # Normalización: episodios del ítem secuenciales 1..N por telegram_msg_id.
+    # Corrige duplicados/huecos de escaneos anteriores (mismo criterio que el
+    # reparo offline). Solo toca episode_number.
+    try:
+        _rows = cursor.execute(
+            "SELECT id, episode_number FROM item_episodes WHERE (item_id = ? OR item_id = ?) ORDER BY telegram_msg_id ASC",
+            (cat_id, item_id)).fetchall()
+        _n = 0
+        for _r in (_rows or []):
+            _n += 1
+            try:
+                _cur = int(_r["episode_number"] or 0)
+            except Exception:
+                _cur = 0
+            if _cur != _n:
+                cursor.execute("UPDATE item_episodes SET episode_number=? WHERE id=?", (_n, _r["id"]))
+    except Exception:
+        pass
 
     if should_close:
         conn.commit()
@@ -1392,6 +1425,14 @@ def _extract_metadata_from_text(text):
         val = m.group(1).strip()
         if val.lower() not in ("n/a", "na", "none", ""):
             metadata["type"] = val
+
+    # Main Title explícito: viaja crudo para que insert lo use como flat
+    # directo (sin cálculo). No se muestra en info_messages (se filtra allí).
+    m = re.search(r"(?i)main\s*title\s*[:=\s\-]+\s*(.+)", text)
+    if m:
+        val = m.group(1).strip()
+        if val:
+            metadata["main_title_raw"] = val
 
     m = re.search(r"(?i)votes?\s*[:=\s\-]\s*([\d.,]+)", text)
     if m:

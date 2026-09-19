@@ -281,19 +281,72 @@
             };
             var bUrl = document.getElementById('enricher-cover-url');
             if (bUrl) bUrl.onclick = function () {
-                var u = prompt('URL de la imagen de portada:', 'https://');
-                if (u === null) return;
-                u = (u || '').trim();
-                if (!u) return;
-                // Sin b64: el servidor la descarga vía poster_url al guardar
-                setCustomPoster(u, '', u);
-                setStatus('Carátula: URL personalizada (se descarga al guardar)');
+                function ask(def) {
+                    var u = prompt('URL de la imagen de portada:', def || 'https://');
+                    if (u === null) return;
+                    u = (u || '').trim();
+                    if (!u) return;
+                    // Sin b64: el servidor la descarga vía poster_url al guardar
+                    setCustomPoster(u, '', u);
+                    setStatus('Carátula: URL personalizada (se descarga al guardar)');
+                }
+                // Si el portapapeles trae una URL, pre-rellenar con ella.
+                try {
+                    if (navigator.clipboard && navigator.clipboard.readText) {
+                        navigator.clipboard.readText().then(function (t) {
+                            t = (t || '').trim();
+                            if (/^https?:\/\/\S+$/i.test(t) && t.length < 2000) ask(t);
+                            else ask('https://');
+                        }, function () { ask('https://'); });
+                    } else ask('https://');
+                } catch (e) { ask('https://'); }
             };
+            // Pegado por evento (Ctrl+V en el modal): funciona donde
+            // navigator.clipboard.read() está bloqueado (http remoto, iframes,
+            // permisos). Se auto-elimina al cerrar el editor.
+            function onPasteEvent(e) {
+                try {
+                    try {
+                        if (!overlay || !document.contains(overlay)) {
+                            document.removeEventListener('paste', onPasteEvent);
+                            return;
+                        }
+                    } catch (e0) { return; }
+                    var cd = e.clipboardData || window.clipboardData;
+                    if (!cd || !cd.items) return;
+                    for (var i = 0; i < cd.items.length; i++) {
+                        var it = cd.items[i];
+                        if (it.type && it.type.indexOf('image/') === 0) {
+                            var blob = it.getAsFile ? it.getAsFile() : null;
+                            if (!blob) continue;
+                            if (blob.size > 10 * 1024 * 1024) { setStatus('Imagen mayor de 10MB', true); return; }
+                            try { e.preventDefault(); } catch (e2) {}
+                            var rd = new FileReader();
+                            rd.onload = function () { setCustomPoster(rd.result, rd.result, null); setStatus('Carátula: imagen pegada (Ctrl+V)'); };
+                            rd.readAsDataURL(blob);
+                            return;
+                        }
+                    }
+                } catch (ex) {}
+            }
+            try { document.addEventListener('paste', onPasteEvent); } catch (e2) {}
             var bPaste = document.getElementById('enricher-cover-paste');
             if (bPaste) bPaste.onclick = function () {
                 hideEnricherCoverMenu();
                 try {
-                    if (!navigator.clipboard || !navigator.clipboard.read) { setStatus('Portapapeles no disponible: usa Subir o URL', true); return; }
+                    // Sin clipboard.read (http remoto/iframe): abrir el selector
+                    // de fichero como alternativa inmediata (equivale a pegar
+                    // la imagen guardada; viaja en b64 sin pasar por Telegram).
+                    if (!navigator.clipboard || !navigator.clipboard.read) {
+                        var fAlt = document.getElementById('enricher-cover-file');
+                        if (fAlt) {
+                            setStatus('Portapapeles directo no disponible: elige la imagen');
+                            fAlt.click();
+                            return;
+                        }
+                        setStatus('Portapapeles no disponible: usa Subir o URL', true);
+                        return;
+                    }
                     navigator.clipboard.read().then(function (items) {
                         var done = false;
                         for (var i = 0; i < (items || []).length && !done; i++) {
@@ -621,14 +674,58 @@
                     applyTplBtn.onclick = function(){
                         if (!selectedDetails) { setStatus('Selecciona un título de la lista primero', true); return; }
                         var curTpl2 = rawEl ? rawEl.value : (sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].getAttribute('data-tpl') : '');
-                        document.getElementById('enricher-text').value = renderTpl(selectedDetails, category, subcategory, original.description||'', curTpl2);
-                        setStatus('Plantilla aplicada · edita el caption si quieres');
+                        var rendered = renderTpl(selectedDetails, category, subcategory, original.description||'', curTpl2);
+                        document.getElementById('enricher-text').value = rendered;
+                        // Tags {AI:...}: se resuelven en servidor (con {title} etc.
+                        // ya sustituidos por el contexto del detalle activo).
+                        if (rendered.indexOf('{AI:') !== -1) {
+                            setStatus('Resolviendo IA…');
+                            resolveAiTags(rendered, selectedDetails);
+                        } else {
+                            setStatus('Plantilla aplicada · edita el caption si quieres');
+                        }
                     };
                 }
             }).catch(function(){
                 sel.innerHTML = '<option value="__fallback__">Default (fallback)</option>';
             });
         })();
+
+        // ─── Resolución de {AI:...} vía servicio central ───
+        function aiContextFromDetails(d) {
+            if (!d) return {};
+            function jv(v) {
+                if (!v) return '';
+                if (Array.isArray(v)) return v.join(', ');
+                if (typeof v === 'string') {
+                    try { var arr = JSON.parse(v); if (Array.isArray(arr)) return arr.join(', '); } catch (e) { }
+                }
+                return String(v);
+            }
+            return {
+                Title: d.api_title || '', title: d.api_title || '',
+                Year: String(d.api_year || ''), year: String(d.api_year || ''),
+                Description: d.api_description || '', description: d.api_description || '',
+                Sinopsis: d.api_description || '', sinopsis: d.api_description || '',
+                Genres: jv(d.api_genres), genres: jv(d.api_genres),
+                Director: d.api_director || d.api_author || '', director: d.api_director || d.api_author || '',
+                Cast: jv(d.api_cast), cast: jv(d.api_cast),
+                Original_Title: d.api_original_title || ''
+            };
+        }
+        function resolveAiTags(rendered, details) {
+            apiFetch('/api/ai/resolve-tags', {
+                text: rendered,
+                context: aiContextFromDetails(details)
+            }, function(res) {
+                if (!res) { setStatus('IA sin respuesta (¿proveedores configurados?)', true); return; }
+                var box = document.getElementById('enricher-text');
+                if (box && typeof res.text === 'string') box.value = res.text;
+                if (res.resolved) setStatus('Plantilla aplicada · IA resolvió ' + res.resolved + ' tag(s)');
+                else if (res.errors && res.errors.length) setStatus('IA falló: ' + (res.errors[0].error || 'error'), true);
+                else setStatus('Plantilla aplicada · edita el caption si quieres');
+            });
+        }
 
         function setStatus(msg, isErr) {
             var el = document.getElementById('enricher-status');
@@ -974,7 +1071,9 @@
                                 var _capEl = document.getElementById('enricher-text');
                                 if (_capEl && !_capEl.value.trim()) {
                                     var _rawEl = document.getElementById('enricher-tpl-raw');
-                                    _capEl.value = renderTpl(det, category, subcategory, original.description || '', _rawEl ? _rawEl.value : '');
+                                    var _auto = renderTpl(det, category, subcategory, original.description || '', _rawEl ? _rawEl.value : '');
+                                    _capEl.value = _auto;
+                                    if (_auto.indexOf('{AI:') !== -1) resolveAiTags(_auto, det);
                                 }
                             } catch (_eCap) {}
                             setStatus('Fuente activa: ' + (det.api_title || det.title || '—') + ' · pulsa Aplicar para usar la plantilla');
@@ -1019,6 +1118,29 @@
         function backToHero() {
             try { overlay.remove(); } catch (e) {}
             try { if (window.openDetails) window.openDetails(itemId); } catch (e2) {}
+            // El H1 prefiere group_title: si el guardado cambió el título, forzarlo
+            // desde la respuesta (cinturón para cualquier ruta stale del detalle).
+            try {
+                var _ft = (window._enricherFreshTitle && window._enricherFreshTitle.id === itemId)
+                    ? window._enricherFreshTitle.title : null;
+                window._enricherFreshTitle = null;
+                if (_ft) {
+                    var _tries = 0;
+                    var _forceT = setInterval(function() {
+                        try {
+                            _tries++;
+                            var tel = document.getElementById('detail-title');
+                            var dmodal = document.getElementById('detail-modal');
+                            if (tel && dmodal && dmodal.classList.contains('hidden') === false) {
+                                if (tel.textContent !== _ft) tel.textContent = _ft;
+                                clearInterval(_forceT);
+                            } else if (_tries > 10 || (dmodal && dmodal.classList.contains('hidden'))) {
+                                clearInterval(_forceT);
+                            }
+                        } catch (ee) { clearInterval(_forceT); }
+                    }, 300);
+                }
+            } catch (e3) {}
             // Romper caché del cover en hero y grid (el blob cambió con la misma URL).
             setTimeout(function () {
                 try {
@@ -1089,17 +1211,22 @@
             .then(function (res) {
                 if (!res.ok) { setStatus((res.j && (res.j.detail || res.j.error)) || 'Error', true); return; }
                 try {
-                    // El backend ya propagó el título al catálogo: reflejarlo en el
-                    // grid en memoria y en el DOM sin recargar la página.
+                    // El backend ya propagó el título al catálogo: reflejar título
+                    // y cover en el grid en memoria y en el DOM, sin recargar.
                     var _rj = res.j || {};
-                    if (_rj.title_applied && _rj.catalog_title && window.Catalog && window.Catalog.currentItems) {
-                        var _items = window.Catalog.currentItems;
-                        for (var _k = 0; _k < _items.length; _k++) {
-                            if (String(_items[_k].item_id) === String(itemId)) { _items[_k].title = _rj.catalog_title; break; }
+                    var _nt = (_rj.title_applied && _rj.catalog_title) ? _rj.catalog_title : null;
+                    if (_nt) { try { window._enricherFreshTitle = { id: itemId, title: _nt }; } catch (_e0) {} }
+                    try {
+                        if (window.Catalog && typeof window.Catalog.refreshGridCover === 'function') window.Catalog.refreshGridCover(itemId, _nt);
+                        else if (_nt && window.Catalog && window.Catalog.currentItems) {
+                            var _items = window.Catalog.currentItems;
+                            for (var _k = 0; _k < _items.length; _k++) {
+                                if (String(_items[_k].item_id) === String(itemId)) { _items[_k].title = _nt; break; }
+                            }
+                            var _node = document.querySelector('.grid-item[data-id="' + itemId + '"] .grid-item-title');
+                            if (_node) _node.textContent = _nt;
                         }
-                        var _node = document.querySelector('.grid-item[data-id="' + itemId + '"] .grid-item-title');
-                        if (_node) _node.textContent = _rj.catalog_title;
-                    }
+                    } catch (_e) {}
                 } catch (_e) {}
                 var _msg = applyTelegram ? 'Aplicado en Telegram y guardado local' : 'Guardado local';
                 try {
@@ -1122,9 +1249,9 @@
                     try { overlay.remove(); } catch (_e5) {}
                     setTimeout(function () {
                         try {
-                            var v = Date.now();
-                            var gridImg = document.querySelector('.grid-item[data-id="' + itemId + '"] img');
-                            if (gridImg) gridImg.src = '/api/cover/' + encodeURIComponent(itemId) + '?v=' + v;
+                            var _nt2 = null;
+                            try {                             var _rjj = res.j || {}; if (_rjj.title_applied && _rjj.catalog_title) _nt2 = _rjj.catalog_title; } catch (_e7) {}
+                            if (window.Catalog && typeof window.Catalog.refreshGridCover === 'function') window.Catalog.refreshGridCover(itemId, _nt2);
                         } catch (_e6) {}
                     }, 1500);
                     return;

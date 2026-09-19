@@ -377,19 +377,35 @@ async def save_local(body: _SaveIn, request: Request):
             "serial": serial}
 
 
-def _active_telethon_bots():
+def _write_client_type():
+    """Tipo de cliente para ediciones: el seleccionado en Comportamiento."""
+    try:
+        import services.userbot_service as ubs
+        return ubs.get_preferred_client_type()
+    except Exception:
+        return "telethon"
+
+
+def _active_write_bots():
+    """tg_user_id con sesión activa DEL TIPO seleccionado (no siempre telethon)."""
+    ctype = _write_client_type()
     try:
         import services.userbot_service as ubs
         out = []
         for r in (ubs.list_sessions() or []):
             try:
-                if r.get("is_active") == 1 and (r.get("client_type") or "telethon") == "telethon" and r.get("tg_user_id"):
+                if r.get("is_active") == 1 and (r.get("client_type") or "telethon") == ctype and r.get("tg_user_id"):
                     out.append(int(r["tg_user_id"]))
             except Exception:
                 pass
         return out
     except Exception:
         return []
+
+
+def _active_telethon_bots():
+    # Compat: delega al tipo seleccionado.
+    return _active_write_bots()
 
 
 @router.post("/api/collections/save")
@@ -536,11 +552,12 @@ async def _save_edit(collection_item_id: str, text: str):
         except Exception:
             pass
     svc = get_telegram_service()
-    last_err = "sin userbots telethon activos"
-    for tg_uid in _active_telethon_bots():
+    ctype = _write_client_type()
+    last_err = "sin userbots %s activos" % ctype
+    for tg_uid in _active_write_bots():
         try:
             res = await svc.edit_message(channel_id=channel_id, msg_id=target, text=text,
-                                         tg_user_id=tg_uid, client_type="telethon")
+                                         tg_user_id=tg_uid, client_type=ctype)
             if isinstance(res, dict) and res.get("success", True) and not res.get("error"):
                 _update_central_raw(collection_item_id, text)
                 return {"success": True, "mode": "edit", "tg_user_id": tg_uid, "item_id": collection_item_id}
@@ -619,12 +636,13 @@ async def _save_cover_edit(collection_item_id: str, caption: str, img_bytes=None
         except Exception:
             pass
     svc = get_telegram_service()
-    last_err = "sin userbots telethon activos"
-    for tg_uid in _active_telethon_bots():
+    ctype = _write_client_type()
+    last_err = "sin userbots %s activos" % ctype
+    for tg_uid in _active_write_bots():
         try:
             res = await svc.edit_message(channel_id=channel_id, msg_id=msg_id, text=caption or "",
                                          file_bytes=img_bytes, file_name="cover.jpg",
-                                         tg_user_id=tg_uid, client_type="telethon")
+                                         tg_user_id=tg_uid, client_type=ctype)
             if isinstance(res, dict) and res.get("success", True) and not res.get("error"):
                 return True, ""
             last_err = str((res or {}).get("error") or res)

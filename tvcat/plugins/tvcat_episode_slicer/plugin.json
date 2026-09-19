@@ -1,0 +1,11 @@
+{
+    "name": "tvcat_episode_slicer",
+    "displayName": "Episode Slicer",
+    "description": "Corta la lista de episodios de la heropage para generar nuevos títulos en el catálogo (split-move estilo TGHirayi).",
+    "type": "heropage-action",
+    "version": "0.2.0",
+    "defaultEnabled": true,
+    "icon": "static/plugin_icon.png",
+    "iconEmoji": "✂️",
+    "js": ["slicer.js?v=20260915h"]
+}

@@ -103,76 +103,6 @@ def _get_my_userbots() -> List[Dict[str, Any]]:
         return []
 
 
-def _title_from_cover_text(text: str) -> str:
-    """2026-09-04: extrae el título del tag como un mensaje nativo. Ignora
-    placeholders, tags sin resolver ({...}) y líneas vacías.
-    2026-09-10: las etiquetas de variante (Title Alt1, Title ES, Title Latam...)
-    NO son el título principal (van a alt_titles vía _parse_cover_alt_titles).
-    2026-09-12 (directiva usuario): PRIMERO "Original title" / "Título original"
-    y después display (Title/Título/Nombre, sin variantes). El nombre visible
-    es el original; si no hay original, el display."""
-    def _scan(pattern: str) -> str:
-        try:
-            import re as _re
-            _await_hash = False
-            for _line in (text or "").split("\n"):
-                _l = _line.strip()
-                if not _l:
-                    continue
-                if _await_hash and _l.startswith("#"):
-                    _v = _l.lstrip("#").strip().replace("_", " ")
-                    if len(_v) >= 2:
-                        return _v[:200]
-                    _await_hash = False
-                    continue
-                _await_hash = False
-                _m = _re.match(pattern, _l)
-                if not _m:
-                    continue
-                _v = _m.group(2).strip()
-                if not _v or _v in (":", "-", ""):
-                    _await_hash = True
-                    continue
-                if "{" in _v or "}" in _v:
-                    continue
-                if len(_v) < 2:
-                    continue
-                return _v[:200]
-        except Exception:
-            pass
-        return ""
-
-    _orig = _scan(r"(?i)^(original\s+title|t[ií]tulo\s+original)\s*[:=\-]?\s*(.*?)\s*$")
-    if _orig:
-        return _orig
-    return _scan(r"(?i)^(t[ií]tulo|titulo|title|nombre)(?!\s+(?:alt\d*|es(?:pa[ñn]a)?|latam|latin[oa]|mx|m[ée]xico|original)\b)\s*[:=\-]?\s*(.*?)\s*$")
-
-
-# Mismo patrón que scanner._parse_alt_titles (canónico en
-# plugins/tvcat_tgindex/scanner.py). Mantener sincronizado: líneas Title ES /
-# Title Latam / Title Alt... del cover → variantes (columna alt_titles).
-_COVER_ALT_RE = re.compile(
-    r"(?i)(?:title\s+alt\d*\b\.?|alt[\s.]*title|alt[\s.]*|alternative|syn[\s.]*"
-    r"|sin[oó]nimo|synonym|(?:title|t[ií]tulo)\s+(?:alt\d*|es(?:pa[ñn]a)?|latam|latin[oa]|mx|m[ée]xico)\b\.?)"
-    r"\s*[:=\s\-]\s*(.+)"
-)
-
-
-def _parse_cover_alt_titles(text: str) -> list:
-    """Extrae variantes de título del caption (Title ES, Title Latam, Title Alt...)."""
-    if not text:
-        return []
-    out = []
-    for m in _COVER_ALT_RE.finditer(text):
-        v = (m.group(1) or "").strip().rstrip(",")
-        # Ignorar placeholders/tags sin resolver y valores triviales
-        if not v or len(v) < 2 or "{" in v or "}" in v:
-            continue
-        if v not in out:
-            out.append(v)
-    return out
-
-
 def _resolve_link(item_id: str) -> tuple:
     """Devuelve (telegram_link, telegram_msg_id, channelid_msgid) para el item."""
     try:
@@ -665,114 +595,20 @@ async def save_enriched(item_id: str, body: SaveReq, request: Request):
     ))
     conn.commit()
     conn.close()
-    # 2026-09-04: propagar el título del tag (Title/Título/Nombre) al catálogo,
-    # como un mensaje nativo (sin tag -> no se toca; item_id intacto).
-    _catalog_title = _title_from_cover_text(body.cover_text or "")
-    _title_applied = False
-    if not _catalog_title:
-        print(f" [Enricher] sin título extraíble del cover ({item_id}), catálogo intacto", flush=True)
-    if _catalog_title:
-        try:
-            from services.catalog_service import get_conn as _cc
-            _c = _cc()
-            _row = _c.execute("SELECT title, group_title, group_title_flat FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
-            if _row and (_row["title"] or "") != _catalog_title:
-                print(f" [Enricher] título catálogo '{(_row['title'] or '')}' -> '{_catalog_title}' ({item_id})", flush=True)
-                _old_flat = (_row["group_title_flat"] or "")
-                _others = _c.execute("SELECT COUNT(*) FROM unified_catalog WHERE group_title_flat=? AND item_id!=?", (_old_flat, item_id)).fetchone()[0] if _old_flat else 0
-                import re as _re2
-                _flat = _re2.sub(r"[^a-zA-Z0-9]", "", _catalog_title).lower()
-                if _others and (_row["group_title"] or "") == (_row["title"] or ""):
-                    # Miembro de grupo que lidera: renombrar grupo entero preserva variantes
-                    _c.execute("UPDATE unified_catalog SET title=CASE WHEN item_id=? THEN ? ELSE title END, group_title=?, group_title_flat=? WHERE group_title_flat=?", (item_id, _catalog_title, _catalog_title, _flat, _old_flat))
-                elif _others:
-                    _c.execute("UPDATE unified_catalog SET title=? WHERE item_id=?", (_catalog_title, item_id))
-                else:
-                    _c.execute("UPDATE unified_catalog SET title=?, group_title=?, group_title_flat=? WHERE item_id=?", (_catalog_title, _catalog_title, _flat, item_id))
-                _c.commit()
-                _title_applied = True
-            elif _row:
-                print(f" [Enricher] título sin cambios ({item_id}): catálogo ya '{(_row['title'] or '')}'", flush=True)
-            else:
-                print(f" [Enricher] item sin fila en catálogo ({item_id}), no se propaga título", flush=True)
-            _c.close()
-        except Exception as _e:
-            print(f" [Enricher] title propagate error (central): {_e}")
-        # Réplica en la DB del plugin origen (si la resuelve el core, no revierte en sync)
-        try:
-            import glob as _g, os as _os, sqlite3 as _sq
-            from services.catalog_service import BASE_DIR as _bd
-            for _pdb in _g.glob(_os.path.join(_bd, "plugins", "*", "data", "tvcat.db")):
-                try:
-                    _pc = _sq.connect(_pdb, timeout=10)
-                    _pr = _pc.execute("SELECT title FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
-                    if _pr:
-                        _pc.execute("UPDATE unified_catalog SET title=? WHERE item_id=?", (_catalog_title, item_id))
-                        _pc.commit()
-                    _pc.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    # 2026-09-10: propagar variantes (Title ES, Title Latam, Title Alt...) a la
-    # columna alt_titles para que la búsqueda las encuentre sin re-escaneo.
-    _cover_alts = _parse_cover_alt_titles(body.cover_text or "")
-    _alts_applied = []
-    if _cover_alts:
-        try:
-            from services.catalog_service import get_conn as _cc2
-            _c2 = _cc2()
-            _arow = _c2.execute("SELECT title, alt_titles FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
-            if _arow:
-                try:
-                    _cur = json.loads(_arow["alt_titles"] or "[]") or []
-                except Exception:
-                    _cur = []
-                _have = {str(x).strip().lower() for x in _cur if str(x).strip()}
-                if (_arow["title"] or "").strip():
-                    _have.add((_arow["title"] or "").strip().lower())
-                _merged = list(_cur)
-                for _a in _cover_alts:
-                    if _a.strip().lower() not in _have:
-                        _merged.append(_a)
-                        _have.add(_a.strip().lower())
-                        _alts_applied.append(_a)
-                if _alts_applied:
-                    _c2.execute("UPDATE unified_catalog SET alt_titles=? WHERE item_id=?",
-                                (json.dumps(_merged, ensure_ascii=False), item_id))
-                    _c2.commit()
-            _c2.close()
-        except Exception as _e:
-            print(f" [Enricher] alts propagate error (central): {_e}")
-        # Réplica en la DB del plugin origen
-        if _alts_applied:
-            try:
-                import glob as _g2, os as _os2, sqlite3 as _sq2
-                from services.catalog_service import BASE_DIR as _bd2
-                for _pdb in _g2.glob(_os2.path.join(_bd2, "plugins", "*", "data", "tvcat.db")):
-                    try:
-                        _pc2 = _sq2.connect(_pdb, timeout=10)
-                        _prow = _pc2.execute("SELECT alt_titles FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
-                        if _prow is not None:
-                            try:
-                                _pcur = json.loads(_prow["alt_titles"] or "[]") or []
-                            except Exception:
-                                _pcur = []
-                            _phave = {str(x).strip().lower() for x in _pcur if str(x).strip()}
-                            _pmerged = list(_pcur)
-                            for _a in _alts_applied:
-                                if _a.strip().lower() not in _phave:
-                                    _pmerged.append(_a)
-                                    _phave.add(_a.strip().lower())
-                            _pc2.execute("UPDATE unified_catalog SET alt_titles=? WHERE item_id=?",
-                                         (json.dumps(_pmerged, ensure_ascii=False), item_id))
-                            _pc2.commit()
-                        _pc2.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-    return {"ok": True, "channelid_msgid": key, "title_applied": _title_applied, "catalog_title": _catalog_title if _title_applied else "", "alts_applied": _alts_applied}
+    # Propagación centralizada (services/enrich_apply): título del tag +
+    # variantes al catálogo central, con réplica en DBs de plugins.
+    # (Misma lógica que había inline aquí; ahora compartida con el reapply
+    # post-rebuild para que no se pierda al rearrancar.)
+    try:
+        from services.enrich_apply import apply_enriched_title as _apply_enriched_title
+        _ap = _apply_enriched_title(item_id, body.cover_text or "") or {}
+    except Exception as _e_ap:
+        print(f" [Enricher] apply error: {_e_ap}")
+        _ap = {}
+    _title_applied = bool(_ap.get("title_applied"))
+    _c_title = _ap.get("catalog_title") or ""
+    _alts_applied = _ap.get("alts_applied") or []
+    return {"ok": True, "channelid_msgid": key, "title_applied": _title_applied, "catalog_title": _c_title if _title_applied else "", "alts_applied": _alts_applied}
 
 
 @router.post("/api/enricher/item/{item_id}/apply")
@@ -781,12 +617,21 @@ async def apply_enriched(item_id: str, body: SaveReq, request: Request):
     link, mid, key = _resolve_link(item_id)
     if not key or not mid:
         raise HTTPException(status_code=404, detail="item not found")
+    # Guardar local primero (reflejo inmediato; propaga título al catálogo)
+    saved = await save_enriched(item_id, body, request)
+    # Ancla ficticia (corte de slicer / genérico topo -999/-1000): no hay mensaje
+    # real que editar en Telegram; solo guardado local (clave propia por parte).
+    if int(mid) in (-999, -1000):
+        return {"ok": True, "channelid_msgid": key, "edited": False,
+                "reason": "cover ficticio: solo guardado local",
+                "title_applied": bool((saved or {}).get("title_applied")),
+                "catalog_title": (saved or {}).get("catalog_title") or ""}
     # Authorship check
     auth = await get_authorship(item_id, request)
     if not auth.get("is_mine"):
         raise HTTPException(status_code=403, detail="El mensaje no es de ninguno de tus userbots (no editable)")
 
-    # Guardar local primero (reflejo inmediato; propaga título al catálogo)
+    # Guardar local (reflejo inmediato; propaga título al catálogo)
     saved = await save_enriched(item_id, body, request)
 
     # Editar en Telegram (channel_id + msg_id)

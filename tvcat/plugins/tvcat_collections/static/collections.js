@@ -3,7 +3,7 @@
  * Botones con clases globales btn-primary/btn-secondary/btn-danger.
  * ES5 estricto (SmartTV antigua): sin fetch/flex/arrow functions. */
 (function() {
-    try { console.log('[Collections] collections.js v1.1.6'); } catch (e) {}
+    try { console.log('[Collections] collections.js v1.1.7'); } catch (e) {}
     var ICON_HEAD = '<img src="/plugin-static/tvcat_collections/plugin_button.png" style="width:20px;height:20px;vertical-align:middle;" onerror="this.outerHTML=\'📚\'"> ';
     var HERO_ADD = '<img src="/plugin-static/tvcat_collections/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'📚\'">';
     var HERO_EDIT = '<img src="/plugin-static/tvcat_collections/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'✏️\'">';
@@ -78,8 +78,8 @@
             '</div>' +
             '<input type="file" id="col-cover-file" accept="image/*" style="display:none;">' +
             '</div>' +
-            '<div style="overflow:hidden;"><label>Nombre:<br><input id="col-name" value="' + esc(st.name) + '" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;"></label>' +
-            '<label>Descripción:<br><textarea id="col-desc" rows="4" placeholder="Sinopsis, notas…" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;resize:vertical;">' + esc(st.description || '') + '</textarea></label></div>' +
+            '<div style="overflow:hidden;"><label>Nombre:<br><span style="display:flex;gap:6px;"><input id="col-name" value="' + esc(st.name) + '" style="flex:1;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;min-width:0;"><button id="col-ai-name" class="btn-secondary" title="IA: sugerir nombre de colección según los títulos añadidos" style="padding:10px 12px;font-size:0.95rem;flex-shrink:0;">🤖</button></span></label>' +
+            '<label>Descripción:<br><span style="display:flex;gap:6px;align-items:flex-start;"><textarea id="col-desc" rows="4" placeholder="Sinopsis, notas…" style="flex:1;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;resize:vertical;min-width:0;">' + esc(st.description || '') + '</textarea><button id="col-ai-desc" class="btn-secondary" title="IA: generar descripción según el nombre y los títulos añadidos" style="padding:10px 12px;font-size:0.95rem;flex-shrink:0;">🤖</button></span></label></div>' +
             '<div style="clear:both;"></div></div>';
         h += '<div id="col-rows" style="margin:8px 0;max-height:300px;overflow:auto;border:1px solid #27272a;border-radius:4px;"></div>';
         h += '<div style="margin:8px 0;"><input id="col-search" placeholder="Buscar título para añadir…" style="width:60%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;"> ' +
@@ -272,6 +272,119 @@
             });
         }
         box.querySelector('#col-search-btn').onclick = doSearch;
+        // ─── IA: generar descripción / sugerir nombre ───
+        function colAiContext() {
+            var nm = '', titles = [];
+            try { nm = box.querySelector('#col-name').value || st.name || ''; } catch (e) { nm = st.name || ''; }
+            try {
+                var rows = box.querySelectorAll('#col-rows .col-row-title');
+                for (var i = 0; i < rows.length; i++) {
+                    var t = (rows[i].textContent || '').trim();
+                    if (t) titles.push(t);
+                }
+            } catch (e2) {}
+            if (!titles.length) {
+                for (var j = 0; j < (st.entries || []).length; j++) {
+                    var en = st.entries[j] || {};
+                    var et = ((en.title || '') + (en.year ? ' (' + en.year + ')' : '')).trim();
+                    if (et) titles.push(et);
+                }
+            }
+            return { name: nm, titles: titles };
+        }
+        function colAiCall(prompt, btn, apply) {
+            if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+            // Sin max_tokens en código: la longitud la controla el prompt
+            // (y el tope del proveedor). Un mensaje Telegram admite ~4k.
+            window.API.ajax({
+                method: 'POST', url: '/api/ai/complete',
+                data: { prompt: prompt },
+                success: function(r) {
+                    if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
+                    if (r && r.ok && r.text) { apply(r.text); toast('IA (' + (r.provider_name || '?') + ')'); }
+                    else alert('IA sin respuesta: ' + ((r && r.error) || 'error'));
+                },
+                error: function() {
+                    if (btn) { btn.disabled = false; btn.textContent = '🤖'; }
+                    alert('Error llamando a la IA (¿proveedores configurados?)');
+                }
+            });
+        }
+        // Plantillas de prompt (config IA; con fallback local si no hay acceso).
+        var _aiTpl = null;
+        function colAiTemplates(cb) {
+            if (_aiTpl) { cb(_aiTpl); return; }
+            _aiTpl = {
+                collection_name: 'Sugiere un nombre corto en español para una colección que contiene estos {count} títulos:\n{titles}\nResponde SOLO con el nombre, sin comillas ni explicaciones.',
+                collection_desc: 'Genera una descripción breve en español, sin spoilers, para una colección llamada "{name}" que contiene estos {count} títulos:\n{titles}\nResponde SOLO con la descripción (2-4 frases), sin comillas ni explicaciones.'
+            };
+            window.API.ajax({
+                url: '/api/ai/config',
+                success: function(r) {
+                    try {
+                        var p = (r && r.prompts) || {};
+                        if (p.collection_name) _aiTpl.collection_name = p.collection_name;
+                        if (p.collection_desc) _aiTpl.collection_desc = p.collection_desc;
+                    } catch (e) {}
+                    cb(_aiTpl);
+                },
+                error: function() { cb(_aiTpl); }
+            });
+        }
+        function colAiRender(key, ctx) {
+            var tpl = (_aiTpl && _aiTpl[key]) || '';
+            var lst = [];
+            for (var i = 0; i < ctx.titles.length && i < 40; i++) lst.push('- ' + ctx.titles[i]);
+            return tpl.replace('{titles}', lst.join('\n')).replace('{name}', ctx.name || '').replace('{count}', String(lst.length));
+        }
+        // Pre-modal: muestra el prompt completo editable antes de lanzar.
+        function colAiPromptModal(title, prompt, btn, apply) {
+            closeAiPromptModal();
+            var o = document.createElement('div');
+            o.id = 'col-ai-overlay';
+            o.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.75);z-index:60000;display:block;overflow:auto;';
+            var bx = document.createElement('div');
+            bx.style.cssText = 'background:#18181b;color:#f4f4f5;max-width:560px;margin:60px auto;padding:16px;border:1px solid #3f3f46;border-radius:8px;';
+            bx.innerHTML = '<h3 style="margin:0 0 8px 0;">🤖 ' + esc(title) + '</h3>' +
+                '<div style="font-size:0.8rem;color:#a1a1aa;margin-bottom:6px;">Revisa o edita el prompt antes de enviarlo a la IA:</div>' +
+                '<textarea id="col-ai-prompt" rows="10" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;resize:vertical;font-size:0.85rem;"></textarea>' +
+                '<div style="text-align:right;margin-top:10px;">' +
+                '<button id="col-ai-cancel" class="btn-secondary" style="display:inline-block;padding:10px 20px;font-size:0.95rem;">Cancelar</button> ' +
+                '<button id="col-ai-ok" class="btn-primary" style="display:inline-block;padding:10px 20px;font-size:0.95rem;">Aceptar</button></div>';
+            o.appendChild(bx);
+            document.body.appendChild(o);
+            o.onclick = function(e) { if (e.target === o) closeAiPromptModal(); };
+            bx.querySelector('#col-ai-prompt').value = prompt;
+            bx.querySelector('#col-ai-cancel').onclick = closeAiPromptModal;
+            bx.querySelector('#col-ai-ok').onclick = function() {
+                var p = bx.querySelector('#col-ai-prompt').value || '';
+                closeAiPromptModal();
+                if (!p.trim()) return;
+                colAiCall(p, btn, apply);
+            };
+        }
+        function closeAiPromptModal() {
+            var o = document.getElementById('col-ai-overlay');
+            if (o && o.parentNode) o.parentNode.removeChild(o);
+        }
+        var aiDescBtn = box.querySelector('#col-ai-desc');
+        if (aiDescBtn) aiDescBtn.onclick = function() {
+            var ctx = colAiContext();
+            if (!ctx.titles.length) { alert('Añade títulos a la colección primero.'); return; }
+            colAiTemplates(function() {
+                colAiPromptModal('Generar descripción', colAiRender('collection_desc', ctx), aiDescBtn,
+                    function(t) { box.querySelector('#col-desc').value = t; });
+            });
+        };
+        var aiNameBtn = box.querySelector('#col-ai-name');
+        if (aiNameBtn) aiNameBtn.onclick = function() {
+            var ctx = colAiContext();
+            if (!ctx.titles.length) { alert('Añade títulos a la colección primero.'); return; }
+            colAiTemplates(function() {
+                colAiPromptModal('Sugerir nombre', colAiRender('collection_name', ctx), aiNameBtn,
+                    function(t) { box.querySelector('#col-name').value = t.trim().replace(/^["«»]+|["«»]+$/g, ''); });
+            });
+        };
         box.querySelector('#col-save').onclick = function() {
             st.name = box.querySelector('#col-name').value || st.name;
             st.description = box.querySelector('#col-desc').value || '';
@@ -378,18 +491,46 @@
                 var ta = (a.title || '').toLowerCase(), tb = (b.title || '').toLowerCase();
                 return ta < tb ? -1 : (ta > tb ? 1 : 0);
             });
+            // Filtro persistente (localStorage): al reabrir se restaura, así la
+            // recién creada se ve filtrada. El mismo texto es el nombre nuevo.
+            var savedFilter = '';
+            try { savedFilter = localStorage.getItem('tvcat_collections_filter') || ''; } catch (e) {}
             var h = '<h3 style="margin:0 0 8px 0;">' + ICON_HEAD + 'Añadir «' + esc(item.title) + '» a colección</h3>';
-            if (!all.length) h += '<div style="color:#a1a1aa;font-size:0.8rem;margin-bottom:8px;">Aún no hay colecciones</div>';
-            for (var i = 0; i < all.length; i++) {
-                h += '<div style="padding:6px;border-bottom:1px solid #27272a;">' + thumbHtml(all[i], 28, 42) + ' ' + esc(all[i].title) +
-                    ' <span style="color:#a1a1aa;">(' + all[i].entries + ')</span>' +
-                    ' <button class="btn-secondary" data-col="' + esc(all[i].item_id) + '" style="padding:8px 14px;font-size:0.95rem;float:right;">Añadir aquí</button><div style="clear:both;"></div></div>';
-            }
-            h += '<div style="margin-top:12px;"><label>Nueva:<br><input id="col-new-name" placeholder="Nombre de la colección" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;"></label></div>';
+            h += '<div style="margin-bottom:8px;"><label>Nueva:<br>' +
+                '<span style="display:flex;gap:8px;">' +
+                '<input id="col-new-name" placeholder="Nombre de la colección (filtra la lista)" value="' + esc(savedFilter) + '" style="flex:1;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;min-width:0;">' +
+                '<button id="col-new-btn" class="btn-primary" style="display:inline-block;padding:10px 20px;font-size:0.95rem;white-space:nowrap;">Crear con este título</button>' +
+                '</span></label></div>';
+            h += '<div id="col-add-list" style="max-height:320px;overflow:auto;border:1px solid #27272a;border-radius:4px;"></div>';
             h += '<div style="margin-top:12px;text-align:right;">' +
-                '<button id="col-new-btn" class="btn-primary" style="display:inline-block;padding:10px 20px;font-size:0.95rem;">Crear con este título</button> ' +
                 '<button id="col-x" class="btn-secondary" style="display:inline-block;padding:10px 20px;font-size:0.95rem;">Cerrar</button></div>';
             box.innerHTML = h;
+            var listEl = box.querySelector('#col-add-list');
+            var nameEl = box.querySelector('#col-new-name');
+            function norm(s) {
+                s = (s === undefined || s === null) ? '' : String(s);
+                try { return s.toLowerCase().replace(/\s+/g, ' ').trim(); } catch (e2) { return s.toLowerCase(); }
+            }
+            function paintList() {
+                var q = norm(nameEl.value);
+                var rh = '';
+                var shown = 0;
+                for (var i = 0; i < all.length; i++) {
+                    if (q && norm(all[i].title).indexOf(q) === -1) continue;
+                    shown++;
+                    rh += '<div style="padding:6px;border-bottom:1px solid #27272a;">' + thumbHtml(all[i], 28, 42) + ' ' + esc(all[i].title) +
+                        ' <span style="color:#a1a1aa;">(' + all[i].entries + ')</span>' +
+                        ' <button class="btn-secondary" data-col="' + esc(all[i].item_id) + '" style="padding:8px 14px;font-size:0.95rem;float:right;">Añadir aquí</button><div style="clear:both;"></div></div>';
+                }
+                listEl.innerHTML = rh || '<div style="padding:8px;color:#a1a1aa;">' + (all.length ? 'Sin coincidencias' : 'Aún no hay colecciones') + '</div>';
+            }
+            paintList();
+            if (nameEl.addEventListener) {
+                nameEl.addEventListener('input', function() {
+                    try { localStorage.setItem('tvcat_collections_filter', nameEl.value || ''); } catch (e) {}
+                    paintList();
+                });
+            }
             box.querySelector('#col-x').onclick = closeModal;
             box.onclick = function(e) {
                 var t = e.target || e.srcElement;

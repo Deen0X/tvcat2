@@ -339,6 +339,9 @@ async def upload_file(client, chat_id, src, file_name: str = "file.bin",
         _is_temp = True
 
     try:
+        print(f"[FT-UL] fname={file_name!r} video={bool(is_video)} thumb={bool(thumb_bytes)} "
+              f"{int(width or 0)}x{int(height or 0)} d={int(duration or 0)} via={ctype} "
+              f"size={fsize}", flush=True)
         if ctype == "pyrogram":
             from services import fast_download as _fd
             _uw = _fd.resolve_workers(threads, "tg_fastul_workers", _fd.DEFAULT_WORKERS)

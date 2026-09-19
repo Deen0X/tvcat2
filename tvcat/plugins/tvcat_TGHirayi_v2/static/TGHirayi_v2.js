@@ -594,6 +594,16 @@ html += '</div>';
         h += '<div style="flex:1;min-width:0;">';
         h += '<div style="display:flex;align-items:center;gap:6px;font-size:13px;">';
         h += '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">' + jobTitleHtml(j) + '</span>';
+        // Badge [Topic=nombre] con enlace al topic destino (si está resuelto).
+        try {
+            var _tl = j._topic_links || [];
+            for (var _ti = 0; _ti < _tl.length; _ti++) {
+                var _t = _tl[_ti];
+                var _lbl = '[Topic=' + escHtml(_t.topic_name || ('#' + _t.topic_id)) + ']';
+                if (_t.url) h += '<a href="' + escHtml(_t.url) + '" target="_blank" rel="noopener noreferrer" title="Abrir topic en ' + escHtml(_t.dest_name || '') + '" style="font-size:10px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;text-decoration:none;">' + _lbl + '</a>';
+                else h += '<span title="Topic resuelto (sin enlace)" style="font-size:10px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;">' + _lbl + '</span>';
+            }
+        } catch (_eTl) {}
         if (((j.in_scope_total || j.total_episodes) || 0) > 1) {
             h += '<span onclick="window._tgcopy2Episodes(\'' + j.id + '\')" title="Ver episodios y elegir cuáles copiar" style="cursor:pointer;font-size:11px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;">🎞️ ' + (j.in_scope_total || j.total_episodes) + '</span>';
         }

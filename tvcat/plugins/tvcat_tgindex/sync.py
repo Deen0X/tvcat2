@@ -159,6 +159,35 @@ def sync():
     # Reconciliar sync_status del catálogo del plugin según canales activos
     reconcile_plugin_sync_status()
 
+    # Episode Slicer (opcional, sin dependencia dura): re-aplica los cortes
+    # guardados ANTES de exportar, para que un rescan no restaure los
+    # episodios movidos al título original. Si el slicer no está instalado,
+    # este bloque no hace nada.
+    try:
+        import sys as _sys2
+        _sl = None
+        for _m2 in list(_sys2.modules.values()):
+            try:
+                if ("episode_slicer" in str(getattr(_m2, "__name__", ""))
+                        and callable(getattr(_m2, "reapply_slicer_cuts", None))):
+                    _sl = _m2
+                    break
+            except Exception:
+                continue
+        if _sl is not None:
+            _has = c.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='slicer_cuts'"
+            ).fetchone()[0]
+            if _has:
+                for _r in c.execute("SELECT DISTINCT source FROM slicer_cuts").fetchall():
+                    try:
+                        _src = _r["source"] if isinstance(_r, dict) else _r[0]
+                        _sl.reapply_slicer_cuts(_src)
+                    except Exception as _e:
+                        print(f" [TGINDEX] aviso reapply slicer ({_src}): {_e}")
+    except Exception as _e:
+        print(f" [TGINDEX] aviso hook slicer: {_e}")
+
     enabled_channels = _get_enabled_channels()
 
     # Limpiar export tables para refresco completo

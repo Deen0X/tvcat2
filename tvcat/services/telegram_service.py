@@ -79,16 +79,142 @@ class PriorityQueue:
         return sum(len(q) for q in self._queues)
 
 
+def _sess_key(session_string, api_id, ctype):
+    import hashlib
+    try:
+        return hashlib.sha256(
+            f"{ctype}|{api_id}|{session_string or ''}".encode()).hexdigest()[:16]
+    except Exception:
+        return "x"
+
+
+_TEMP_SHARED = {}   # key -> {"client": Client}
+_TEMP_LOCKS = {}    # key -> asyncio.Lock
+
+
+async def _shared_temp_client(session_string, api_id, api_hash, ctype):
+    """Un SOLO cliente vivo por credencial en todo el proceso (single-flight).
+    Antes cada tarea creaba+conectaba+destruía un Client con la MISMA auth_key
+    (decenas/min en ráfagas de covers): Telegram lo interpreta como la clave
+    usada en varios sitios a la vez y la quema (AUTH_KEY_DUPLICATED).
+    Salud por get_me (barato); ante muerte de auth se desaloja y se propaga
+    el error SIN recrear en caliente (no aporrear una clave muerta)."""
+    import asyncio as _aio
+    # DUEÑO ÚNICO: si las credenciales explícitas son las del wrapper activo
+    # del userbot, se toma prestado su raw (sin crear segundo Client con la
+    # misma auth_key). Solo se mira el pool, sin crearlo (sin efectos).
+    try:
+        from services import userbot_service as _ubs
+        _w = ((_ubs._client_pool or {}).get(f"active_{ctype}")) if ctype else None
+        _wraw = getattr(_w, "_client", None) if _w else None
+        _wss = str(((getattr(_w, "session_data", None) or {}).get("session_string")) or "")
+        if _wraw is not None and _wss and _wss == str(session_string or ""):
+            # client_is_alive: pyro=atributo, telethon=método (no llamar a ciegas).
+            try:
+                if _ubs.client_is_alive(_wraw):
+                    return _wraw
+            except Exception:
+                pass
+    except Exception:
+        pass
+    key = _sess_key(session_string, api_id, ctype)
+    lk = _TEMP_LOCKS.get(key)
+    if lk is None:
+        lk = _aio.Lock()
+        _TEMP_LOCKS[key] = lk
+    async with lk:
+        ent = _TEMP_SHARED.get(key) or {}
+        cli = ent.get("client")
+        if cli is not None:
+            try:
+                if ctype == "pyrogram":
+                    await asyncio.wait_for(cli.get_me(), timeout=10)
+                elif not cli.is_connected():
+                    raise ConnectionError("telethon desconectado")
+                return cli
+            except Exception as e:
+                _tn = type(e).__name__
+                if "AuthKey" in _tn or "Duplicated" in str(e) or "Unregistered" in str(e):
+                    try:
+                        await cli.disconnect()
+                    except Exception:
+                        pass
+                    _TEMP_SHARED.pop(key, None)
+                    raise
+                try:
+                    await cli.disconnect()
+                except Exception:
+                    pass
+                _TEMP_SHARED.pop(key, None)
+        if ctype == "pyrogram":
+            from pyrogram import Client as _Pyro
+            import tempfile as _tf
+            cli = _Pyro(
+                name=f"tvcat_shared_{key}",
+                session_string=session_string,
+                api_id=int(api_id), api_hash=api_hash,
+                in_memory=True, workdir=_tf.gettempdir())
+        else:
+            from telethon import TelegramClient
+            from telethon.sessions import StringSession
+            cli = TelegramClient(StringSession(session_string), int(api_id), api_hash,
+                                 device_model="TVCat_Central", app_version="1.0")
+        await cli.connect()
+        if ctype == "pyrogram":
+            try:
+                _me = await cli.get_me()
+                try:
+                    cli.me = _me
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        _TEMP_SHARED[key] = {"client": cli}
+        print(f" [TELEGRAM SERVICE] temporal compartido creado ({ctype} {key})", flush=True)
+        return cli
+
+
+def _preferred_client_type(explicit=None):
+    """Tipo de cliente efectivo: explícito > ajuste global (Comportamiento
+    Telegram) > telethon. Sin esto, los métodos con default "telethon"
+    ignoraban el ajuste global."""
+    try:
+        from services.userbot_service import get_preferred_client_type
+        return get_preferred_client_type(explicit)
+    except Exception:
+        return explicit if explicit in ("telethon", "pyrogram") else "telethon"
+
+
 class TelegramClientPool:
     """Pool de clientes Telegram por (tg_user_id, client_type)."""
 
     def __init__(self):
         self._clients = {}
         self._lock = asyncio.Lock()
+        # Claves quemadas en esta vida del proceso (AuthKeyDuplicated): no se
+        # reintentan (cada intento es ruido y no resucita la clave).
+        self._burned = set()
+        # Claves PRESTADAS del pool de userbot_service (dueño único del Client).
+        # disconnect_all NUNCA las toca: matarlas cortaría al worker por debajo.
+        self._borrowed = set()
 
     async def get_client(self, tg_user_id: int, client_type: str = "telethon"):
         key = (tg_user_id, client_type)
         async with self._lock:
+            if key in self._burned:
+                raise ValueError(f"Sesión quemada (AuthKeyDuplicated): {tg_user_id}/{client_type}. "
+                                 f"Regenera la sesión; no se reintenta en este proceso.")
+            if key in self._clients and key in (self._borrowed or set()):
+                # Prestado: el dueño (userbot) puede haber reconectado con un
+                # objeto nuevo; refrescar el mapeo sin crear nada.
+                try:
+                    from services import userbot_service as _ubs
+                    _w = (_ubs._client_pool or {}).get(f"active_{client_type}")
+                    _wraw = getattr(_w, "_client", None) if _w else None
+                    if _wraw is not None and _wraw is not self._clients[key]:
+                        self._clients[key] = _wraw
+                except Exception:
+                    pass
             if key not in self._clients:
                 self._clients[key] = await self._create_client(tg_user_id, client_type)
             return self._clients[key]
@@ -97,7 +223,12 @@ class TelegramClientPool:
         return await self._create_client(tg_user_id, client_type)
 
     async def _create_client(self, tg_user_id: int, client_type: str):
-        from services.userbot_service import get_session_for_user, get_default_telegram_user
+        """DUEÑO ÚNICO: userbot_service. Este pool NO crea un segundo Client con
+        la misma session_string (dos vivos = AUTH_KEY_DUPLICATED): toma prestado
+        el raw del wrapper activo. Solo si la sesión pedida es OTRA cuenta
+        distinta (auth_key diferente, sin conflicto) se crea cliente propio."""
+        from services.userbot_service import (get_active_client, get_session_for_user,
+                                              get_default_telegram_user)
         if tg_user_id is None:
             try:
                 _du = get_default_telegram_user()
@@ -107,6 +238,55 @@ class TelegramClientPool:
         sess = get_session_for_user(tg_user_id, client_type) if tg_user_id is not None else None
         if not sess:
             raise ValueError(f"No session found for tg_user_id={tg_user_id}, type={client_type}")
+        wanted_ss = str(sess.get("session_string") or "")
+        if not wanted_ss:
+            raise ValueError(f"No session found for tg_user_id={tg_user_id}, type={client_type}")
+        try:
+            wrapper = await get_active_client(client_type)
+        except Exception:
+            wrapper = None
+        _wraw = getattr(wrapper, "_client", None) if wrapper else None
+        _wss = str((getattr(wrapper, "session_data", None) or {}).get("session_string") or "")
+        if _wraw is not None and _wss == wanted_ss:
+            # Misma sesión: prestar (nunca desconectar desde aquí).
+            try:
+                self._borrowed.add((tg_user_id, client_type))
+            except Exception:
+                pass
+            if client_type != "telethon":
+                try:
+                    _me = await asyncio.wait_for(_wraw.get_me(), timeout=10)
+                    try:
+                        _wraw.me = _me
+                    except Exception:
+                        pass
+                except Exception as e:
+                    _tn = type(e).__name__
+                    if "AuthKeyDuplicated" in _tn or "AuthKeyUnregistered" in _tn:
+                        try:
+                            from services.userbot_service import quarantine_session
+                            quarantine_session(tg_user_id, client_type, _tn)
+                        except Exception:
+                            pass
+                        try:
+                            self._burned.add((tg_user_id, client_type))
+                        except Exception:
+                            pass
+                        raise
+                    raise ConnectionError(f"Userbot {client_type} prestado no responde: {e}")
+            else:
+                try:
+                    from services.userbot_service import client_is_alive as _alive2
+                    if not _alive2(_wraw):
+                        raise ConnectionError(f"Userbot telethon prestado desconectado")
+                except ConnectionError:
+                    raise
+                except Exception:
+                    pass
+            return _wraw
+        # Otra cuenta distinta (o wrapper sin raw): cliente propio con OTRA
+        # auth_key — sin conflicto de duplicado. in_memory para no ensuciar
+        # el workdir con temp_*.session.
         if client_type == "telethon":
             from telethon import TelegramClient
             from telethon.sessions import StringSession
@@ -117,23 +297,67 @@ class TelegramClientPool:
             )
         else:
             from pyrogram import Client
+            import tempfile as _tf
             client = Client(
                 name=f"temp_{tg_user_id}_{int(time.time())}",
                 session_string=sess.get("session_string", ""),
                 api_id=sess.get("api_id", 0),
-                api_hash=sess.get("api_hash", "")
+                api_hash=sess.get("api_hash", ""),
+                in_memory=True,
+                workdir=_tf.gettempdir()
             )
         await client.connect()
+        # Pyrogram: send_photo/edit consultan client.me.is_premium; con solo
+        # connect() me es None → AttributeError. Se fija aquí una vez.
+        if client_type != "telethon":
+            try:
+                _me = await client.get_me()
+                try:
+                    client.me = _me
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        # Validación inmediata con clave real (solo sesiones guardadas, no
+        # temporales vacías): una auth_key quemada (AuthKeyDuplicated) se
+        # detecta AQUÍ una vez y se pone en cuarentena, en vez de tormenta
+        # de reconnects en cada cover/stream que la pida.
+        if sess.get("session_string"):
+            try:
+                await client.get_me()
+            except Exception as e:
+                _tn = type(e).__name__
+                if "AuthKeyDuplicated" in _tn or "AuthKeyUnregistered" in _tn:
+                    try:
+                        from services.userbot_service import quarantine_session
+                        quarantine_session(tg_user_id, client_type, _tn)
+                    except Exception:
+                        pass
+                    try:
+                        self._burned.add((tg_user_id, client_type))
+                    except Exception:
+                        pass
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    raise
         return client
 
     async def disconnect_all(self):
         async with self._lock:
             for key, client in self._clients.items():
+                if key in (self._borrowed or set()):
+                    continue  # prestado del userbot: el dueño lo gestiona
                 try:
                     await client.disconnect()
                 except:
                     pass
             self._clients.clear()
+            try:
+                self._borrowed.clear()
+            except Exception:
+                pass
 
 
 class TelegramMessageCache:
@@ -900,11 +1124,12 @@ class TelegramService:
 
             try:
                 await self._throttle(_uid, floor=_floor)
-                if client_type == "telethon":
+                if client_type == "telethon" and not self._is_pyro(client, client_type):
                     from telethon import TelegramClient
                     msgs = await client.get_messages(await client.get_entity(int(channel_id)), limit=batch_size, offset_id=batch_to)
                 else:
-                    msgs = await client.get_messages(int(channel_id), limit=batch_size, offset_id=batch_to)
+                    msgs = [m async for m in client.get_chat_history(
+                        self._pyro_chat_id(channel_id), limit=batch_size, offset_id=batch_to)]
 
                 batch = []
                 for m in msgs:
@@ -1040,18 +1265,28 @@ class TelegramService:
             _floor = 0.0
         try:
             await self._throttle(_uid, floor=_floor)
-            if client_type == "telethon":
+            if client_type == "telethon" and not self._is_pyro(client, client_type):
                 entity = await client.get_entity(int(channel_id))
                 await self._throttle(_uid, floor=_floor)
                 msg = await client.get_messages(entity, ids=msg_id)
             else:
                 await self._throttle(_uid, floor=_floor)
-                msg = await client.get_messages(int(channel_id), ids=msg_id)
+                try:
+                    msg = await client.get_messages(self._pyro_chat_id(channel_id), msg_id)
+                except Exception:
+                    msg = None
             data = None
             if msg and getattr(msg, 'media', None):
                 data = self._inline_photo_bytes(msg)
                 if data is None:
-                    data = self._coerce_download_bytes(await client.download_media(msg))
+                    if self._is_pyro(client, client_type):
+                        try:
+                            bio = await client.download_media(msg, in_memory=True)
+                            data = bytes(bio.getvalue()) if bio is not None else None
+                        except Exception:
+                            data = None
+                    else:
+                        data = self._coerce_download_bytes(await client.download_media(msg))
             if result_callback:
                 await result_callback(data)
         except Exception as e:
@@ -1205,19 +1440,45 @@ class TelegramService:
             return int(s)
         return chat
 
+    @staticmethod
+    def _is_pyro(client, client_type=None):
+        """True si el cliente crudo es Pyrogram (sin get_input_entity) o el
+        tipo resuelto es pyrogram. Telethon y Pyrogram comparten nombres
+        (get_messages, get_me...), así que se detecta por API exclusiva."""
+        try:
+            if client is not None and hasattr(client, "get_input_entity"):
+                return False
+            if client_type == "pyrogram":
+                return True
+            if client is not None and hasattr(client, "edit_message_media"):
+                return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _pyro_chat_id(chat):
+        """chat_id válido para Pyrogram: int (-100...) o username."""
+        if isinstance(chat, int):
+            return chat
+        try:
+            return int(str(chat).strip())
+        except Exception:
+            return str(chat).strip()
+
     async def _get_temp_or_pool_client(self, task):
-        """Devuelve (client, need_disconnect) según credenciales explícitas o pool."""
+        """Devuelve (client, need_disconnect) según credenciales explícitas o pool.
+        El temporal respeta client_type (antes siempre era Telethon)."""
         session_string = task.get("session_string")
         api_id = task.get("api_id")
         api_hash = task.get("api_hash")
+        ctype = _preferred_client_type(task.get("client_type"))
         if session_string and api_id and api_hash:
-            from telethon import TelegramClient
-            from telethon.sessions import StringSession
-            client = TelegramClient(StringSession(session_string), int(api_id), api_hash,
-                                    device_model="TVCat_Central", app_version="1.0")
-            await client.connect()
-            return client, True
-        client = await self.pool.get_client(task.get("tg_user_id"), task.get("client_type", "telethon"))
+            client = await _shared_temp_client(session_string, api_id, api_hash, ctype)
+            # Compartido: el caller NO lo desconecta (need_disc=False).
+            return client, False
+        client = await self.pool.get_client(task.get("tg_user_id"), ctype)
+        task["client_type"] = ctype
         return client, False
 
     async def _do_get_entity(self, task: Dict):
@@ -1604,7 +1865,7 @@ class TelegramService:
         msg_id = int(task["msg_id"])
         topic_id = task.get("topic_id")
         tg_user_id = task.get("tg_user_id")
-        client_type = task.get("client_type", "telethon")
+        client_type = task.get("client_type") or _preferred_client_type()
         callback = task.get("callback")
         uid = self._user_key(task)
         force = bool(task.get("force"))
@@ -1638,10 +1899,16 @@ class TelegramService:
             if raw is None:
                 # Miss o force: fetch exacto del mensaje (1 llamada) + guardar en caché
                 client = await self.pool.get_client(tg_user_id, client_type)
-                try:
-                    msg_obj = await client.get_messages(self._to_entity_id(channel_id), ids=msg_id)
-                except Exception:
-                    msg_obj = None
+                if self._is_pyro(client, client_type):
+                    try:
+                        msg_obj = await client.get_messages(self._pyro_chat_id(channel_id), msg_id)
+                    except Exception:
+                        msg_obj = None
+                else:
+                    try:
+                        msg_obj = await client.get_messages(self._to_entity_id(channel_id), ids=msg_id)
+                    except Exception:
+                        msg_obj = None
                 if msg_obj is None:
                     await _done({"ok": False, "error": "message-missing"})
                     return
@@ -1672,14 +1939,27 @@ class TelegramService:
             # (pixelado al estirar). download_media trae la foto real (mayor tamaño).
             try:
                 client = await self.pool.get_client(tg_user_id, client_type)
-                msg_obj = await client.get_messages(self._to_entity_id(channel_id), ids=msg_id)
+                if self._is_pyro(client, client_type):
+                    try:
+                        msg_obj = await client.get_messages(self._pyro_chat_id(channel_id), msg_id)
+                    except Exception:
+                        msg_obj = None
+                else:
+                    msg_obj = await client.get_messages(self._to_entity_id(channel_id), ids=msg_id)
             except Exception as e:
                 await _done({"ok": False, "error": str(e)[:200]})
                 return
             if msg_obj is None:
                 await _done({"ok": False, "error": "message-missing"})
                 return
-            data = self._coerce_download_bytes(await client.download_media(msg_obj))
+            if self._is_pyro(client, client_type):
+                try:
+                    bio = await client.download_media(msg_obj, in_memory=True)
+                    data = bytes(bio.getvalue()) if bio is not None else None
+                except Exception:
+                    data = None
+            else:
+                data = self._coerce_download_bytes(await client.download_media(msg_obj))
             if data:
                 await _done({"ok": True, "data": data})
             else:
@@ -1689,8 +1969,9 @@ class TelegramService:
 
     async def fetch_cover(self, channel_id: str, msg_id: int,
                           topic_id: int = None, tg_user_id: int = None,
-                          client_type: str = "telethon", force: bool = False) -> Dict[str, Any]:
+                          client_type: str = None, force: bool = False) -> Dict[str, Any]:
         """Descarga el cover (foto) de un mensaje. 1 token por operación.
+        client_type None = ajuste global (Comportamiento Telegram).
         force=True salta la caché (re-descarga raw + foto, p.ej. refresh_cover).
         Retorna {"ok": True, "data": bytes|None} | {"ok": False, "error": ...}."""
         fut = asyncio.get_event_loop().create_future()
@@ -1704,7 +1985,7 @@ class TelegramService:
             "msg_id": int(msg_id),
             "topic_id": topic_id,
             "tg_user_id": tg_user_id,
-            "client_type": client_type,
+            "client_type": _preferred_client_type(client_type),
             "force": bool(force),
             "callback": callback
         }, priority=PRIORITY_HIGH)
@@ -1730,6 +2011,29 @@ class TelegramService:
         try:
             await self._throttle(uid)
             client = await self.pool.get_client(tg_user_id, client_type)
+            if self._is_pyro(client, client_type):
+                # Pyro: thumbs por file_id (el mejor disponible); sin thumbs → None.
+                try:
+                    msg = await client.get_messages(self._pyro_chat_id(channel_id), msg_id)
+                except Exception as e:
+                    await _done({"ok": False, "error": str(e)[:200]})
+                    return
+                if msg is None:
+                    await _done({"ok": True, "data": None})
+                    return
+                doc = getattr(msg, "document", None)
+                thumbs = list(getattr(doc, "thumbs", None) or []) if doc is not None else []
+                if not thumbs:
+                    await _done({"ok": True, "data": None})
+                    return
+                thumbs.sort(key=lambda t: int(getattr(t, "file_size", 0) or 0))
+                try:
+                    bio = await client.download_media(thumbs[-1].file_id, in_memory=True)
+                    blob = bytes(bio.getvalue()) if bio is not None else None
+                except Exception:
+                    blob = None
+                await _done({"ok": True, "data": blob})
+                return
             try:
                 msg = await client.get_messages(self._to_entity_id(channel_id), ids=msg_id)
             except Exception as e:
@@ -1831,9 +2135,14 @@ class TelegramService:
         _uid = self._user_key(task)
         try:
             await self._throttle(_uid)
-            sent = await client.send_message(
-                self._to_entity_id(chat), text,
-                reply_to=reply_to if reply_to else None)
+            if self._is_pyro(client, task.get("client_type")):
+                sent = await client.send_message(
+                    chat_id=self._pyro_chat_id(chat), text=text,
+                    reply_to_message_id=int(reply_to) if reply_to else None)
+            else:
+                sent = await client.send_message(
+                    self._to_entity_id(chat), text,
+                    reply_to=reply_to if reply_to else None)
             if callback:
                 await callback(int(getattr(sent, 'id', 0) or 0))
         finally:
@@ -1873,12 +2182,32 @@ class TelegramService:
             import io as _io
             await self._throttle(_uid)
             if photo_bytes:
-                bio = _io.BytesIO(bytes(photo_bytes))
-                bio.name = "cover.jpg"
-                sent = await client.send_file(
-                    self._to_entity_id(chat), bio,
-                    caption=caption or None, force_document=False,
-                    reply_to=reply_to if reply_to else None)
+                if self._is_pyro(client, task.get("client_type")):
+                    import tempfile as _tmp, os as _os
+                    with _tmp.NamedTemporaryFile(suffix=".jpg", delete=False) as _tf:
+                        _tf.write(bytes(photo_bytes))
+                        _tmp_path = _tf.name
+                    try:
+                        sent = await client.send_photo(
+                            chat_id=self._pyro_chat_id(chat), photo=_tmp_path,
+                            caption=caption or None,
+                            reply_to_message_id=int(reply_to) if reply_to else None)
+                    finally:
+                        try:
+                            _os.remove(_tmp_path)
+                        except Exception:
+                            pass
+                else:
+                    bio = _io.BytesIO(bytes(photo_bytes))
+                    bio.name = "cover.jpg"
+                    sent = await client.send_file(
+                        self._to_entity_id(chat), bio,
+                        caption=caption or None, force_document=False,
+                        reply_to=reply_to if reply_to else None)
+            elif self._is_pyro(client, task.get("client_type")):
+                sent = await client.send_message(
+                    chat_id=self._pyro_chat_id(chat), text=caption or "",
+                    reply_to_message_id=int(reply_to) if reply_to else None)
             else:
                 sent = await client.send_message(
                     self._to_entity_id(chat), caption or "",
@@ -1916,6 +2245,40 @@ class TelegramService:
         client, need_disc = await self._get_temp_or_pool_client(task)
         _uid = self._user_key(task)
         try:
+            if self._is_pyro(client, task.get("client_type")):
+                # Raw directo: el high-level de pyrofork 2.3.69 pasa
+                # channel= a una raw que espera peer= (roto por dentro).
+                from pyrogram.raw import functions as _rf
+                await self._throttle(_uid)
+                try:
+                    peer = await client.resolve_peer(self._pyro_chat_id(chat))
+                except Exception:
+                    peer = self._pyro_chat_id(chat)
+                result = []
+                seen = set()
+                off_date, off_id, off_topic = 0, 0, 0
+                for _page in range(20):
+                    try:
+                        res = await client.invoke(_rf.messages.GetForumTopics(
+                            peer=peer, offset_date=off_date, offset_id=off_id,
+                            offset_topic=off_topic, limit=100))
+                    except Exception as e:
+                        print(f" [TELEGRAM SERVICE] list_topics pyro raw: {e}", flush=True)
+                        break
+                    batch = list(getattr(res, "topics", []) or [])
+                    fresh = [t for t in batch if int(getattr(t, "id", 0) or 0) not in seen]
+                    for t in fresh:
+                        seen.add(int(getattr(t, "id", 0) or 0))
+                        result.append({"id": int(getattr(t, "id", 0) or 0),
+                                       "title": getattr(t, "title", "") or ""})
+                    if len(batch) < 100 or not fresh:
+                        break
+                    last = batch[-1]
+                    off_id = int(getattr(last, "top_message", 0) or 0)
+                    off_topic = int(getattr(last, "id", 0) or 0)
+                if callback:
+                    await callback(result)
+                return
             from telethon.tl.functions.messages import GetForumTopicsRequest
             await self._throttle(_uid)
             entity = await client.get_entity(self._to_entity_id(chat))
@@ -1971,6 +2334,47 @@ class TelegramService:
         client, need_disc = await self._get_temp_or_pool_client(task)
         _uid = self._user_key(task)
         try:
+            if self._is_pyro(client, task.get("client_type")):
+                # Raw directo por el mismo motivo que list (high-level roto).
+                from pyrogram.raw import functions as _rf, types as _rt
+                await self._throttle(_uid)
+                tid = None
+                try:
+                    try:
+                        peer = await client.resolve_peer(self._pyro_chat_id(chat))
+                    except Exception:
+                        peer = self._pyro_chat_id(chat)
+                    res = await client.invoke(_rf.messages.CreateForumTopic(
+                        peer=peer, title=title or "",
+                        random_id=int(__import__("random").randint(1, 2**31 - 1))))
+                    for upd in getattr(res, "updates", []) or []:
+                        try:
+                            m = getattr(upd, "message", None)
+                            act = getattr(m, "action", None)
+                            if act is not None and type(act).__name__ == "MessageActionTopicCreate":
+                                tid = getattr(m, "id", None)
+                                break
+                        except Exception:
+                            continue
+                except Exception as e:
+                    print(f" [TELEGRAM SERVICE] create_topic pyro raw: {e}", flush=True)
+                    tid = None
+                if tid is None:
+                    # Fallback: re-listar y buscar por nombre exacto.
+                    try:
+                        peer = await client.resolve_peer(self._pyro_chat_id(chat))
+                        res2 = await client.invoke(_rf.messages.GetForumTopics(
+                            peer=peer, offset_date=0, offset_id=0,
+                            offset_topic=0, limit=100))
+                        for t in getattr(res2, "topics", []) or []:
+                            if (getattr(t, "title", "") or "").strip() == (title or "").strip():
+                                tid = getattr(t, "id", None)
+                                break
+                    except Exception:
+                        pass
+                if callback:
+                    await callback(int(tid) if tid else None)
+                return
             from telethon.tl.functions.messages import CreateForumTopicRequest
             from telethon.tl.types import MessageActionTopicCreate, UpdateNewChannelMessage
             await self._throttle(_uid)
@@ -2017,6 +2421,39 @@ class TelegramService:
         client, need_disc = await self._get_temp_or_pool_client(task)
         _uid = self._user_key(task)
         try:
+            if self._is_pyro(client, task.get("client_type")):
+                from pyrogram.enums import ChatMembersFilter
+                await self._throttle(_uid)
+                me = await client.get_me()
+                my_id = getattr(me, "id", None)
+                is_owner = False
+                can_post = False
+                try:
+                    async for m in client.get_chat_members(
+                            self._pyro_chat_id(chat),
+                            filter=ChatMembersFilter.ADMINISTRATORS, limit=200):
+                        try:
+                            if int(getattr(getattr(m, "user", None), "id", -1)) != int(my_id):
+                                continue
+                        except Exception:
+                            continue
+                        st = str(getattr(getattr(m, "status", ""), "value", None)
+                                 or getattr(m, "status", "") or "").lower()
+                        if st in ("owner", "creator"):
+                            is_owner, can_post = True, True
+                            break
+                        if "administrat" in st:
+                            priv = getattr(m, "privileges", None)
+                            try:
+                                can_post = bool(getattr(priv, "can_post_messages", False))
+                            except Exception:
+                                can_post = False
+                            break
+                except Exception:
+                    pass
+                if callback:
+                    await callback(bool(is_owner or can_post))
+                return
             from telethon.tl.types import ChannelParticipantsAdmins, ChannelParticipantCreator
             await self._throttle(_uid)
             entity = await client.get_entity(self._to_entity_id(chat))
@@ -2068,6 +2505,69 @@ class TelegramService:
         client, need_disc = await self._get_temp_or_pool_client(task)
         _uid = self._user_key(task)
         try:
+            if self._is_pyro(client, task.get("client_type")):
+                # Recorrido hacia IDs menores con get_chat_history + filtro de
+                # topic por reply_to_top_message_id (los mensajes fuera del
+                # topic se saltan; el ancla debe pertenecer al topic).
+                # DEBUG temporal: diagnosticar [] en covers con ancla válida.
+                await self._throttle(_uid)
+                anchor = await client.get_messages(self._pyro_chat_id(chat), msg_id)
+                print(f" [TELEGRAM SERVICE] fetch_cover_messages pyro: anchor="
+                      f"{type(anchor).__name__}/{getattr(anchor, 'id', '?')} "
+                      f"topic_arg={topic_id}", flush=True)
+                if anchor is None:
+                    if callback:
+                        await callback([])
+                    return
+                if topic_id is None:
+                    topic_id = (getattr(anchor, "reply_to_top_message_id", None)
+                                or getattr(anchor, "reply_to_message_id", None))
+                _atid = (getattr(anchor, "reply_to_top_message_id", None)
+                         or getattr(anchor, "reply_to_message_id", None))
+                if topic_id and _atid and int(_atid) != int(topic_id):
+                    if callback:
+                        await callback([])
+                    return
+                out = []
+                await self._throttle(_uid)
+                _walked = 0
+                async for m in client.get_chat_history(
+                        self._pyro_chat_id(chat), limit=100, offset_id=msg_id + 1):
+                    _walked += 1
+                    try:
+                        if getattr(m, "service", None) is not None:
+                            continue
+                        _mtid = (getattr(m, "reply_to_top_message_id", None)
+                                 or getattr(m, "reply_to_message_id", None))
+                        if topic_id and _mtid and int(_mtid) != int(topic_id) \
+                                and int(getattr(m, "id", -1)) != int(topic_id):
+                            continue
+                        has_doc = getattr(m, "document", None) is not None
+                        if has_doc and len(out) > 0:
+                            break
+                        text = getattr(m, "text", None) or getattr(m, "caption", "") or ""
+                        photo_bytes = None
+                        if getattr(m, "photo", None):
+                            try:
+                                await self.bulk_acquire(PRIORITY_NORMAL)
+                                try:
+                                    bio = await client.download_media(m, in_memory=True)
+                                    photo_bytes = bytes(bio.getvalue()) if bio is not None else None
+                                finally:
+                                    await self.bulk_release()
+                            except Exception:
+                                photo_bytes = None
+                        if (text or "").strip() or photo_bytes:
+                            out.append({"msg_id": int(getattr(m, "id", 0) or 0),
+                                        "text": text, "photo_bytes": photo_bytes})
+                    except Exception:
+                        continue
+                out.reverse()
+                print(f" [TELEGRAM SERVICE] fetch_cover_messages pyro: walked={_walked} "
+                      f"out={len(out)}", flush=True)
+                if callback:
+                    await callback(out)
+                return
             await self._throttle(_uid)
             entity = await client.get_entity(self._to_entity_id(chat))
             anchor = await client.get_messages(entity, ids=msg_id)
@@ -2191,10 +2691,61 @@ class TelegramService:
         client, need_disc = await self._get_temp_or_pool_client(task)
         _uid = self._user_key(task)
         try:
+            if self._is_pyro(client, task.get("client_type")):
+                # Pyrogram: document/video/audio nativos.
+                await self._throttle(_uid)
+                try:
+                    m = await client.get_messages(self._pyro_chat_id(chat), msg_id)
+                except Exception as e:
+                    # NO tragar en silencio: el "¿borrado?" de TGHirayi es solo
+                    # una hipótesis; el transporte (Flood/closed-db/auth) debe
+                    # verse en el log para diagnosticar.
+                    print(f" [TELEGRAM SERVICE] get_file_info pyro fallo chat={chat} "
+                          f"msg={msg_id}: {type(e).__name__}: {str(e)[:200]}", flush=True)
+                    if callback:
+                        await callback({"_transport_error": f"{type(e).__name__}: {str(e)[:150]}"})
+                    return
+                info = {"file_name": "", "size": 0, "mime_type": "",
+                        "duration": 0, "width": 0, "height": 0, "has_thumb": False}
+                if m is not None:
+                    doc = getattr(m, "document", None)
+                    vid = getattr(m, "video", None)
+                    aud = getattr(m, "audio", None)
+                    src = doc or vid or aud
+                    if src is None:
+                        print(f" [TELEGRAM SERVICE] get_file_info pyro sin media "
+                              f"chat={chat} msg={msg_id} (empty={getattr(m, 'empty', '?')})",
+                              flush=True)
+                        if callback:
+                            await callback(None)
+                        return
+                    info.update({
+                        "file_name": getattr(src, "file_name", "") or "file",
+                        "size": int(getattr(src, "file_size", 0) or 0),
+                        "mime_type": getattr(src, "mime_type", "") or "",
+                        "duration": int(getattr(src, "duration", 0) or 0),
+                        "width": int(getattr(src, "width", 0) or 0),
+                        "height": int(getattr(src, "height", 0) or 0),
+                        "has_thumb": bool(getattr(src, "thumbs", None))})
+                else:
+                    print(f" [TELEGRAM SERVICE] get_file_info pyro mensaje None "
+                          f"chat={chat} msg={msg_id} (sin excepcion: borrado o sin acceso)",
+                          flush=True)
+                    info = None
+                if callback:
+                    await callback(info)
+                return
             from telethon.tl.types import DocumentAttributeFilename, DocumentAttributeVideo
             await self._throttle(_uid)
-            entity = await client.get_entity(self._to_entity_id(chat))
-            m = await client.get_messages(entity, ids=msg_id)
+            try:
+                entity = await client.get_entity(self._to_entity_id(chat))
+                m = await client.get_messages(entity, ids=msg_id)
+            except Exception as e:
+                print(f" [TELEGRAM SERVICE] get_file_info telethon fallo chat={chat} "
+                      f"msg={msg_id}: {type(e).__name__}: {str(e)[:200]}", flush=True)
+                if callback:
+                    await callback({"_transport_error": f"{type(e).__name__}: {str(e)[:150]}"})
+                return
             info = {"file_name": "", "size": 0, "mime_type": "",
                     "duration": 0, "width": 0, "height": 0, "has_thumb": False}
             if m is None or not getattr(m, 'media', None):
@@ -2259,6 +2810,24 @@ class TelegramService:
         client, need_disc = await self._get_temp_or_pool_client(task)
         _uid = self._user_key(task)
         try:
+            if self._is_pyro(client, task.get("client_type")):
+                await self._throttle(_uid)
+                if caption is None:
+                    try:
+                        src_m = await client.get_messages(
+                            self._pyro_chat_id(from_chat), msg_id)
+                        caption = (getattr(src_m, "caption", None)
+                                   or getattr(src_m, "text", None))
+                    except Exception:
+                        pass
+                sent = await client.copy_message(
+                    chat_id=self._pyro_chat_id(chat),
+                    from_chat_id=self._pyro_chat_id(from_chat),
+                    message_id=msg_id, caption=caption,
+                    reply_to_message_id=int(reply_to) if reply_to else None)
+                if callback:
+                    await callback(int(getattr(sent, 'id', 0) or 0))
+                return
             await self._throttle(_uid)
             src = await client.get_entity(self._to_entity_id(from_chat))
             tgt = await client.get_entity(self._to_entity_id(chat))
@@ -2310,9 +2879,15 @@ class TelegramService:
         _uid = self._user_key(task)
         try:
             await self._throttle(_uid)
-            sent = await client.forward_messages(
-                self._to_entity_id(chat), msg_id,
-                self._to_entity_id(from_chat))
+            if self._is_pyro(client, task.get("client_type")):
+                sent = await client.forward_messages(
+                    chat_id=self._pyro_chat_id(chat),
+                    from_chat_id=self._pyro_chat_id(from_chat),
+                    message_ids=msg_id)
+            else:
+                sent = await client.forward_messages(
+                    self._to_entity_id(chat), msg_id,
+                    self._to_entity_id(from_chat))
             mid = 0
             try:
                 mid = int(getattr(sent[0] if isinstance(sent, list) else sent, 'id', 0) or 0)
@@ -2353,7 +2928,9 @@ class TelegramService:
         file_bytes = task.get("file_bytes")
         file_name = task.get("file_name", "cover.jpg")
         tg_user_id = task.get("tg_user_id")
-        client_type = task.get("client_type", "telethon")
+        client_type = _preferred_client_type(task.get("client_type"))
+        # La tarea viaja con el tipo resuelto (el pool indexa por él).
+        task["client_type"] = client_type
         callback = task.get("callback")
         client, need_disc = await self._get_temp_or_pool_client(task)
         _uid = self._user_key(task)
@@ -2367,7 +2944,31 @@ class TelegramService:
                 entity = await client.get_entity(entity)
             except Exception:
                 pass
-            if file_bytes is not None:
+            is_pyro = self._is_pyro(client, client_type)
+            if is_pyro:
+                # Pyrogram: edit_message_text (solo texto) / edit_message_media (foto).
+                # chat_id admite int (-100...) o username.
+                chat_id = self._pyro_chat_id(entity if isinstance(entity, int) else channel_id)
+                await self._throttle(_uid)
+                if file_bytes is not None:
+                    from pyrogram.types import InputMediaPhoto
+                    import tempfile as _tmp, os as _os
+                    with _tmp.NamedTemporaryFile(suffix=".jpg", delete=False) as _tf:
+                        _tf.write(bytes(file_bytes))
+                        _tmp_path = _tf.name
+                    try:
+                        result = await client.edit_message_media(
+                            chat_id=chat_id, message_id=msg_id,
+                            media=InputMediaPhoto(media=_tmp_path, caption=text or ""))
+                    finally:
+                        try:
+                            _os.remove(_tmp_path)
+                        except Exception:
+                            pass
+                else:
+                    result = await client.edit_message_text(
+                        chat_id=chat_id, message_id=msg_id, text=text)
+            elif file_bytes is not None:
                 bio = io.BytesIO(file_bytes)
                 bio.name = file_name
                 await self._throttle(_uid)
@@ -2380,7 +2981,7 @@ class TelegramService:
                 if result is not None:
                     # result is the edited Message object
                     edited_id = getattr(result, 'id', msg_id)
-                    raw = self._serialize_message(result, "telethon" if hasattr(client, 'edit_message') else client_type)
+                    raw = self._serialize_message(result, client_type)
                     self.cache.save_messages([{
                         "channel_id": str(channel_id),
                         "topic_id": task.get("topic_id"),
@@ -2404,8 +3005,9 @@ class TelegramService:
 
     async def edit_message(self, channel_id: str, msg_id: int, text: str = "",
                            file_bytes: Optional[bytes] = None, file_name: str = "cover.jpg",
-                           tg_user_id: int = None, client_type: str = "telethon",
+                           tg_user_id: int = None, client_type: str = None,
                            session_string: str = None, api_id: int = None, api_hash: str = None) -> Dict[str, Any]:
+        # client_type None = ajuste global (Comportamiento Telegram).
         fut = asyncio.get_event_loop().create_future()
         async def callback(result):
             if not fut.done():

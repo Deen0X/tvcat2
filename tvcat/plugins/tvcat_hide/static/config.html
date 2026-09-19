@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ocultos — Configuración</title>
+<style>
+    body { background:#0d0d0f; color:#f4f4f5; font-family:'Segoe UI',system-ui,Arial,sans-serif; margin:0; padding:16px; font-size:14px; box-sizing:border-box; }
+    h3 { margin:0 0 12px; }
+    .card { background:#18181b; border:1px solid #27272a; border-radius:8px; padding:12px; margin-bottom:12px; }
+    .btn { background:#22c55e; border:none; color:#fff; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:13px; font-weight:600; }
+    .muted { color:#a1a1aa; font-size:12px; }
+    label { display:flex; align-items:center; gap:8px; margin:4px 0; cursor:pointer; }
+    select { background:#27272a; border:1px solid #3f3f46; color:#f4f4f5; border-radius:4px; padding:6px 8px; font-size:13px; width:100%; box-sizing:border-box; margin-top:6px; }
+    input[type="checkbox"] { width:auto; accent-color:#eab308; }
+    #status { margin-left:8px; font-size:12px; }
+</style>
+</head>
+<body>
+<h3>👁️ Ocultos — Configuración</h3>
+<div id="noadmin" class="card" style="display:none;">Solo un administrador puede ver esta configuración.</div>
+<div id="cfg" style="display:none;">
+    <div class="card">
+        <label>
+            <input type="checkbox" id="show-parental">
+            <span><b>Mostrar botones parentales</b></span>
+        </label>
+        <div class="muted" style="margin-top:4px;">Muestra los botones "Parental" en hero y tray (solo visibles para admin). Sin esto, el bloqueo parental no es accesible desde la interfaz.</div>
+    </div>
+    <div class="card">
+        <div style="margin-bottom:4px;"><b>Perfil child</b></div>
+        <div class="muted" style="margin-bottom:6px;">Perfil destino de los bloqueos parentales.</div>
+        <select id="child-profile"></select>
+    </div>
+    <button class="btn" onclick="saveCfg()">💾 Guardar</button><span id="status"></span>
+</div>
+<script>
+function jget(url, cb) {
+    fetch(url).then(function(r) { return r.json(); }).then(function(j) { cb(j); }).catch(function() { cb(null); });
+}
+function init() {
+    jget('/api/hide/config', function(cfg) {
+        if (!cfg) { document.getElementById('status').textContent = 'Error de red'; return; }
+        if (!cfg.is_admin) {
+            document.getElementById('noadmin').style.display = '';
+            return;
+        }
+        document.getElementById('cfg').style.display = '';
+        document.getElementById('show-parental').checked = !!cfg.show_parental;
+        jget('/api/hide/profiles', function(pres) {
+            var sel = document.getElementById('child-profile');
+            var html = '<option value="0">(sin definir)</option>';
+            var list = (pres && pres.profiles) || [];
+            for (var i = 0; i < list.length; i++) {
+                var s = (String(list[i].id) === String(cfg.child_profile_id)) ? ' selected' : '';
+                html += '<option value="' + list[i].id + '"' + s + '>' +
+                    String(list[i].name || '').replace(/</g, '&lt;') + ' (#' + list[i].id + ')</option>';
+            }
+            sel.innerHTML = html;
+        });
+    });
+}
+function saveCfg() {
+    var show = !!document.getElementById('show-parental').checked;
+    var cpid = parseInt(document.getElementById('child-profile').value || '0', 10) || 0;
+    fetch('/api/hide/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ show_parental: show, child_profile_id: cpid })
+    }).then(function(r) { return r.json(); }).then(function(j) {
+        document.getElementById('status').textContent = (j && j.success) ? '✅ Guardado' : '❌ Error';
+    }).catch(function() {
+        document.getElementById('status').textContent = '❌ Error de red';
+    });
+}
+init();
+</script>
+</body>
+</html>

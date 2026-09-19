@@ -176,6 +176,25 @@ def init_db():
     """)
 
     c.execute("""
+        CREATE TABLE IF NOT EXISTS tvcat_hidden (
+            profile_id INTEGER,
+            item_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (profile_id, item_id)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tvcat_blocked (
+            profile_id INTEGER,
+            item_id TEXT,
+            blocked_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (profile_id, item_id)
+        )
+    """)
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS watch_progress (
             profile_id INTEGER,
             item_id TEXT,
@@ -650,32 +669,35 @@ def collection_identity_key(name, serial):
 
 
 def _cover_text_title(text):
-    """Título desde el tag Title/Título/Nombre del cover_text (igual que el
-    enriquecedor). Vacío si no hay tag resuelto."""
+    """Título efectivo desde el cover_text: tag Title/Título/Nombre y, si no
+    hay, Original Title (igual que el enriquecedor). Vacío si no hay tag."""
     try:
         import re as _re
-        _await_hash = False
-        for _line in (text or "").split("\n"):
-            _l = _line.strip()
-            if not _l:
-                continue
-            if _await_hash and _l.startswith("#"):
-                _v = _l.lstrip("#").strip().replace("_", " ")
-                if len(_v) >= 2:
-                    return _v[:200]
-                _await_hash = False
-                continue
+        # 2 pasadas: primero Title principal, luego Original Title.
+        for _pass in (r"(?i)^(t[ií]tulo|titulo|title|nombre)(?!\s+(?:alt\d*|es(?:pa[ñn]a)?|latam|latin[oa]|mx|m[ée]xico|original)\b)\s*[:=\-]?\s*(.*?)\s*$",
+                      r"(?i)^(original\s+title|t[ií]tulo\s+original)\s*[:=\-]?\s*(.*?)\s*$"):
             _await_hash = False
-            _m = _re.match(r"(?i)^(t[ií]tulo|titulo|title|nombre)\s*[:=\-]?\s*(.*?)\s*$", _l)
-            if not _m:
-                continue
-            _v = _m.group(2).strip()
-            if not _v or _v in (":", "-", ""):
-                _await_hash = True
-                continue
-            if "{" in _v or "}" in _v or len(_v) < 2:
-                continue
-            return _v[:200]
+            for _line in (text or "").split("\n"):
+                _l = _line.strip()
+                if not _l:
+                    continue
+                if _await_hash and _l.startswith("#"):
+                    _v = _l.lstrip("#").strip().replace("_", " ")
+                    if len(_v) >= 2:
+                        return _v[:200]
+                    _await_hash = False
+                    continue
+                _await_hash = False
+                _m = _re.match(_pass, _l)
+                if not _m:
+                    continue
+                _v = _m.group(2).strip()
+                if not _v or _v in (":", "-", ""):
+                    _await_hash = True
+                    continue
+                if "{" in _v or "}" in _v or len(_v) < 2:
+                    continue
+                return _v[:200]
     except Exception:
         pass
     return ""
@@ -996,6 +1018,16 @@ def rebuild_cache(plugin_loader):
 
     conn.commit()
     conn.close()
+
+    # 5. Re-aplicar títulos/variantes de covers guardados localmente: el rebuild
+    # regenera desde los sources con los títulos originales y perdería las
+    # ediciones del enriquecedor (SSOT: enriched_covers). Idempotente.
+    try:
+        from services.enrich_apply import reapply_all_enriched as _reapply
+        _reapply()
+    except Exception as _e_re:
+        print(f" [CATALOG] reapply enriched omitido: {_e_re}", flush=True)
+
     print(f" [CATALOG] Caché reconstruida ({total} items, {eps_total} episodios)")
 
 
@@ -1255,8 +1287,12 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
             items_inserted += 1
 
         # Insertar episodios de items activos (mapeando item_id interno -> catálogo y derivando episode_key).
-        # No se confía en el sync_status de plugin_episodes_export (puede venir mal marcado por el plugin);
-        # se filtra por si el item resuelto está en los items activos.
+        # Sin UNIQUE en (item_id, episode_key), el INSERT OR REPLACE de abajo
+        # nunca reemplaza: cada sync duplicaba todos los episodios ([1,1,2,2...]).
+        # Se borran primero los del conjunto activo (sync idempotente).
+        if active_item_ids:
+            _ph = ",".join("?" * len(active_item_ids))
+            c.execute(f"DELETE FROM item_episodes WHERE item_id IN ({_ph})", list(active_item_ids))
         eps_inserted = 0
         for row in pc.execute("SELECT * FROM plugin_episodes_export"):
             ed = dict(row)
@@ -1449,6 +1485,12 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
             items_inserted += 1
 
         eps_inserted = 0
+        # Sin UNIQUE en (item_id, episode_key), el INSERT OR REPLACE de abajo
+        # nunca reemplaza: cada sync duplicaba todos los episodios ([1,1,2,2...]).
+        # Se borran primero los del conjunto activo (sync idempotente).
+        if active_set:
+            _ph2 = ",".join("?" * len(active_set))
+            c.execute(f"DELETE FROM item_episodes WHERE item_id IN ({_ph2})", list(active_set))
         for row in pc.execute(f"SELECT * FROM plugin_episodes_export WHERE item_id IN ({ph})", list(item_ids)):
             ed = dict(row)
             resolved_item = resolve_item_id(ed.get("item_id", ""))
@@ -1579,6 +1621,63 @@ def _load_content_filter(conn, key):
         return None
 
 
+def _hide_enabled(conn, user_id) -> bool:
+    """Toggle personal de ocultos: activo salvo '0' explícito."""
+    if not user_id:
+        return False
+    try:
+        row = conn.execute("SELECT value FROM tvcat_settings WHERE key=?",
+                           (f"hide_enabled_{user_id}",)).fetchone()
+        if not row:
+            return True
+        return str(row["value"] if isinstance(row, dict) else row[0]) != "0"
+    except Exception:
+        return True
+
+
+def _apply_hidden_layer(conn, where_clauses, params, user_id=None, profile_id=None, role="user"):
+    """Exclusión de ocultos (personal) y bloqueos parentales en listados SQL.
+    Solo items (las tablas nunca guardan COL- por construcción)."""
+    try:
+        if user_id and profile_id and _hide_enabled(conn, user_id):
+            where_clauses.append(
+                "item_id NOT IN (SELECT item_id FROM tvcat_hidden WHERE profile_id=?)")
+            params.append(profile_id)
+        if role != "admin" and profile_id:
+            where_clauses.append(
+                "item_id NOT IN (SELECT item_id FROM tvcat_blocked WHERE profile_id=?)")
+            params.append(profile_id)
+    except Exception:
+        pass
+
+
+def get_hidden_sets(conn, user_id=None, profile_id=None, role="user"):
+    """(hidden, blocked) como sets para filtrado python (favoritos, continue,
+    completed). Respeta toggle personal y exención admin."""
+    hidden, blocked = set(), set()
+    try:
+        if user_id and profile_id and _hide_enabled(conn, user_id):
+            hidden = {str(r[0]) for r in conn.execute(
+                "SELECT item_id FROM tvcat_hidden WHERE profile_id=?", (profile_id,)).fetchall()}
+        if role != "admin" and profile_id:
+            blocked = {str(r[0]) for r in conn.execute(
+                "SELECT item_id FROM tvcat_blocked WHERE profile_id=?", (profile_id,)).fetchall()}
+    except Exception:
+        pass
+    return hidden, blocked
+
+
+def filter_hidden_items(items, hidden=None, blocked=None):
+    """Quita de una lista los items ocultos/bloqueados (por item_id)."""
+    hidden = hidden or set()
+    blocked = blocked or set()
+    if not hidden and not blocked:
+        return items
+    return [it for it in (items or [])
+            if str((it or {}).get("item_id", "")) not in hidden
+            and str((it or {}).get("item_id", "")) not in blocked]
+
+
 def _apply_content_layer(conn, where_clauses, params, key):
     """Añade cláusulas WHERE para una capa de filtro (plugins/categorías/subcategorías deshabilitadas)."""
     d = _load_content_filter(conn, key)
@@ -1636,6 +1735,9 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
         # Nivel 1: acceso (perfil) — solo no-admin
         if role != "admin" and profile_id:
             _apply_content_layer(conn, where_clauses, params, f"access_{profile_id}")
+        # Ocultos personales + bloqueos parentales (solo items)
+        _apply_hidden_layer(conn, where_clauses, params,
+                            user_id=user_id, profile_id=profile_id, role=role)
 
     if search and len(search.strip()) >= 2:
         query = search.strip().lower()

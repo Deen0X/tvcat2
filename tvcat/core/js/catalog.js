@@ -98,6 +98,11 @@
             _doCollectionsLoad();
             return;
         }
+        // Secciones ocultos: viven en sus endpoints
+        if (currentCategory === 'hidden' || currentCategory === 'hidden_blocked') {
+            _doHiddenLoad();
+            return;
+        }
         var url = '/api/catalog/' + currentCategory;
         var fp = buildFilterParams();
         if (fp.length) url += '?' + fp.join('&');
@@ -132,6 +137,12 @@
         if (currentCategory === 'collections') {
             window._activeCollection = null;
             _doCollectionsLoad(query);
+            return;
+        }
+        // Dentro de ocultos, la búsqueda filtra la propia sección.
+        if (currentCategory === 'hidden' || currentCategory === 'hidden_blocked') {
+            window._activeCollection = null;
+            _doHiddenLoad(query);
             return;
         }
         window._activeCollection = null;
@@ -190,7 +201,7 @@
         try {
             var el = document.getElementById('category-title');
             if (!el) return;
-            var map = { home: 'Catálogo', favorites: 'Favoritos', continue: 'Seguir Viendo', completed: 'Vistos', collections: 'Colecciones' };
+            var map = { home: 'Catálogo', favorites: 'Favoritos', continue: 'Seguir Viendo', completed: 'Vistos', collections: 'Colecciones', hidden: 'Ocultos', hidden_blocked: 'Ocultos Parental' };
             var label = map[currentCategory];
             if (!label) {
                 label = String(currentCategory || 'home');
@@ -591,6 +602,34 @@
             }
         });
     }
+    // Sección Ocultos / Ocultos Parental: viven en sus endpoints.
+    function _doHiddenLoad(query) {
+        var isParental = (currentCategory === 'hidden_blocked');
+        var url = isParental ? '/api/hidden/blocked?profile=0' : '/api/hidden';
+        var q = window.sanitizeSearchText(query || '').trim().toLowerCase();
+        var mySeq = ++_loadSeq;
+        showLoading(true);
+        window.API.ajax({
+            url: url,
+            success: function(data) {
+                if (mySeq !== _loadSeq) return;
+                currentItems = data.items || [];
+                if (q.length >= 2) {
+                    currentItems = currentItems.filter(function(it) {
+                        var t = String((it && it.title) || '').toLowerCase();
+                        return t.indexOf(q) !== -1;
+                    });
+                }
+                renderItems(currentItems);
+                updateBadge(currentItems.length);
+                showLoading(false);
+            },
+            error: function() {
+                if (mySeq !== _loadSeq) return;
+                showLoading(false);
+            }
+        });
+    }
     Catalog.loadCollections = function() {
         window._activeCollection = null;
         currentCategory = 'collections';
@@ -617,6 +656,39 @@
                 showLoading(false);
             }
         });
+    };
+
+    // Refresco quirúrgico de UN item del grid (cover + título opcional), sin
+    // recargar el catálogo. Para ediciones del enriquecedor: el hero ya muestra
+    // lo nuevo, pero el grid conserva la imagen cacheada del navegador.
+    Catalog.refreshGridCover = function(itemId, newTitle) {
+        try {
+            if (!itemId) return;
+            var card = document.querySelector('.grid-item[data-id="' + itemId + '"]');
+            if (card) {
+                var img = card.querySelector('img[data-csrc]');
+                var u = '/api/cover/' + encodeURIComponent(itemId) + '?v=' + Date.now();
+                if (img) {
+                    img.setAttribute('data-csrc', u);
+                    img.removeAttribute('data-cmiss');
+                    img.src = u;
+                } else {
+                    var ph = card.querySelector('img.grid-cover-ph');
+                    if (ph) ph.src = u;
+                }
+                if (newTitle) {
+                    var t = card.querySelector('.grid-item-title');
+                    if (t) t.textContent = newTitle;
+                }
+            }
+            var items = currentItems || [];
+            for (var i = 0; i < items.length; i++) {
+                if (String(items[i].item_id) === String(itemId)) {
+                    if (newTitle) items[i].title = newTitle;
+                    break;
+                }
+            }
+        } catch (e) {}
     };
 
     window.refreshCover = function(itemId) {

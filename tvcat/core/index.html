@@ -96,6 +96,12 @@
             <a href="#" data-category="collections" onclick="selectSection('collections', this)">
                 <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM9 4h2v6l-1-.75L9 10V4zm9 16H6V4h1v9l3-2.25L13 13V4h5v16z"/></svg> Colecciones
             </a>
+            <a href="#" data-category="hidden" onclick="selectSection('hidden', this)">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2.71 3.16L1.39 4.48l4.02 4.02C3.66 9.6 2.06 11.19 1 13c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l4.02 4.02 1.32-1.32L2.71 3.16zM12 17c-2.76 0-5-2.24-5-5 0-.77.18-1.5.49-2.14l1.57 1.57A3.01 3.01 0 0 0 9 12c0 1.66 1.34 3 3 3l4.14 4.14c-.59.32-1.26.51-1.99.59L12 17zm2.5-4.31l-4.19-4.19 4.19 4.19z"/></svg> Ocultos
+            </a>
+            <a href="#" data-category="hidden_blocked" id="nav-hidden-blocked" style="display:none;" onclick="selectSection('hidden_blocked', this)">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg> Ocultos Parental
+            </a>
         </div>
 
         <hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 4px 0;">
@@ -179,6 +185,10 @@
                 <button class="tab-btn tab-admin" id="tab-btn-enricher" onclick="switchSettingsTab('enricher')">
                     <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
                     <span class="tab-btn-text">Enriquecedor</span>
+                </button>
+                <button class="tab-btn tab-admin" id="tab-btn-ai" onclick="switchSettingsTab('ai')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
+                    <span class="tab-btn-text">IA</span>
                 </button>
                 <button class="tab-btn tab-admin" id="tab-btn-covers" onclick="switchSettingsTab('covers')">
                     <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
@@ -641,6 +651,36 @@
                         </div>
                     </div>
                 </div>
+<div class="tab-pane hidden" id="pane-ai">
+                    <h3 style="margin-bottom:12px;">IA — Proveedores de lenguaje</h3>
+                    <p style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:12px;">Servicio central de IA. Se prueban por prioridad (menor primero) y ante cualquier fallo se pasa al siguiente. Se usa en {AI:...} de plantillas y en los botones IA de colecciones. Se guarda con el botón inferior Guardar Cambios.</p>
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;">
+                        <div style="padding:10px 12px;background:var(--bg-card);">
+                            <h4 style="margin:0;font-size:0.85rem;">Cómo conseguir la API key de Gemini (gratis)</h4>
+                            <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:4px;">1. Entra (logeado con tu cuenta de Google) en <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener" style="color:var(--accent);">aistudio.google.com/api-keys</a> — también llegas desde AI Studio, icono de la llave 🔑 abajo a la izquierda. 2. Pulsa <b>Create API key</b>. 3. Copia la clave y pégala abajo en un proveedor Gemini. Sin tarjeta ni pago para uso normal.</div>
+                        </div>
+                    </div>
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;">
+                        <div style="padding:10px 12px;background:var(--bg-card);display:flex;align-items:center;justify-content:space-between;">
+                            <h4 style="margin:0;font-size:0.85rem;">Proveedores (por prioridad)</h4>
+                            <button class="btn-secondary" onclick="aiProviderAdd()" style="padding:6px 12px;font-size:0.8rem;">+ Añadir</button>
+                        </div>
+                        <div id="ai-providers-list" style="padding:10px 12px;display:flex;flex-direction:column;gap:10px;"></div>
+                    </div>
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;">
+                        <div style="padding:10px 12px;background:var(--bg-card);">
+                            <h4 style="margin:0;font-size:0.85rem;">Prompts de colecciones</h4>
+                            <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:4px;">Placeholders: {titles} (lista que añade el código), {name} (nombre de la colección), {count} (nº de títulos).</div>
+                        </div>
+                        <div style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+                            <label style="font-size:0.75rem;color:var(--text-secondary);">Sugerir nombre:</label>
+                            <textarea id="ai-prompt-name" rows="4" style="width:100%;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:0.8rem;box-sizing:border-box;resize:vertical;"></textarea>
+                            <label style="font-size:0.75rem;color:var(--text-secondary);">Generar descripción:</label>
+                            <textarea id="ai-prompt-desc" rows="5" style="width:100%;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:0.8rem;box-sizing:border-box;resize:vertical;"></textarea>
+                        </div>
+                    </div>
+                    <span id="ai-config-status" style="font-size:0.75rem;color:var(--text-secondary);"></span>
+                </div>
 <div class="tab-pane hidden" id="pane-mobile">
                     <h3 style="margin-bottom:4px;">Conexi&#xf3;n m&#xf3;vil</h3>
                     <div id="mobile-qr-container" style="margin:12px 0;text-align:center;min-height:60px;"></div>
@@ -884,9 +924,9 @@
     <script src="js/navEngine.js?v=20260801"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
     <script src="js/inputHelper.js?v=20260903q"></script>
-    <script src="js/catalog.js?v=20260910j"></script>
+    <script src="js/catalog.js?v=20260910k"></script>
     <script src="js/player.js?v=20260801"></script>
     <script src="js/ui2.js?v=20260910b"></script>
-    <script src="js/app.js?v=20260910d"></script>
+    <script src="js/app.js?v=20260910k"></script>
 </body>
 </html>

@@ -36,6 +36,18 @@ def normalize_title(text):
         return str(text).lower().strip()
 
 
+def base_title(text):
+    """Nombre base: normalizado sin el año final entre paréntesis
+    ('Vaiana (2016)' -> 'vaiana'). Para igualdad exacta insensible al año
+    del paréntesis (el año real lo confirma la columna/hint)."""
+    try:
+        t = normalize_title(text)
+        t2 = re.sub(r"\s*\((?:19|20)\d{2}\)\s*$", "", t).strip()
+        return t2 or t
+    except Exception:
+        return normalize_title(text)
+
+
 def is_collection_text(text):
     """True si el texto contiene el tag TVCatCollection (cualquier posición)."""
     if not text:

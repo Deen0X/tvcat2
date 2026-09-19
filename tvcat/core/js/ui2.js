@@ -1206,6 +1206,8 @@ var UI = {
             if (profileRes && profileRes.success) {
                 // Guardar también los cambios del enriquecedor si su pestaña se abrió esta sesión
                 try { if (window._enricherLoaded && window.saveEnrichConfig) window.saveEnrichConfig(); } catch (e) { }
+                // Igual la pestaña IA (sin botón propio: va con Guardar Cambios)
+                try { if (window._aiLoaded && window.saveAiConfig) window.saveAiConfig(); } catch (e2) { }
                 var avatarUrl = document.getElementById('profile-avatar-url');
                 // Actualizar estado local del usuario en memoria
                 window.Catalog.currentUser.display_name = displayName;
@@ -1274,6 +1276,9 @@ var UI = {
                 _pifr2.contentWindow.saveConfig();
             }
         } catch (e) {}
+        // IA y enriquecedor: sin botón propio, van con Aplicar también.
+        try { if (window._aiLoaded && window.saveAiConfig) window.saveAiConfig(); } catch (eAi) {}
+        try { if (window._enricherLoaded && window.saveEnrichConfig) window.saveEnrichConfig(); } catch (eEn) {}
         // Config genérica de plugin (settings_schema + hero cats): centralizada
         // en Guardar Cambios / Aplicar, sin botones propios en la página.
         try { if (typeof window.saveCurrentGenericPluginConfig === 'function') window.saveCurrentGenericPluginConfig(); } catch (e) {}

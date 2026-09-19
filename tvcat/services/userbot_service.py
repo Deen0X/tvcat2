@@ -220,6 +220,20 @@ def _get_global_client_type() -> Optional[str]:
         pass
     return None
 
+def get_preferred_client_type(explicit=None) -> str:
+    """Tipo de cliente efectivo: explícito > ajuste global (Comportamiento
+    Telegram) > telethon. Usar SIEMPRE en vez de hardcodear "telethon"."""
+    if explicit in ("telethon", "pyrogram"):
+        return explicit
+    try:
+        gct = _get_global_client_type()
+        if gct in ("telethon", "pyrogram"):
+            return gct
+    except Exception:
+        pass
+    return "telethon"
+
+
 def get_active_session(tg_user_id: int = None) -> Optional[dict]:
     """Devuelve la sesión activa para un usuario (o default).
     Si hay cliente global configurado (telegram_client_type), se usa ese."""
@@ -359,6 +373,27 @@ def delete_session(session_id: int) -> bool:
     return True
 
 
+def quarantine_session(tg_user_id: int, client_type: str, reason: str = "") -> bool:
+    """Desactiva una sesión muerta (p. ej. AuthKeyDuplicated: Telegram quemó
+    la clave) para que el pool/servicio dejen de usarla y no monten tormentas
+    de reconnect. Solo marca is_active=0; no borra nada."""
+    try:
+        if tg_user_id is None or not client_type:
+            return False
+        conn = _get_conn()
+        cur = conn.execute(
+            "UPDATE userbot_sessions SET is_active=0 WHERE tg_user_id=? AND client_type=? AND is_active<>0",
+            (tg_user_id, client_type))
+        conn.commit()
+        n = cur.rowcount if cur.rowcount is not None else 0
+        conn.close()
+        if n:
+            print(f" [USERBOT] Sesión en cuarentena ({tg_user_id}/{client_type}): {reason}", flush=True)
+        return bool(n)
+    except Exception:
+        return False
+
+
 def get_session_for_user(tg_user_id: int, client_type: str = "telethon") -> Optional[dict]:
     """Devuelve una sesión para un usuario y tipo de cliente específicos."""
     conn = _get_conn()
@@ -426,6 +461,23 @@ def _pool_lock(key: str):
         _client_locks[key] = lk
     return lk
 
+
+def client_is_alive(raw) -> bool:
+    """¿Cliente conectado? Telethon expone is_connected() MÉTODO sync;
+    pyrofork expone is_connected ATRIBUTO bool. Llamarlo como
+    `await raw.is_connected()` falla SIEMPRE en pyro (bool no invocable) y en
+    telethon (await sobre bool) → el pool creía muerto al cliente sano y lo
+    desconectaba en caliente (tormenta de reconnects + 'has not been started')."""
+    try:
+        if raw is None:
+            return False
+        v = getattr(raw, "is_connected", None)
+        if v is None:
+            return False
+        return bool(v() if callable(v) else v)
+    except Exception:
+        return False
+
 async def get_active_client(client_type: str = None) -> 'UserbotClient':
     """Devuelve el cliente activo para el tipo dado (o el del usuario default)."""
     if client_type:
@@ -437,7 +489,7 @@ async def get_active_client(client_type: str = None) -> 'UserbotClient':
                 # reconectar antes de devolverlo (una sola vez, bajo lock).
                 try:
                     raw = getattr(c, '_client', None)
-                    connected = await raw.is_connected() if raw else False
+                    connected = client_is_alive(raw)
                 except Exception:
                     connected = False
                 if not connected:
@@ -754,9 +806,11 @@ class UserbotClient:
     async def send_code_request(self, phone: str):
         if self._type == "pyrogram":
             sent = await self._client.send_code(phone)
-            return {"phone_code_hash": sent.phone_code_hash, "requires_2fa": False}
+            return {"phone_code_hash": sent.phone_code_hash, "requires_2fa": False,
+                    "code_type": type(getattr(sent, "type", None)).__name__}
         sent = await self._client.send_code_request(phone)
-        return {"phone_code_hash": sent.phone_code_hash, "requires_2fa": getattr(sent, 'phone_registered', False)}
+        return {"phone_code_hash": sent.phone_code_hash, "requires_2fa": getattr(sent, 'phone_registered', False),
+                "code_type": type(getattr(sent, "type", None)).__name__}
 
     async def sign_in(self, phone: str, code: str, password: str = None, phone_code_hash: str = None):
         if self._type == "pyrogram":

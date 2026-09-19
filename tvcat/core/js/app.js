@@ -32,9 +32,25 @@ window.selectSection = function(category, element) {
         loadContinueWatching();
     } else if (category === 'completed') {
         loadCompleted();
+    } else if (category === 'hidden' || category === 'hidden_blocked') {
+        if (category === 'hidden_blocked' &&
+            !(window.Catalog && window.Catalog.currentUser && window.Catalog.currentUser.is_admin)) {
+            return;
+        }
+        window.Catalog.load(category);
     } else {
         window.Catalog.load(category);
     }
+};
+
+// Visibilidad de la sección parental en el sidebar (solo admin).
+window.refreshHiddenNav = function() {
+    try {
+        var el = document.getElementById('nav-hidden-blocked');
+        if (!el) return;
+        var admin = !!(window.Catalog && window.Catalog.currentUser && window.Catalog.currentUser.is_admin);
+        el.style.display = admin ? '' : 'none';
+    } catch (e) {}
 };
 
 // --- Search with wildcards ---
@@ -486,6 +502,7 @@ function switchSettingsTab(tab) {
     if (tab === 'contents') loadContentsTrees();
     if (tab === 'administration') window.adminLoadLog();
     if (tab === 'enricher') { window.loadEnrichConfig(); if (window.loadFtags) window.loadFtags(); }
+    if (tab === 'ai') { try { window.loadAiConfig(); } catch (e) {} }
     if (tab === 'userbot') {
         // asegurar colapsables inicializados aunque config aún no haya vuelto
         setTimeout(function(){
@@ -955,6 +972,151 @@ function loadUserbotConfig() {
 
 
 
+    // ─── IA: proveedores (tab de Configuración, solo admin) ───
+    window._aiProviders = [];
+    window.loadAiConfig = function() {
+        var list = document.getElementById('ai-providers-list');
+        var st = document.getElementById('ai-config-status');
+        if (!list) return;
+        window.API.ajax({
+            url: '/api/ai/config',
+            success: function(res) {
+                window._aiProviders = (res && res.providers) || [];
+                renderAiProviders();
+                var pr = (res && res.prompts) || {};
+                var pn = document.getElementById('ai-prompt-name');
+                var pd = document.getElementById('ai-prompt-desc');
+                if (pn && pr.collection_name) pn.value = pr.collection_name;
+                if (pd && pr.collection_desc) pd.value = pr.collection_desc;
+                window._aiLoaded = true;
+                if (st) st.textContent = '';
+            },
+            error: function() { if (st) st.textContent = 'Error al cargar (¿admin?)'; }
+        });
+    };
+    function renderAiProviders() {
+        var list = document.getElementById('ai-providers-list');
+        if (!list) return;
+        if (!window._aiProviders.length) {
+            list.innerHTML = '<p style="font-size:0.8rem;color:var(--text-secondary);">Sin proveedores. Añade Gemini (API key de AI Studio) u otro compatible OpenAI.</p>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < window._aiProviders.length; i++) {
+            (function(p, idx) {
+                var pid = p.id || ('ai-' + idx);
+                html += '<div data-ai-id="' + pid + '" style="border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-card);display:flex;flex-direction:column;gap:6px;">' +
+                    '<div style="display:flex;gap:6px;align-items:center;">' +
+                    '<input data-f="name" value="' + String(p.name || '').replace(/"/g, '&quot;') + '" placeholder="Nombre" title="Nombre" style="flex:2;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">' +
+                    '<select data-f="kind" title="Tipo" onchange="aiKindChanged(this)" style="flex:1;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">' +
+                    '<option value="gemini"' + (p.kind === 'gemini' ? ' selected' : '') + '>Gemini</option>' +
+                    '<option value="openai"' + (p.kind === 'openai' ? ' selected' : '') + '>OpenAI-compat.</option></select>' +
+                    '<label title="Habilitado" style="font-size:0.75rem;display:flex;align-items:center;gap:4px;"><input type="checkbox" data-f="enabled"' + (p.enabled !== false ? ' checked' : '') + '>ON</label>' +
+                    '</div>' +
+                    '<div style="display:flex;gap:6px;">' +
+                    '<input data-f="api_key" type="password" value="" placeholder="' + (p.configured ? '✓ configurada (vacío = mantener)' : 'API key') + '" title="API key" style="flex:2;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">' +
+                    '<input data-f="model" value="' + String(p.model || '').replace(/"/g, '&quot;') + '" placeholder="Modelo (ej: gemini-2.0-flash)" title="Modelo" style="flex:2;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">' +
+                    '<input data-f="priority" type="number" value="' + (p.priority !== undefined ? p.priority : (idx + 1) * 10) + '" title="Prioridad (menor = antes)" style="width:64px;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">' +
+                    '</div>' +
+                    '<div style="display:flex;gap:6px;">' +
+                    '<input data-f="base_url" value="' + String(p.base_url || '').replace(/"/g, '&quot;') + '" placeholder="Base URL (vacío = defecto; ej: http://localhost:11434/v1)" title="Base URL" style="flex:3;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">' +
+                    '<button class="btn-secondary" onclick="aiProviderTest(\'' + pid + '\')" style="padding:6px 12px;font-size:0.8rem;">Probar</button>' +
+                    '<button class="btn-secondary" onclick="aiProviderDel(\'' + pid + '\')" style="padding:6px 12px;font-size:0.8rem;">✕</button>' +
+                    '</div>' +
+                    '<div data-ai-msg style="font-size:0.75rem;color:var(--text-secondary);"></div>' +
+                    '</div>';
+            })(window._aiProviders[i], i);
+        }
+        list.innerHTML = html;
+    }
+    function collectAiProviders() {
+        var list = document.getElementById('ai-providers-list');
+        var out = [];
+        if (!list) return out;
+        var cards = list.querySelectorAll('[data-ai-id]');
+        for (var i = 0; i < cards.length; i++) {
+            var c = cards[i];
+            var g = function(f) { var el = c.querySelector('[data-f="' + f + '"]'); if (!el) return ''; return (el.type === 'checkbox') ? el.checked : el.value; };
+            out.push({
+                id: c.getAttribute('data-ai-id'),
+                name: g('name'), kind: g('kind'), api_key: g('api_key'),
+                base_url: g('base_url'), model: g('model'),
+                priority: parseInt(g('priority'), 10) || ((i + 1) * 10),
+                enabled: !!g('enabled')
+            });
+        }
+        return out;
+    }
+    window.aiProviderAdd = function() {
+        window._aiProviders.push({ id: 'ai-' + Date.now(), name: '', kind: 'gemini', api_key: '', base_url: '', model: 'gemini-flash-latest', priority: (window._aiProviders.length + 1) * 10, enabled: true, configured: false });
+        renderAiProviders();
+    };
+    // Al elegir tipo se pre-rellena base/modelo (sin pisar lo escrito a mano).
+    window.aiKindChanged = function(sel) {
+        try {
+            var card = sel.closest ? sel.closest('[data-ai-id]') : null;
+            if (!card) return;
+            var kind = sel.value;
+            var baseEl = card.querySelector('[data-f="base_url"]');
+            var modelEl = card.querySelector('[data-f="model"]');
+            if (kind === 'gemini') {
+                if (baseEl && !baseEl.value.trim()) baseEl.value = 'https://generativelanguage.googleapis.com';
+                if (modelEl && !modelEl.value.trim()) modelEl.value = 'gemini-flash-latest';
+            } else if (kind === 'openai') {
+                if (modelEl && (!modelEl.value.trim() || modelEl.value.indexOf('gemini') === 0)) modelEl.value = '';
+            }
+        } catch (e) {}
+    };
+    window.aiProviderDel = function(pid) {
+        window._aiProviders = window._aiProviders.filter(function(p) { return String(p.id || '') !== String(pid); });
+        renderAiProviders();
+    };
+    window.aiProviderTest = function(pid) {
+        // Prueba con los datos actuales de la tarjeta (aunque no estén
+        // guardados): el backend acepta el proveedor inline.
+        var card = document.querySelector('[data-ai-id="' + pid + '"]');
+        var msg = card ? card.querySelector('[data-ai-msg]') : null;
+        function gf(f) { var el = card ? card.querySelector('[data-f="' + f + '"]') : null; if (!el) return ''; return (el.type === 'checkbox') ? el.checked : el.value; }
+        var inline = card ? {
+            id: pid, name: gf('name'), kind: gf('kind'), api_key: gf('api_key'),
+            base_url: gf('base_url'), model: gf('model'),
+            priority: parseInt(gf('priority'), 10) || 10, enabled: true
+        } : null;
+        if (msg) msg.textContent = 'Probando...';
+        window.API.ajax({
+            method: 'POST', url: '/api/ai/test',
+            data: { provider_id: pid, provider: inline },
+            success: function(r) {
+                if (msg) msg.textContent = (r && r.ok) ? ('✅ ' + ((r.provider_name || '') + ' ' + (r.text || '')).trim()) : ('❌ ' + ((r && r.error) || 'Error'));
+            },
+            error: function() { if (msg) msg.textContent = '❌ Error de red'; }
+        });
+    };
+    // Guardado estándar: lo llama Guardar Cambios / Aplicar del footer
+    // (igual que el enriquecedor), sin botón propio en la pestaña.
+    window.saveAiConfig = function() {
+        var st = document.getElementById('ai-config-status');
+        if (st) st.textContent = 'Guardando...';
+        var pn = document.getElementById('ai-prompt-name');
+        var pd = document.getElementById('ai-prompt-desc');
+        var data = { providers: collectAiProviders() };
+        if (pn || pd) {
+            data.prompts = {
+                collection_name: pn ? pn.value : '',
+                collection_desc: pd ? pd.value : ''
+            };
+        }
+        window.API.ajax({
+            method: 'PUT', url: '/api/ai/config',
+            data: data,
+            success: function(r) {
+                if (st) st.textContent = (r && r.success) ? 'Guardado ✓' : 'Error al guardar';
+                window.loadAiConfig();
+            },
+            error: function() { if (st) st.textContent = 'Error al guardar'; }
+        });
+    };
+
     // Cargar usuarios Telegram + sesiones
     window.loadUserbotSessions = function() {
     var container = document.getElementById('userbot-sessions-list');
@@ -964,7 +1126,7 @@ function loadUserbotConfig() {
         var html = '';
         for (var u = 0; u < users.length; u++) {
             var user = users[u];
-            var checked = user.is_default ? '\u25C9' : '\u25CB';
+            var checked = user.is_default ? '◉' : '○';
             html += '<div class="plugin-item" style="flex-wrap:wrap;margin-top:8px;" data-tg="' + user.tg_user_id + '">' +
                 '<div style="flex:1;display:flex;align-items:center;gap:8px;min-width:0;">' +
                 '<span class="user-radio" onclick="toggleDefaultUser(' + user.tg_user_id + ')" ' +
@@ -975,10 +1137,30 @@ function loadUserbotConfig() {
                 '<div style="display:flex;align-items:center;gap:6px;margin-left:auto;">' +
                 '<span class="test-t" id="test-t-' + user.tg_user_id + '" style="font-size:0.8rem;color:var(--text-secondary);font-family:monospace;display:none;"></span>' +
                 '<span class="test-p" id="test-p-' + user.tg_user_id + '" style="font-size:0.8rem;color:var(--text-secondary);font-family:monospace;display:none;"></span>' +
-                '<button class="plugin-config-btn" onclick="testUserSessions(' + user.tg_user_id + ')" title="Probar">\u25B6</button>' +
-                '<button class="plugin-config-btn" onclick="editUserSessions(' + user.tg_user_id + ')" title="Editar nombre">\u270E</button>' +
-                '<button class="plugin-config-btn" onclick="deleteTelegramUser(' + user.tg_user_id + ')" title="Eliminar usuario" style="color:var(--accent);">\u2715</button>' +
+                '<button class="plugin-config-btn" onclick="testUserSessions(' + user.tg_user_id + ')" title="Probar">▶</button>' +
+                '<button class="plugin-config-btn" onclick="editUserSessions(' + user.tg_user_id + ')" title="Editar nombre">✎</button>' +
+                '<button class="plugin-config-btn" onclick="deleteTelegramUser(' + user.tg_user_id + ')" title="Eliminar usuario" style="color:var(--accent);">✕</button>' +
                 '</div></div>';
+            // Una fila POR SESIÓN (aunque sea el mismo número): generar nunca
+            // reemplaza; la nueva aparece aquí con su nick único (secuencial).
+            var sesses = user.sessions || [];
+            for (var si = 0; si < sesses.length; si++) {
+                var s = sesses[si];
+                var sActive = s.is_active ? '◉' : '○';
+                var sType = (s.client_type === 'pyrogram') ? 'P' : 'T';
+                html += '<div class="plugin-item" style="flex-wrap:wrap;margin-top:4px;margin-left:28px;" data-sess="' + s.id + '">' +
+                    '<div style="flex:1;display:flex;align-items:center;gap:8px;min-width:0;">' +
+                    '<span onclick="toggleSessionActive(' + s.id + ',' + (s.is_active ? 'false' : 'true') + ')" ' +
+                    'style="cursor:pointer;font-size:1.1rem;user-select:none;width:1.2rem;text-align:center;color:var(--accent);" title="Usar esta sesión">' + sActive + '</span>' +
+                    '<span style="font-size:0.7rem;font-family:monospace;background:rgba(255,255,255,0.08);border-radius:4px;padding:1px 6px;">' + sType + '</span>' +
+                    '<span style="font-weight:400;">' + s.name + '</span>' +
+                    '</div>' +
+                    '<div style="display:flex;align-items:center;gap:6px;margin-left:auto;">' +
+                    '<button class="plugin-config-btn" onclick="testSingleSession(' + s.id + ')" title="Probar">▶</button>' +
+                    '<button class="plugin-config-btn" onclick="editSession(' + s.id + ')" title="Editar">✎</button>' +
+                    '<button class="plugin-config-btn" onclick="deleteSession(' + s.id + ')" title="Eliminar" style="color:var(--accent);">✕</button>' +
+                    '</div></div>';
+            }
         }
         if (!html) html = '<p style="color:var(--text-secondary);font-size:0.85rem;">Sin usuarios Telegram. Crea una sesi\u00F3n dual.</p>';
         container.innerHTML = html;
@@ -1360,10 +1542,12 @@ window.testUserSessions = function(tgUserId) {
                 return;
             }
             var sessions = user.sessions || [];
+            // La lista viene con activas primero: la PRIMERA de cada tipo es el
+            // par seleccionado (antes se cogía la última e ignoraba is_active).
             var tSess = null, pSess = null;
             for (var i = 0; i < sessions.length; i++) {
-                if (sessions[i].client_type === 'telethon') tSess = sessions[i];
-                if (sessions[i].client_type === 'pyrogram') pSess = sessions[i];
+                if (sessions[i].client_type === 'telethon' && !tSess) tSess = sessions[i];
+                if (sessions[i].client_type === 'pyrogram' && !pSess) pSess = sessions[i];
             }
 
             if (tSpan) { tSpan.style.display = 'inline'; tSpan.textContent = 'T:\u23F3'; }
@@ -1510,6 +1694,17 @@ window.editSession = function(id) {
     });
 };
 
+window.toggleSessionActive = function(id, makeActive) {
+    // Activa esta sesión (desactiva las demás del mismo usuario+tipo en el
+    // backend). Si se desactiva la única activa, el pool usa cualquiera.
+    window.API.ajax({
+        method: 'PUT', url: '/api/userbot/sessions/' + id,
+        data: { is_active: !!makeActive },
+        success: function() { loadUserbotSessions(); },
+        error: function() { alert('No se pudo cambiar la sesión'); }
+    });
+};
+
 window.deleteSession = function(id) {
     if (!confirm('\u00BFEliminar esta sesi\u00f3n de Telegram?')) return;
     window.API.ajax({
@@ -1521,7 +1716,7 @@ window.deleteSession = function(id) {
 
 // --- Generate Dual Session (Telethon + Pyrofork, dos codigos SMS independientes) ---
 window.openSessionGenerator = function() {
-    var _state = { password: '', telethonDone: false };
+    var _state = { password: '', telethonDone: false, telethonSkipped: false };
 
     var subModal = document.createElement('div');
     subModal.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(9,9,11,0.9);z-index:999999;display:flex;align-items:center;justify-content:center;';
@@ -1544,9 +1739,10 @@ window.openSessionGenerator = function() {
     h += '<div><label style="font-size:0.75rem;color:#a1a1aa;">Telefono</label><input type="text" id="gen-phone" value="' + phone + '" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div>';
 
     // --- Paso 1: Telethon ---
-    h += '<div style="border:1px solid rgba(63,63,70,0.5);border-radius:8px;padding:10px;margin-top:4px;">';
+    h += '<div id="gen-telethon-step" style="border:1px solid rgba(63,63,70,0.5);border-radius:8px;padding:10px;margin-top:4px;">';
     h += '<div style="font-size:0.8rem;font-weight:700;color:#a855f7;margin-bottom:6px;">1. Sesion Telethon</div>';
-    h += '<button id="gen-send-code-btn" style="background:#a855f7;border:none;border-radius:6px;padding:8px;color:white;font-weight:700;font-size:0.8rem;cursor:pointer;">Enviar Codigo SMS</button>';
+    h += '<div style="display:flex;gap:8px;"><button id="gen-send-code-btn" style="flex:1;background:#a855f7;border:none;border-radius:6px;padding:8px;color:white;font-weight:700;font-size:0.8rem;cursor:pointer;">Enviar Codigo SMS</button>' +
+        '<button id="gen-skip-btn" title="Omitir Telethon y generar solo Pyrofork" style="background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:8px 14px;color:#f4f4f5;font-weight:700;font-size:0.8rem;cursor:pointer;">Skip</button></div>';
     h += '<div id="gen-verification" style="display:none;flex-direction:column;gap:8px;margin-top:8px;">';
     h += '<div><label style="font-size:0.75rem;color:#a1a1aa;">Codigo SMS (Telethon)</label><input type="text" id="gen-code" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div>';
     h += '<div id="gen-2fa" style="display:none;"><label style="font-size:0.75rem;color:#a1a1aa;">2FA</label><input type="password" id="gen-password" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div>';
@@ -1556,7 +1752,8 @@ window.openSessionGenerator = function() {
     // --- Paso 2: Pyrofork ---
     h += '<div id="gen-pyro-step" style="display:none;border:1px solid rgba(63,63,70,0.5);border-radius:8px;padding:10px;margin-top:4px;">';
     h += '<div style="font-size:0.8rem;font-weight:700;color:#06b6d4;margin-bottom:6px;">2. Sesion Pyrofork</div>';
-    h += '<button id="gen-pyro-send-btn" style="background:#06b6d4;border:none;border-radius:6px;padding:8px;color:white;font-weight:700;font-size:0.8rem;cursor:pointer;">Enviar Codigo SMS</button>';
+    h += '<div style="display:flex;gap:8px;"><button id="gen-pyro-send-btn" style="flex:1;background:#06b6d4;border:none;border-radius:6px;padding:8px;color:white;font-weight:700;font-size:0.8rem;cursor:pointer;">Enviar Codigo SMS</button>' +
+        '<button id="gen-pyro-skip-btn" title="Omitir Pyrofork (solo Telethon)" style="background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:8px 14px;color:#f4f4f5;font-weight:700;font-size:0.8rem;cursor:pointer;">Skip</button></div>';
     h += '<div id="gen-pyro-verification" style="display:none;flex-direction:column;gap:8px;margin-top:8px;">';
     h += '<div><label style="font-size:0.75rem;color:#a1a1aa;">Codigo SMS (Pyrofork)</label><input type="text" id="gen-pyro-code" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div>';
     h += '<button id="gen-pyro-confirm-btn" style="background:#22c55e;border:none;border-radius:6px;padding:8px;color:white;font-weight:700;font-size:0.8rem;cursor:pointer;">Confirmar Pyrofork</button>';
@@ -1590,6 +1787,19 @@ window.openSessionGenerator = function() {
             else if (confirmBtn && confirmBtn.style.display !== 'none') { confirmBtn.click(); }
         }
     });
+
+    // Skip Telethon: ocultar el paso 1 y pasar directo a Pyrofork (solo Pyrogram).
+    document.getElementById('gen-skip-btn').onclick = function() {
+        _state.telethonSkipped = true;
+        var step1 = document.getElementById('gen-telethon-step');
+        if (step1) step1.style.display = 'none';
+        var sendBtn = document.getElementById('gen-send-code-btn');
+        if (sendBtn) sendBtn.style.display = 'none';
+        var status = document.getElementById('gen-status');
+        if (status) status.innerHTML = '\u23ED Telethon omitida. Genera solo Pyrofork (Paso 2).';
+        document.getElementById('gen-pyro-step').style.display = 'block';
+        document.getElementById('gen-pyro-send-btn').focus();
+    };
 
     // Paso 1: Enviar codigo SMS (Telethon)
     document.getElementById('gen-send-code-btn').onclick = function() {
@@ -1665,6 +1875,23 @@ window.openSessionGenerator = function() {
         });
     };
 
+    // Skip Pyrofork: si Telethon ya se generó, cerrar recargando (solo
+    // Telethon); si también se omitió Telethon, no hay nada que guardar.
+    document.getElementById('gen-pyro-skip-btn').onclick = function() {
+        var sendBtn = document.getElementById('gen-pyro-send-btn');
+        var skipBtn = document.getElementById('gen-pyro-skip-btn');
+        if (sendBtn) sendBtn.style.display = 'none';
+        if (skipBtn) skipBtn.style.display = 'none';
+        var status = document.getElementById('gen-status');
+        if (_state.telethonDone) {
+            if (status) status.innerHTML = '\u2705 Solo Telethon generada (Pyrofork omitido)';
+            setTimeout(function() { closeGen(); loadUserbotConfig(); loadUserbotSessions(); }, 1200);
+        } else {
+            if (status) status.innerHTML = 'Nada que generar: ambas omitidas.';
+            setTimeout(function() { closeGen(); }, 1200);
+        }
+    };
+
     // Paso 3: Enviar codigo SMS (Pyrofork) — nuevo SMS independiente
     document.getElementById('gen-pyro-send-btn').onclick = function() {
         var phone = document.getElementById('gen-phone').value.trim();
@@ -1716,7 +1943,9 @@ window.openSessionGenerator = function() {
                 },
                 success: function(res) {
                     if (res && res.success) {
-                        status.innerHTML = '\u2705\u2705 Telethon + Pyrofork generadas correctamente';
+                        status.innerHTML = _state.telethonSkipped
+                            ? '\u2705 Solo Pyrofork generada (Telethon omitida)'
+                            : '\u2705\u2705 Telethon + Pyrofork generadas correctamente';
                         document.getElementById('gen-pyro-confirm-btn').disabled = false;
                         setTimeout(function() { closeGen(); loadUserbotConfig(); loadUserbotSessions(); }, 2000);
                     } else if (res && res.needs_2fa) {
@@ -1766,6 +1995,7 @@ function loadSettings() {
                         role: (session && session.role) || '',
                         is_admin: !!(session && session.role === 'admin')
                     };
+                    if (window.refreshHiddenNav) window.refreshHiddenNav();
                 } catch (eU) {}
             },
             error: function() {}
@@ -1798,6 +2028,7 @@ function loadSettings() {
                         color: config.color || '#e11d48',
                         category_preferences: config.category_preferences || {}
                     };
+                    try { if (window.refreshHiddenNav) window.refreshHiddenNav(); } catch (eH) {}
                     // Re-renderizar formulario de perfil si el modal est\u00E1 visible
                     if (!document.getElementById('settings-modal').classList.contains('hidden')) {
                         if (window.UI) window.UI.initSettingsModalContent();
