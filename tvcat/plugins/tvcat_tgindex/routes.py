@@ -1107,6 +1107,12 @@ async def test_channel_connection(payload: ChannelTestRequest):
 
         if payload.telegram_account_id == -1:
             session_string = get_global_setting("userbot_session_string")
+        elif int(payload.telegram_account_id or -1) <= -2:
+            # Centinela de sesión nueva: userbot_sessions.id = -account_id.
+            from .scanner import _resolve_account_creds as _rac
+            _a, _h, session_string, _u = _rac(int(payload.telegram_account_id))
+            api_id = _a or api_id
+            api_hash = _h or api_hash
         else:
             conn = get_db_connection(system=True)
             cursor = conn.cursor()
@@ -1116,7 +1122,19 @@ async def test_channel_connection(payload: ChannelTestRequest):
             if not row:
                 return {"success": False, "error": "La cuenta de Telegram seleccionada no está configurada"}
             session_string = row[0]
-        
+
+        # Instalación limpia con Sesiones nuevas: api en userbot_sessions.
+        if not api_id or not api_hash:
+            try:
+                from .scanner import _resolve_api_creds as _rac2
+                _a2, _h2, _s2 = _rac2()
+                api_id = api_id or _a2
+                api_hash = api_hash or _h2
+                if not session_string:
+                    session_string = _s2
+            except Exception:
+                pass
+
         if not api_id or not api_hash or not session_string:
             return {"success": False, "error": "api_id, api_hash o session_string no configurados en la aplicación"}
             

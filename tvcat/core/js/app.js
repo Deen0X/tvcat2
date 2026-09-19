@@ -3220,13 +3220,45 @@ window.openTgindexEditModal = function(id) {
     var acc = document.getElementById('tgindex-account');
     var topo = document.getElementById('tgindex-topo');
 
+    // Sesiones nuevas (userbot): añadir las Telethon como opciones con
+    // centinela -(id_sesion) que el backend resuelve (ver _resolve_account_creds).
+    // Si falla la carga, queda solo "Cuenta Principal (Global)".
+    var fillTgindexAccounts = function(done) {
+        try {
+            window.API.ajax({
+                url: '/api/userbot/sessions',
+                success: function(r) {
+                    try {
+                        var list = (r && r.sessions) || [];
+                        for (var i = 0; i < list.length; i++) {
+                            var s = list[i] || {};
+                            if ((s.client_type || 'telethon') !== 'telethon') continue;
+                            var sid = parseInt(s.id, 10) || 0;
+                            if (sid <= 0) continue;
+                            var opt = document.createElement('option');
+                            opt.value = String(-sid);
+                            var lbl = s.name || ('Sesión ' + sid);
+                            opt.textContent = lbl;
+                            acc.appendChild(opt);
+                        }
+                    } catch (e) {}
+                    if (done) done();
+                },
+                error: function() { if (done) done(); }
+            });
+        } catch (e) { if (done) done(); }
+    };
+
     if (isNew) {
         topo.value = '1';
-        acc.value = '-1';
-        loadTgindexCategoryOptions('tgindex-cat', 'tgindex-subcat', '', '');
+        fillTgindexAccounts(function() {
+            acc.value = '-1';
+            loadTgindexCategoryOptions('tgindex-cat', 'tgindex-subcat', '', '');
+        });
         return;
     }
 
+    fillTgindexAccounts(function() {
     window.API.ajax({
         url: '/api/user/channels',
         success: function(data) {
@@ -3254,6 +3286,7 @@ window.openTgindexEditModal = function(id) {
             }
         },
         error: function() {}
+    });
     });
 };
 

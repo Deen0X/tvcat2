@@ -27,6 +27,7 @@
     <button onclick="cerrarConfig()" style="background:none;border:1px solid #3f3f46;color:#f4f4f5;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:16px;line-height:1;">&times;</button>
     <h3 style="margin:0;flex:1;">TGHirayi_v2</h3>
 </div>
+<div id="config-load-error" style="display:none;background:#3f1d1d;border:1px solid #ef4444;color:#fca5a5;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px;">⚠️ No se pudo cargar la configuración del servidor (revisa que el plugin esté <b>habilitado</b> en la lista de plugins y recarga).</div>
 
 <div class="card">
     <div style="margin-bottom:8px;"><b>Credencial de Telegram</b></div>
@@ -279,7 +280,13 @@ function parseTelegramLink(link) {
 }
 
 function loadConfig() {
-    api(API + '/config', {}, function(res) {
+    api(API + '/config', {}, function(res, status) {
+        var errBox = document.getElementById('config-load-error');
+        if (status !== 200 || !res || (!res.config && !res.sessions)) {
+            if (errBox) errBox.style.display = 'block';
+            return;
+        }
+        if (errBox) errBox.style.display = 'none';
         var cfg = (res && res.config) || {};
         var sel = document.getElementById('credential-select');
         if (sel && res.sessions) {

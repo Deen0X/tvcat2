@@ -4,7 +4,7 @@
   "description": "Copia t\u00edtulos completos (cover + episodios) a canales Telegram destino, descargando y re-subiendo para generar nuevos file_ids. Soporta m\u00faltiples destinos, topolog\u00edas 1/2/3 y forward opcional entre canales.",
   "type": "player",
   "version": "1.0.0",
-  "defaultEnabled": false,
+  "defaultEnabled": true,
   "icon": "static/plugin_icon.png",
   "action_category": "playback",
   "single_button": true,

@@ -45,11 +45,43 @@ def _load_templates() -> dict:
     row = conn.execute("SELECT value FROM tvcat_settings WHERE key='enrich_templates'").fetchone()
     conn.close()
     if not row or not row[0]:
+        _ensure_default_templates()
         return {}
     try:
         return json.loads(row[0])
     except Exception:
         return {}
+
+
+def _ensure_default_templates():
+    """Siembra la plantilla por defecto en instalación limpia o DB antigua
+    sin fila (solo si falta; nunca pisa lo guardado)."""
+    try:
+        from .catalog_service import get_conn
+        conn = get_conn()
+        row = conn.execute("SELECT value FROM tvcat_settings WHERE key='enrich_templates'").fetchone()
+        needs = False
+        if not row or not row[0]:
+            needs = True
+        else:
+            try:
+                d = json.loads(row[0])
+                lst = d.get("templates") or []
+                has_content = bool((d.get("fallback") or "").strip()) or any(
+                    isinstance(t, dict) and (t.get("content") or "").strip() for t in lst)
+                needs = not has_content
+            except Exception:
+                needs = True
+        if needs:
+            seed = {"fallback": "", "templates": [
+                {"name": "Por defecto", "categories": "", "subcategories": "",
+                 "content": DEFAULT_TEMPLATE}], "categories": {}}
+            conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
+                         ("enrich_templates", json.dumps(seed, ensure_ascii=False)))
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 def _save_templates(templates: dict):

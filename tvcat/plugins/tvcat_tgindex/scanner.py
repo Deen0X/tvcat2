@@ -2251,11 +2251,34 @@ def _get_last_cached_id(channel_id: str) -> int:
 
 
 def _resolve_account_creds(account_id):
-    """Resuelve (api_id, api_hash, session_string, username) para un account_id de tvcat_telegram_accounts (-1 = Principal)."""
+    """Resuelve (api_id, api_hash, session_string, username).
+    - -1 = Principal (global).
+    - <= -2 = centinela de sesión nueva: userbot_sessions.id = -account_id
+      (solo Telethon, que es lo que usa TGIndex).
+    - > 0 = fila legacy de tvcat_telegram_accounts."""
     from tvcat.gateway import get_db_connection
     api_id, api_hash, global_session = _resolve_api_creds()
     if account_id == -1:
         return api_id, api_hash, global_session, "Principal"
+    try:
+        account_id = int(account_id)
+    except Exception:
+        return None, None, None, None
+    if account_id <= -2:
+        try:
+            conn = get_db_connection(system=True)
+            row = conn.execute(
+                "SELECT s.session_string, s.api_id, s.api_hash, "
+                "COALESCE(u.name, s.name) FROM userbot_sessions s "
+                "LEFT JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
+                "WHERE s.id = ? AND s.client_type = 'telethon' LIMIT 1",
+                (-account_id,)).fetchone()
+            conn.close()
+            if not row or not row[0]:
+                return None, None, None, None
+            return (row[1] or api_id), (row[2] or api_hash), row[0], row[3]
+        except Exception:
+            return None, None, None, None
     try:
         conn = get_db_connection(system=True)
         row = conn.execute("SELECT session_string, username FROM tvcat_telegram_accounts WHERE id = ?", (account_id,)).fetchone()
@@ -2530,6 +2553,20 @@ def _resolve_api_creds():
             ).fetchone()
             if acc and acc[0]:
                 session_string = acc[0]
+        # Instalación limpia con sistema de Sesiones nuevo (sin legacy):
+        # usar la sesión Telethon activa como Principal.
+        if not session_string:
+            try:
+                srow = conn.execute(
+                    "SELECT session_string FROM userbot_sessions "
+                    "WHERE client_type = 'telethon' "
+                    "AND session_string IS NOT NULL AND session_string != '' "
+                    "ORDER BY (is_active = 1) DESC, id DESC LIMIT 1"
+                ).fetchone()
+                if srow and srow[0]:
+                    session_string = srow[0]
+            except Exception:
+                pass
         conn.close()
     except Exception:
         pass
@@ -2549,6 +2586,10 @@ async def get_client_for_account(account_id: int):
     if account_id == -1:
         session_string = global_session
         username = "Principal"
+    elif int(account_id) <= -2:
+        # Centinela de sesión nueva (ver _resolve_account_creds).
+        _a, _b, _s, username = _resolve_account_creds(account_id)
+        api_id, api_hash, session_string = _a or api_id, _b or api_hash, _s
     else:
         conn = get_db_connection(system=True)
         row = conn.execute("SELECT session_string, username FROM tvcat_telegram_accounts WHERE id = ?", (account_id,)).fetchone()
