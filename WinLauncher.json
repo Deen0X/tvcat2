@@ -1,0 +1,16 @@
+{
+  "LauncherName": "TVCat2",
+  "AllowMultipleInstances": false,
+  "Port": 8093,
+  "ServerScript": "tvcat/gateway.py",
+  "ServerExecutable": "python",
+  "ServerArguments": "--port={port}",
+  "Autostart": false,
+  "StartMinimized": false,
+  "OpenBrowserOnStart": false,
+  "CustomUrl": "",
+  "MinimizeToTray": true,
+  "MinimizeOnClose": true,
+  "ShowMinimizeMessage": false,
+  "MaxLogLines": 1000
+}

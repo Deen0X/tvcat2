@@ -120,6 +120,8 @@ ponemos el api_id, api_hash y teléfono en los campos, y le damos a guardar.
 
 Finalmente necesitas un Session String. este string es muy sensible y es la principal razón por la que he decidido publicar el código completo en python, por que así es claramente analizable y estar seguros de que el programa no realiza ningún tipo de envío de estos datos a ninguna parte. Al ser datos tan sensibles el usuario que utilice el programa debe tener la confianza en que no hay vías alternativas donde se pueda estar sustrayendo esta información.
 
+Nota: ES MUY IMPORTANTE QUE EL RELOJ DEL SISTEMA ESTE SINCRONIZADO O EL ENVIO DEL CODIGO FALLARA SILENCIOSAMENTE.
+
 El programa genera los string de conexión (vía telegram oficial, el usuario debe proporcionar la clave que le llegará por telegram) y no muestra nunca el string de conexión. lo guarda cifrado en la base de datos.
 
 Por mi parte he hecho todo lo posible por guardar lo mejor posible esta información y que no quede fácilmente accesible.
