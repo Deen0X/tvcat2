@@ -21,10 +21,42 @@ if _TVCAT_DIR not in sys.path:
 _PLUGIN_DATA_DIR_OVERRIDE: Optional[str] = None
 
 def get_plugin_db_path() -> str:
-    """Devuelve la ruta real a la DB del plugin, respetando el override de Android."""
+    """Devuelve la ruta real a la DB del plugin, respetando el override de Android.
+    Como efecto lateral, restaura tvcat.db desde tvcat_default.db si falta
+    (copia-en-arranque): todos los sqlite3.connect() directos de routes/scanner
+    pasan por aquí, así ninguno puede crear un fichero vacío de ~20KB."""
     if _PLUGIN_DATA_DIR_OVERRIDE:
         return os.path.join(_PLUGIN_DATA_DIR_OVERRIDE, "tvcat_tgindex", "data", "tvcat.db")
+    ensure_plugin_db()
     return os.path.join(_TVCAT_DIR, "plugins", "tvcat_tgindex", "data", "tvcat.db")
+
+
+def ensure_plugin_db():
+    """Copia-en-arranque (arquitectura §2): si falta tvcat.db pero existe
+    tvcat_default.db, copiarlo antes de conectar. Cubre todos los
+    sqlite3.connect(get_plugin_db_path()) directos de routes/scanner, que de
+    otro modo crean un fichero vacío (~20KB). Con override Android no hay
+    default que copiar: se omite."""
+    try:
+        if _PLUGIN_DATA_DIR_OVERRIDE:
+            return
+        _db = os.path.join(_TVCAT_DIR, "plugins", "tvcat_tgindex", "data", "tvcat.db")
+        _default = os.path.join(_TVCAT_DIR, "plugins", "tvcat_tgindex", "data", "tvcat_default.db")
+        if not os.path.exists(_db) and os.path.exists(_default):
+            import shutil
+            for _suf in ("-wal", "-shm"):
+                try:
+                    if os.path.exists(_db + _suf):
+                        os.remove(_db + _suf)
+                except Exception:
+                    pass
+            shutil.copy2(_default, _db)
+            print(f" [TGINDEX] DB restaurada desde default: {_db}")
+    except Exception as e:
+        try:
+            print(f" [TGINDEX] Aviso: no se pudo copiar DB default: {e}")
+        except Exception:
+            pass
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession

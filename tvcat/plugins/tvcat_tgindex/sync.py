@@ -11,11 +11,32 @@ import re
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DB = os.path.join(PLUGIN_DIR, "data", "tvcat.db")
+PLUGIN_DB_DEFAULT = os.path.join(PLUGIN_DIR, "data", "tvcat_default.db")
 BASE_DIR = os.path.abspath(os.path.join(PLUGIN_DIR, "..", ".."))
 SYSTEM_DB = os.path.join(BASE_DIR, "data", "tvcat.db")
 
 
+def _ensure_plugin_db_copy():
+    """Copia-en-arranque (arquitectura §2): si falta tvcat.db pero existe
+    tvcat_default.db, copiarlo antes de conectar. Sin esto, sqlite3.connect()
+    crea un fichero vacío (~20KB) sin catalog_labels/catalog_assets."""
+    try:
+        if not os.path.exists(PLUGIN_DB) and os.path.exists(PLUGIN_DB_DEFAULT):
+            import shutil
+            for _suf in ("-wal", "-shm"):
+                try:
+                    if os.path.exists(PLUGIN_DB + _suf):
+                        os.remove(PLUGIN_DB + _suf)
+                except Exception:
+                    pass
+            shutil.copy2(PLUGIN_DB_DEFAULT, PLUGIN_DB)
+            print(f" [TGINDEX] DB restaurada desde default: {PLUGIN_DB}")
+    except Exception as e:
+        print(f" [TGINDEX] Aviso: no se pudo copiar DB default: {e}")
+
+
 def _get_plugin_conn():
+    _ensure_plugin_db_copy()
     os.makedirs(os.path.dirname(PLUGIN_DB), exist_ok=True)
     conn = sqlite3.connect(PLUGIN_DB)
     conn.row_factory = sqlite3.Row

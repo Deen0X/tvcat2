@@ -198,6 +198,32 @@ class PluginLoader:
         return result
 
     # --- API de sincronización (source plugins) ---
+    @staticmethod
+    def _ensure_plugin_db(plugin: dict):
+        """Copia-en-arranque genérica (arquitectura §2): si al plugin le falta
+        data/tvcat.db pero tiene data/tvcat_default.db, copiarlo antes del
+        sync. Sin esto, el primer sqlite3.connect() crea un fichero vacío
+        sin las tablas semilla (labels/assets). Solo copia si falta."""
+        try:
+            plugin_dir = (plugin or {}).get("_dir", "")
+            if not plugin_dir:
+                return
+            db_path = os.path.join(plugin_dir, "data", "tvcat.db")
+            default_path = os.path.join(plugin_dir, "data", "tvcat_default.db")
+            if not os.path.exists(db_path) and os.path.exists(default_path):
+                import shutil
+                for suf in ("-wal", "-shm"):
+                    try:
+                        if os.path.exists(db_path + suf):
+                            os.remove(db_path + suf)
+                    except Exception:
+                        pass
+                shutil.copy2(default_path, db_path)
+                print(f" [PLUGIN LOADER] DB restaurada desde default: {db_path}")
+        except Exception as e:
+            print(f" [PLUGIN LOADER] Aviso: no se pudo copiar DB default "
+                  f"de {(plugin or {}).get('name', '?')}: {e}")
+
     def sync_all(self, progress_callback=None):
         """Ejecuta sync() en todos los source plugins habilitados, en orden."""
         ordered = sorted(
@@ -208,6 +234,7 @@ class PluginLoader:
         total = len(ordered)
         for idx, plugin in enumerate(ordered):
             name = plugin["name"]
+            self._ensure_plugin_db(plugin)
             sync_mod = plugin.get("_sync_module")
             if sync_mod and hasattr(sync_mod, "sync"):
                 try:

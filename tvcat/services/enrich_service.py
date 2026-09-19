@@ -101,11 +101,13 @@ def _cache_set(key: str, value: dict):
 # ─── Plantillas ────────────────────────────────────────────────────
 
 DEFAULT_TEMPLATE = (
-    "{title} ({year})\n"
-    "{rating}\n"
-    "{genres}\n"
-    "{author}\n"
-    "{description}"
+    "{foriginal_title}{fepisodes}{fyear}{frating}{frating_count}{fgenres}\n"
+    "\n"
+    "{fsinopsis}\n"
+    "\n"
+    "{fcast}{fdirector}\n"
+    "\n"
+    "{falt_titles}"
 )
 
 

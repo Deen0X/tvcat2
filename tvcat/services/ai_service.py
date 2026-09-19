@@ -32,9 +32,10 @@ DEFAULT_PROMPTS = {
         "Responde SOLO con el nombre, sin comillas ni explicaciones."
     ),
     "collection_desc": (
-        "Genera una descripción breve en español, sin spoilers, para una "
-        "colección llamada \"{name}\" que contiene estos {count} títulos:\n{titles}\n"
-        "Responde SOLO con la descripción (2-4 frases), sin comillas ni explicaciones."
+        "Genera una descripción breve en español, sin spoilers, con una "
+        "extensión que de aproximadamente 1000 caracteres, para una "
+        "colección llamada \"{name}\" que contiene estos {count} títulos:\n\n{titles}\n"
+        "Responde SOLO con la descripción, sin comillas ni explicaciones."
     ),
 }
 

@@ -20,8 +20,31 @@ def get_conn():
     return conn
 
 
+def _ensure_central_db_copy():
+    """Copia-en-arranque genérica (arquitectura §2): si falta la DB central
+    pero existe tvcat_default.db, copiarla ANTES del primer connect (que
+    crearía un fichero vacío). Solo copia si falta; el resto de init_db
+    (CREATE IF NOT EXISTS + migraciones tolerantes) sigue igual."""
+    try:
+        default_path = os.path.join(BASE_DIR, "data", "tvcat_default.db")
+        if not os.path.exists(DB_PATH) and os.path.exists(default_path):
+            import shutil
+            for suf in ("-wal", "-shm"):
+                try:
+                    if os.path.exists(DB_PATH + suf):
+                        os.remove(DB_PATH + suf)
+                except Exception:
+                    pass
+            os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+            shutil.copy2(default_path, DB_PATH)
+            print(f" [CATALOG] DB central restaurada desde default: {DB_PATH}")
+    except Exception as e:
+        print(f" [CATALOG] Aviso: no se pudo copiar DB central default: {e}")
+
+
 def init_db():
     """Crea las tablas iniciales si no existen."""
+    _ensure_central_db_copy()
     conn = get_conn()
     conn.execute("PRAGMA journal_mode=WAL")
     c = conn.cursor()
