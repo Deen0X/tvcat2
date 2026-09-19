@@ -2784,6 +2784,57 @@ async def _process_manual_task(task):
 _CURSOR_COLS_OK = False
 
 
+_SCANNED_CHANNELS_DDL = """CREATE TABLE IF NOT EXISTS tvcat_scanned_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT,
+                display_name TEXT,
+                topology_type INTEGER,
+                parsing_rules TEXT DEFAULT '{}',
+                last_scanned_msg_id INTEGER DEFAULT 0,
+                start_msg_id INTEGER DEFAULT 0,
+                end_msg_id INTEGER DEFAULT 0,
+                topic_id INTEGER DEFAULT NULL,
+                content_type TEXT DEFAULT 'media',
+                telegram_account_id INTEGER DEFAULT NULL,
+                priority INTEGER DEFAULT 0,
+                refresh_cycles INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'idle',
+                enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                custom_subcategory TEXT,
+                auto_refresh_interval TEXT,
+                tg_user_id INTEGER,
+                category TEXT,
+                topic_only INTEGER DEFAULT 0,
+                topic_name TEXT,
+                cache_owner INTEGER,
+                cache_can_post INTEGER,
+                channel_last_msg_id INTEGER DEFAULT 0,
+                test_only INTEGER DEFAULT 0,
+                channel_last_checked_at INTEGER DEFAULT 0,
+                parse_sig TEXT DEFAULT '',
+                scanned_upto_msg_id INTEGER DEFAULT 0,
+                range_complete INTEGER DEFAULT 0
+            )"""
+
+
+def _ensure_scanned_channels_table():
+    """Autocurado instancia fresca: crea tvcat_scanned_channels si no existe."""
+    try:
+        from tvcat.gateway import get_db_connection as _gdbT
+        _ct = _gdbT(system=True)
+        try:
+            _ct.execute(_SCANNED_CHANNELS_DDL)
+            _ct.commit()
+        finally:
+            try:
+                _ct.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _ensure_cursor_columns():
     """2026-09-06: columnas U/RC también desde el ciclo (la lista no siempre se
     abre antes del primer ciclo tras actualizar). Una sola vez por proceso."""
@@ -2791,6 +2842,7 @@ def _ensure_cursor_columns():
     if _CURSOR_COLS_OK:
         return
     try:
+        _ensure_scanned_channels_table()
         from tvcat.gateway import get_db_connection as _gdbC
         _cc = _gdbC(system=True)
         for _ddl in ("ALTER TABLE tvcat_scanned_channels ADD COLUMN scanned_upto_msg_id INTEGER DEFAULT 0",

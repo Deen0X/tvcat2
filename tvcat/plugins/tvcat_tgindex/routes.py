@@ -446,9 +446,55 @@ async def test_userbot_connection():
 # -------------------------------------------------------------------------
 # Channels CRUD
 # -------------------------------------------------------------------------
+_SCANNED_CHANNELS_DDL = """CREATE TABLE IF NOT EXISTS tvcat_scanned_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT,
+                display_name TEXT,
+                topology_type INTEGER,
+                parsing_rules TEXT DEFAULT '{}',
+                last_scanned_msg_id INTEGER DEFAULT 0,
+                start_msg_id INTEGER DEFAULT 0,
+                end_msg_id INTEGER DEFAULT 0,
+                topic_id INTEGER DEFAULT NULL,
+                content_type TEXT DEFAULT 'media',
+                telegram_account_id INTEGER DEFAULT NULL,
+                priority INTEGER DEFAULT 0,
+                refresh_cycles INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'idle',
+                enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                custom_subcategory TEXT,
+                auto_refresh_interval TEXT,
+                tg_user_id INTEGER,
+                category TEXT,
+                topic_only INTEGER DEFAULT 0,
+                topic_name TEXT,
+                cache_owner INTEGER,
+                cache_can_post INTEGER,
+                channel_last_msg_id INTEGER DEFAULT 0,
+                test_only INTEGER DEFAULT 0,
+                channel_last_checked_at INTEGER DEFAULT 0,
+                parse_sig TEXT DEFAULT '',
+                scanned_upto_msg_id INTEGER DEFAULT 0,
+                range_complete INTEGER DEFAULT 0
+            )"""
+
+
+def _ensure_scanned_channels_table():
+    """Autocurado instancia fresca: crea tvcat_scanned_channels si no existe."""
+    try:
+        conn = get_db_connection(system=True)
+        conn.execute(_SCANNED_CHANNELS_DDL)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def _ensure_channel_category_column():
     """Migración: añade columna category a tvcat_scanned_channels si no existe."""
     try:
+        _ensure_scanned_channels_table()
         conn = get_db_connection(system=True)
         conn.execute("ALTER TABLE tvcat_scanned_channels ADD COLUMN category TEXT")
         conn.commit()
@@ -462,6 +508,7 @@ def _ensure_scanstate_columns():
     2026-09-06: + scanned_upto_msg_id (cursor de fetch) + range_complete, con
     backfill conservador U=L (solo filas con U=0; no pisa re-ejecuciones)."""
     try:
+        _ensure_scanned_channels_table()
         conn = get_db_connection(system=True)
         for ddl in ("ALTER TABLE tvcat_scanned_channels ADD COLUMN channel_last_msg_id INTEGER DEFAULT 0",
                     "ALTER TABLE tvcat_scanned_channels ADD COLUMN test_only INTEGER DEFAULT 0",
