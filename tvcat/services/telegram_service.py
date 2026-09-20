@@ -1330,7 +1330,21 @@ class TelegramService:
             except Exception:
                 _floor = 0.0
             await self._throttle(_uid, floor=_floor)
-            entity = await client.get_entity(int(channel_id))
+            try:
+                entity = await client.get_entity(int(channel_id))
+            except ValueError as _ve:
+                # Sesión fresca con caché de entidades vacía: Telethon no
+                # resuelve IDs de canales que nunca vio. Sincronizar diálogos
+                # una vez y reintentar antes de rendirse.
+                if "Could not find the input entity" not in str(_ve):
+                    raise
+                print(f" [TELEGRAM SERVICE] entidad no cacheada {channel_id}: "
+                      f"sincronizando diálogos y reintentando", flush=True)
+                try:
+                    await client.get_dialogs()
+                except Exception:
+                    pass
+                entity = await client.get_entity(int(channel_id))
 
             # Mensaje cabecera de topic (para topo 1/2): se cachea con topic_id del topic.
             if header_msg_id:
@@ -2106,7 +2120,17 @@ class TelegramService:
 
         try:
             await self._throttle(_uid)
-            entity = await client.get_entity(self._to_entity_id(chat))
+            try:
+                entity = await client.get_entity(self._to_entity_id(chat))
+            except ValueError as _ve:
+                # Sesión fresca con caché de entidades vacía (ver _do_fetch_scan).
+                if "Could not find the input entity" not in str(_ve):
+                    raise
+                try:
+                    await client.get_dialogs()
+                except Exception:
+                    pass
+                entity = await client.get_entity(self._to_entity_id(chat))
             last = 0
             try:
                 msgs = await client.get_messages(entity, limit=1)

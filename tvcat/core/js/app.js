@@ -3270,7 +3270,18 @@ window.openTgindexEditModal = function(id) {
                     if (start) start.value = ch.start_msg_id || '';
                     if (end) end.value = ch.end_msg_id || '';
                     if (cid) cid.value = ch.channel_id || '';
-                    if (acc) acc.value = (ch.telegram_account_id !== null && ch.telegram_account_id !== undefined) ? ch.telegram_account_id : -1;
+                    if (acc) { var wantAcc = (ch.telegram_account_id !== null && ch.telegram_account_id !== undefined) ? String(ch.telegram_account_id) : '-1';
+                        acc.value = wantAcc;
+                        // Si la cuenta guardada no está en el combo (p.ej. sesión eliminada
+                        // o lista no cargada), conservar el valor para no sobrescribirlo
+                        // a Principal al guardar sin tocar el combo.
+                        if (acc.selectedIndex < 0 && wantAcc !== '-1' && wantAcc !== '') {
+                            var keep = document.createElement('option');
+                            keep.value = wantAcc;
+                            keep.textContent = 'Sesión guardada (' + wantAcc + ')';
+                            acc.appendChild(keep);
+                            acc.value = wantAcc;
+                        } }
                     if (topo) topo.value = String(ch.topology_type !== undefined && ch.topology_type !== null ? ch.topology_type : 1);
                     loadTgindexCategoryOptions('tgindex-cat', 'tgindex-subcat', ch.category || ch.content_type || '', ch.custom_subcategory || '');
                     // Topic
