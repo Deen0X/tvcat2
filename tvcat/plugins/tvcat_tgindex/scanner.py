@@ -2803,6 +2803,39 @@ async def submit_manual_scan(channel_id: int, mode: str = "normal"):
     return fut
 
 
+# Single-flight global: un solo corredor de escaneo a la vez (manual o
+# ciclo). Sin esto, dos corredores pisan scanner_status y el que termina
+# primero pinta "completado 100%" mientras el otro sigue (barra mentirosa).
+_SCAN_RUNNING = False
+
+
+def _try_acquire_scan_slot(owner: str) -> bool:
+    global _SCAN_RUNNING
+    if _SCAN_RUNNING:
+        add_log(f"⏳ {owner} omitido: ya hay un escaneo en curso.")
+        return False
+    _SCAN_RUNNING = True
+    return True
+
+
+def _release_scan_slot():
+    global _SCAN_RUNNING
+    _SCAN_RUNNING = False
+
+
+def _single_flight_cycle(fn):
+    """Decorador: el ciclo solo corre si no hay otro escaneo en curso."""
+    async def _w(*a, **k):
+        if not _try_acquire_scan_slot("Ciclo periódico"):
+            return
+        try:
+            return await fn(*a, **k)
+        finally:
+            _release_scan_slot()
+    _w.__name__ = getattr(fn, "__name__", "cycle")
+    return _w
+
+
 async def _update_channel_status(channel_id: int, status: str):
     def _sync():
         from tvcat.gateway import get_db_connection
@@ -2820,6 +2853,13 @@ async def _process_manual_task(task):
     channel_id = task["channel_id"]
     mode = task["mode"]
     fut = task["future"]
+
+    if not _try_acquire_scan_slot(f"Escaneo manual #{channel_id}"):
+        try:
+            fut.set_result(False)
+        except Exception:
+            pass
+        return
 
     global scanner_status
     scanner_status.update({"status": "scanning", "progress_percent": 0, "current_item": "Inicializando...", "logs": [], "parse_pending": False})
@@ -2887,6 +2927,7 @@ async def _process_manual_task(task):
         await _update_channel_status(channel_id, "idle")
         fut.set_result(False)
     finally:
+        _release_scan_slot()
         scanner_status.update({"status": "idle", "progress_percent": 100, "current_item": "Completado."})
         #   Tras cualquier escaneo/parse: regenerar export y avisar a la caché central
         try:
@@ -2978,6 +3019,7 @@ def _ensure_cursor_columns():
     _CURSOR_COLS_OK = True
 
 
+@_single_flight_cycle
 async def _process_periodic_cycle():
     global _cycle_counter, scanner_status
     try:
