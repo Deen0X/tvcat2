@@ -1341,9 +1341,12 @@ class TelegramService:
                 print(f" [TELEGRAM SERVICE] entidad no cacheada {channel_id}: "
                       f"sincronizando diálogos y reintentando", flush=True)
                 try:
-                    await client.get_dialogs()
-                except Exception:
-                    pass
+                    _dlg = await client.get_dialogs()
+                    print(f" [TELEGRAM SERVICE] diálogos sincronizados: "
+                          f"{len(_dlg or [])} chats visibles para esta sesión", flush=True)
+                except Exception as _de:
+                    print(f" [TELEGRAM SERVICE] fallo sincronizando diálogos: "
+                          f"{type(_de).__name__}: {str(_de)[:150]}", flush=True)
                 entity = await client.get_entity(int(channel_id))
 
             # Mensaje cabecera de topic (para topo 1/2): se cachea con topic_id del topic.
