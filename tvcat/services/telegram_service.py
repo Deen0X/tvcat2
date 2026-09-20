@@ -1364,7 +1364,7 @@ class TelegramService:
                 except Exception:
                     pass
 
-            iter_kwargs = {}
+            iter_kwargs = {"reverse": True}  # de antiguo a nuevo (lotes 1-100, 101-200...)
             if from_id and from_id > 0:
                 iter_kwargs["min_id"] = from_id
             if to_id:
