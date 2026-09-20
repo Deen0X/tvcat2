@@ -2117,15 +2117,23 @@ async def _scan_channel(account_id, ch, idx, total):
     except Exception:
         pass
     _hasta = 0
-    if end_id and end_id > 0:
-        _hasta = int(end_id)
-    else:
+    _pre = ch.get("_pre") if isinstance(ch, dict) else None
+    if _pre is not None:
+        # Pre-resuelto por el ciclo (sin llamada extra).
         try:
-            _live = await get_telegram_service().get_channel_last(
-                raw_ch_id, session_string=session_string, api_id=api_id, api_hash=api_hash)
-            _hasta = int(_live) if _live else item_from
+            item_from, _hasta = int(_pre[0]), int(_pre[1])
         except Exception:
-            _hasta = 0
+            _pre = None
+    if _pre is None:
+        if end_id and end_id > 0:
+            _hasta = int(end_id)
+        else:
+            try:
+                _live = await get_telegram_service().get_channel_last(
+                    raw_ch_id, session_string=session_string, api_id=api_id, api_hash=api_hash)
+                _hasta = int(_live) if _live else item_from
+            except Exception:
+                _hasta = 0
     # Actualizar bounds del plan (progreso granular real).
     try:
         for _pi in scanner_status.get("plan_items", []):
@@ -3061,11 +3069,77 @@ async def _process_periodic_cycle():
     for _ch in channels:
         try:
             _plan_items.append({"id": _ch["id"], "name": _ch.get("display_name") or "",
-                                "from": 0, "to": 0, "count": 0, "done": 0})
+                                "from": 0, "to": 0, "count": 0, "done": 0,
+                                "phase": "waiting"})
         except Exception:
             pass
     scanner_status.update({"status": "scanning", "progress_percent": 0, "current_item": "Iniciando...",
                            "plan_items": _plan_items, "plan_total": 0, "plan_done": 0})
+
+    def _set_phase(_cid, _ph):
+        try:
+            for _pi in scanner_status.get("plan_items", []):
+                if int(_pi.get("id", -1)) == int(_cid):
+                    _pi["phase"] = _ph
+                    break
+        except Exception:
+            pass
+
+    # Pre-resolución de límites por job: último escaneado (caché/U) + último
+    # del canal (1 llamada). Así cada segmento de la barra nace dividido en
+    # sus mensajes antes de fetchear el primero.
+    try:
+        from services.telegram_service import get_telegram_service as _gts_pre
+        _svc_pre = _gts_pre()
+    except Exception:
+        _svc_pre = None
+    for _ch in channels:
+        try:
+            _cid = _ch["id"]
+            if _cycle_counter % (_ch.get("refresh_cycles") or 1) != 0:
+                _set_phase(_cid, "skip")
+                continue
+            _acc = _ch.get("telegram_account_id")
+            if not _acc:
+                _set_phase(_cid, "skip")
+                continue
+            _api, _ah, _ss, _un = _resolve_account_creds(_acc)
+            if not _api or not _ah or not _ss:
+                _set_phase(_cid, "skip")
+                continue
+            _start = int(_ch.get("start_msg_id") or 1)
+            _end = int(_ch.get("end_msg_id") or 0)
+            try:
+                _up = int(_ch.get("scanned_upto_msg_id") or 0)
+            except Exception:
+                _up = 0
+            _from = max(_start - 1, _up)
+            _hasta = _end if _end and _end > 0 else 0
+            if not _hasta and _svc_pre is not None:
+                try:
+                    _live = await _svc_pre.get_channel_last(
+                        str(_ch.get("channel_id")), session_string=_ss,
+                        api_id=_api, api_hash=_ah)
+                    _hasta = int(_live) if _live else _from
+                except Exception:
+                    _hasta = 0
+            _ch["_pre"] = (int(_from), int(_hasta))
+            _lo = max(_start, int(_from) + 1)
+            _cnt = max(0, int(_hasta) - _lo + 1) if _hasta else 0
+            for _pi in scanner_status.get("plan_items", []):
+                if int(_pi.get("id", -1)) == int(_cid):
+                    _pi["from"] = _lo
+                    _pi["to"] = int(_hasta)
+                    _pi["count"] = _cnt
+                    _pi["phase"] = "waiting"
+                    break
+        except Exception:
+            pass
+    try:
+        scanner_status["plan_total"] = sum(
+            int(_x.get("count", 0)) for _x in scanner_status.get("plan_items", []))
+    except Exception:
+        pass
 
     for idx, ch in enumerate(channels):
         channel_id = ch["id"]
@@ -3075,10 +3149,12 @@ async def _process_periodic_cycle():
 
         if _cycle_counter % refresh_cycles != 0:
             add_log(f"⏳ Saltando '{name}' (refresco cada {refresh_cycles} ciclos).")
+            _set_phase(channel_id, "skip")
             continue
 
         if not account_id:
             add_log(f"⚠️ Saltando '{name}' (sin cuenta de Telegram asociada).")
+            _set_phase(channel_id, "skip")
             continue
 
         scanner_status.update({"status": "scanning", "progress_percent": int((idx / total) * 100), "current_item": f"Escaneando {name}..."})
@@ -3089,6 +3165,7 @@ async def _process_periodic_cycle():
             if not api_id or not api_hash or not session_string:
                 add_log(f"❌ No se pudo resolver la cuenta de Telegram para '{name}'.")
                 await _update_channel_status(channel_id, "idle")
+                _set_phase(channel_id, "skip")
                 continue
 
             # 2026-09-04: regenerar si cambió su topología (borra generados, re-parsea).
@@ -3104,6 +3181,7 @@ async def _process_periodic_cycle():
                 except Exception as _e:
                     add_log(f"  (regenerar omitido para '{name}': {_e})")
             _maxid, _saved = await _scan_channel(account_id, ch, idx, total)
+            _set_phase(channel_id, "parse")
             # 2026-09-04: firma de config (topo+cat+sub+topic+rango). Si cambió,
             # hay que parsear (con regen si cambió la topología); si no hay filas
             # parseadas tampoco se puede saltar.
@@ -3176,9 +3254,11 @@ async def _process_periodic_cycle():
                 pass
 
             await _update_channel_status(channel_id, "idle")
+            _set_phase(channel_id, "done")
         except Exception as e:
             add_log(f"❌ Error al escanear '{name}' en ciclo periódico: {e}")
             await _update_channel_status(channel_id, "idle")
+            _set_phase(channel_id, "done")
 
         await asyncio.sleep(4.0)
 

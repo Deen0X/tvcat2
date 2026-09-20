@@ -3755,6 +3755,7 @@ function pollScanStatus() {
     // 2026-09-07: escritor ÚNICO de estado/barra/% (el poll de logs ya no los
     // toca: dos escritores alternaban textos en la misma línea).
     var status = document.getElementById('scan-status');
+    var barWrap = document.getElementById('scan-progress');
     var bar = document.getElementById('scan-progress-bar');
     var pctEl = document.getElementById('scan-progress-pct');
     var log = document.getElementById('scan-log');
@@ -3763,16 +3764,55 @@ function pollScanStatus() {
         if (bar) bar.style.width = p + '%';
         if (pctEl) pctEl.textContent = p + '%';
     };
+    // Barra segmentada por job: un segmento por scan item, ancho según sus
+    // mensajes pendientes y relleno según los ya traídos + fase.
+    var renderScanSegments = function(items) {
+        if (!barWrap) return false;
+        var tt = 0, dn = 0, i, it;
+        for (i = 0; i < items.length; i++) { tt += (items[i].count || 0); dn += Math.min(items[i].done || 0, items[i].count || 0); }
+        if (!(tt > 0)) return false;
+        var html = '';
+        for (i = 0; i < items.length; i++) {
+            it = items[i] || {};
+            var c = it.count || 0, d = Math.min(it.done || 0, c);
+            if (c <= 0) continue;
+            var fill = Math.max(0, Math.min(100, Math.round(d * 100 / c)));
+            var ph = it.phase || '';
+            var col = (ph === 'done') ? '#22c55e' : (ph === 'parse' ? '#eab308' : (ph === 'skip' ? '#52525b' : 'var(--accent,#e11d48)'));
+            var label = (it.name || ('job ' + it.id)) + ': ' + d + '/' + c + (ph ? ' · ' + ph : '');
+            html += '<div title="' + String(label).replace(/"/g, '&quot;') + '" style="flex:' + c + ' ' + c + ' auto;min-width:8px;height:100%;background:#27272a;border-radius:2px;overflow:hidden;position:relative;">'
+                + '<div style="width:' + fill + '%;height:100%;background:' + col + ';"></div></div>';
+        }
+        barWrap.style.display = 'flex';
+        barWrap.style.gap = '2px';
+        barWrap.innerHTML = html;
+        bar = null;
+        var p = Math.min(99, Math.round(dn * 100 / tt));
+        if (pctEl) pctEl.textContent = p + '%';
+        return true;
+    };
+    var restoreSingleBar = function() {
+        if (!barWrap) return;
+        barWrap.style.display = '';
+        barWrap.style.gap = '';
+        barWrap.innerHTML = '<div id="scan-progress-bar" style="width:0%;height:100%;background:var(--accent);"></div>';
+        bar = document.getElementById('scan-progress-bar');
+    };
     window.API.ajax({
         url: '/api/user/scan/status',
         success: function(res) {
             if (res.status === 'scanning') {
                 if (status) status.textContent = res.current_item || 'Escaneando...';
-                setPct(res.progress_percent);
+                var items = (res && res.plan_items) || [];
+                if (!renderScanSegments(items)) {
+                    if (!bar) restoreSingleBar();
+                    setPct(res.progress_percent);
+                }
                 if (res.logs && log) { log.innerHTML = res.logs.slice(-30).join('\n'); log.scrollTop = log.scrollHeight; }
                 setTimeout(pollScanStatus, 2000);
             } else {
-                if (status) status.textContent = '\u2705 Escaneo completado';
+                if (status) status.textContent = '✅ Escaneo completado';
+                restoreSingleBar();
                 setPct(100);
                 if (res.logs && log) { log.innerHTML = res.logs.slice(-30).join('\n'); log.scrollTop = log.scrollHeight; }
                 _setTgindexFlowButtons(false);
