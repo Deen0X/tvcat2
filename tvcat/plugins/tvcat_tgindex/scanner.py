@@ -2268,7 +2268,7 @@ def _describe_account(account_id):
                 "LEFT JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
                 "WHERE s.client_type = 'telethon' "
                 "AND s.session_string IS NOT NULL AND s.session_string != '' "
-                "ORDER BY (s.is_active = 1) DESC, s.id DESC LIMIT 1").fetchone()
+                "ORDER BY (s.is_active = 1) DESC, s.id ASC LIMIT 1").fetchone()
             return "Principal -> %s" % (row[0] if row and row[0] else "?")
         if aid <= -2:
             row = conn.execute(
@@ -2593,14 +2593,15 @@ def _resolve_api_creds():
             if acc and acc[0]:
                 session_string = acc[0]
         # Instalación limpia con sistema de Sesiones nuevo (sin legacy):
-        # usar la sesión Telethon activa como Principal.
+        # Principal = sesión Telethon activa; en empate, la más antigua
+        # (igual que el Principal legacy: ORDER BY id ASC).
         if not session_string:
             try:
                 srow = conn.execute(
                     "SELECT session_string FROM userbot_sessions "
                     "WHERE client_type = 'telethon' "
                     "AND session_string IS NOT NULL AND session_string != '' "
-                    "ORDER BY (is_active = 1) DESC, id DESC LIMIT 1"
+                    "ORDER BY (is_active = 1) DESC, id ASC LIMIT 1"
                 ).fetchone()
                 if srow and srow[0]:
                     session_string = srow[0]
