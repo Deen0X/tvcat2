@@ -1146,7 +1146,7 @@
                 return 'Title: ' + (t || special) + '\nOriginal Title: ' + special + '\n';
             }
             var o = orig || disp;
-            return o ? ('Original Title: ' + o) : '';
+            return o ? ('Original Title: ' + o + '\n') : '';
         }
         // Nombre desde el caption guardado: Title primero, luego Original title
         // (misma prioridad que el servidor), + año de Year/Año. Sin tags crudos.
