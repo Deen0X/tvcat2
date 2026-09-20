@@ -117,8 +117,13 @@ class TMDBProvider:
         for t in (alt.get("titles") or alt.get("results") or []):
             _push(t.get("iso_3166_1"), t.get("title"))
         trans = details.get("translations") or {}
+        title_en = ""
         for tr in (trans.get("translations") or []):
-            if (tr.get("iso_639_1") or "").lower() != "es":
+            iso = (tr.get("iso_639_1") or "").lower()
+            if iso == "en" and not title_en:
+                data = tr.get("data") or {}
+                title_en = (data.get("title") or data.get("name") or "").strip()
+            if iso != "es":
                 continue
             data = tr.get("data") or {}
             _push(tr.get("iso_3166_1"), data.get("title") or data.get("name"))
@@ -130,8 +135,8 @@ class TMDBProvider:
             if lst:
                 title_latam = lst[0]
                 break
-        # Título inglés (US, si no GB): para el tag foreignname.
-        title_en = ((by_country.get("US") or []) + (by_country.get("GB") or []) + [""])[0]
+        # Título inglés (US, si no GB, si no traducción en): para foreignname.
+        title_en = ((by_country.get("US") or []) + (by_country.get("GB") or []) + [title_en] + [""])[0]
         return title_es, title_latam, ordered_alts[:20], title_en
 
     def _format(self, details, media_type):

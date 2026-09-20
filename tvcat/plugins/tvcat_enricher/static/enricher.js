@@ -567,6 +567,7 @@
                 var m = {
                     'tagtitle': tagtitleVal,
                     'title': d.api_title || '',
+                    'title_en': d.api_title_en || '',
                     'original_title': d.api_original_title || '',
                     'titulo_original': d.api_original_title || '',
                     'title_es': d.api_title_es || '',
@@ -611,6 +612,7 @@
                 var FTAG_FORMATS = {
                     // ftagtitle no existe, solo ftitle
                     "title": "Title: {value}",
+                    "title_en": "Title EN: {value}",
                     "original_title": "Original title: {value}",
                     "titulo_original": "Original title: {value}",
                     "title_es": "Title ES: {value}",
@@ -884,6 +886,7 @@
             try { if (!epCount && opts.epCount) epCount = String(opts.epCount); } catch (e2) { }
             var map = {
                 '{title}': details.api_title || '',
+                '{title_en}': details.api_title_en || '',
                 '{foreignname}': foreignNameValue(details.api_title, details.api_original_title, details),
                 '{original_title}': details.api_original_title || '',
                 '{titulo_original}': details.api_original_title || '',
@@ -924,6 +927,7 @@
             };
             var FTAGS = {
                 "title": "Title: {value}",
+                "title_en": "Title EN: {value}",
                 "original_title": "Original title: {value}",
                 "titulo_original": "Original title: {value}",
                 "title_es": "Title ES: {value}",
@@ -1139,7 +1143,7 @@
                     var v = latin(cands[j]);
                     if (v) { t = v; break; }
                 }
-                return 'Title: ' + (t || special) + '\nOriginal Title: ' + special;
+                return 'Title: ' + (t || special) + '\nOriginal Title: ' + special + '\n';
             }
             var o = orig || disp;
             return o ? ('Original Title: ' + o) : '';
