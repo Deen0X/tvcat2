@@ -2061,6 +2061,7 @@ async def _scan_channel(account_id, ch, idx, total):
     if not api_id or not api_hash or not session_string:
         add_log(f"❌ Credenciales no válidas para la cuenta #{account_id}.")
         return last_id, -1
+    add_log(f"  🔑 Cuenta de escaneo: #{account_id} ({_describe_account(account_id)}).")
 
     # 2026-09-09: titulos de topics del foro (cache central, TTL 24h). Best-effort.
     try:
@@ -2248,6 +2249,44 @@ def _get_last_cached_id(channel_id: str) -> int:
         return last
     except Exception:
         return 0
+
+
+def _describe_account(account_id):
+    """Etiqueta legible de la cuenta que va a escanear (solo para log,
+    sin secretos): Principal -> nombre de la sesión Telethon activa;
+    centinela -> nombre de la sesión; legacy -> username."""
+    try:
+        from tvcat.gateway import get_db_connection
+        conn = get_db_connection(system=True)
+        try:
+            aid = int(account_id)
+        except Exception:
+            return str(account_id)
+        if aid == -1:
+            row = conn.execute(
+                "SELECT COALESCE(u.name, s.name) FROM userbot_sessions s "
+                "LEFT JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
+                "WHERE s.client_type = 'telethon' "
+                "AND s.session_string IS NOT NULL AND s.session_string != '' "
+                "ORDER BY (s.is_active = 1) DESC, s.id DESC LIMIT 1").fetchone()
+            return "Principal -> %s" % (row[0] if row and row[0] else "?")
+        if aid <= -2:
+            row = conn.execute(
+                "SELECT COALESCE(u.name, s.name) FROM userbot_sessions s "
+                "LEFT JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
+                "WHERE s.id = ? LIMIT 1", (-aid,)).fetchone()
+            return "sesión %s" % (row[0] if row and row[0] else (-aid))
+        row = conn.execute(
+            "SELECT username FROM tvcat_telegram_accounts WHERE id = ?",
+            (aid,)).fetchone()
+        return "legacy %s" % (row[0] if row and row[0] else aid)
+    except Exception:
+        return str(account_id)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _resolve_account_creds(account_id):
