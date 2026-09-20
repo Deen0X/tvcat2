@@ -1297,7 +1297,7 @@ class TelegramService:
     async def _do_fetch_scan(self, task: Dict):
         """Escaneo de un rango de mensajes de un canal: usa el pool central (o cliente temp por
         sesión explícita) y guarda en el caché central. Salta mensajes de sistema/action.
-        `on_batch(total)` se invoca por cada lote (para progreso)."""
+        `on_batch(total, lo, hi)` se invoca por cada lote (para progreso)."""
         channel_id = task["channel_id"]
         from_id = task["from_id"]
         to_id = task.get("to_id") or None
@@ -1374,6 +1374,28 @@ class TelegramService:
 
             total = 0
             batch = []
+            _lote = 0
+            # Rango del lote: iter_messages va de nuevo a viejo.
+            async def _flush(_final=False):
+                nonlocal total, batch, _lote
+                if not batch and not _final:
+                    return 0, 0
+                _lo = min(int(m["msg_id"]) for m in batch) if batch else 0
+                _hi = max(int(m["msg_id"]) for m in batch) if batch else 0
+                if batch:
+                    self.cache.save_messages(batch)
+                    total += len(batch)
+                    _lote += 1
+                    batch = []
+                    await self._throttle(_uid, floor=_floor)
+                    print(f" [TELEGRAM SERVICE] fetch_scan {channel_id}: "
+                          f"lote {_lote} msgs {_lo}-{_hi} (total {total})", flush=True)
+                if on_batch:
+                    try:
+                        on_batch(total, _lo, _hi)
+                    except TypeError:
+                        on_batch(total)
+                return _lo, _hi
             async for msg in client.iter_messages(entity, **iter_kwargs):
                 if getattr(msg, 'action', None) is not None:
                     continue
@@ -1389,17 +1411,9 @@ class TelegramService:
                     "raw": self._serialize_message(msg, client_type)
                 })
                 if len(batch) >= 100:
-                    self.cache.save_messages(batch)
-                    total += len(batch)
-                    batch = []
-                    await self._throttle(_uid, floor=_floor)
-                    if on_batch:
-                        on_batch(total)
+                    await _flush()
             if batch:
-                self.cache.save_messages(batch)
-                total += len(batch)
-                if on_batch:
-                    on_batch(total)
+                await _flush()
         except Exception as e:
             print(f" [TELEGRAM SERVICE] Error fetch_scan: {e}", flush=True)
             total = 0

@@ -2142,7 +2142,7 @@ async def _scan_channel(account_id, ch, idx, total):
 
     # 2026-09-04: avance granular real — cada lote de 100 actualiza el done del
     # item en el plan y el % global sale de done/total (nada de fórmulas fijas).
-    def _plan_bump(_saved_now):
+    def _plan_bump(_saved_now, _lo=0, _hi=0):
         try:
             for _pi in scanner_status.get("plan_items", []):
                 if int(_pi.get("id", -1)) == int(ch.get("id", -2)):
@@ -2157,11 +2157,13 @@ async def _scan_channel(account_id, ch, idx, total):
                 # corrían "clavados" en 99%.
                 scanner_status["progress_percent"] = min(59, int(60 * _pd / _pt))
             scanner_status["current_item"] = f"Escaneando '{name}': {_saved_now} mensajes..."
+            if _lo and _hi:
+                add_log(f"  🧱 '{name}': msgs {_lo}-{_hi} (total {_saved_now}).")
         except Exception:
             pass
 
-    def _progress(saved):
-        _plan_bump(saved)
+    def _progress(saved, _lo=0, _hi=0):
+        _plan_bump(saved, _lo, _hi)
 
     service = get_telegram_service()
     try:
@@ -2202,7 +2204,7 @@ async def _scan_channel(account_id, ch, idx, total):
                             session_string=session_string,
                             api_id=api_id,
                             api_hash=api_hash,
-                            on_batch=lambda _t: _plan_bump(_base_saved + int(_t or 0)),
+                            on_batch=lambda _t, _lo=0, _hi=0: _plan_bump(_base_saved + int(_t or 0), _lo, _hi),
                         ),
                         timeout=120,
                     )
