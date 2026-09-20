@@ -3867,8 +3867,8 @@ def _download_poster_bytes_sync(url, timeout=25):
 
 def _title_year_from_cover_tags(text):
     """Extrae (título, año) de los tags EDITADOS del cover (prioridad usuario).
-    1º 'Original title'/'Título original'; si no, 'Title/Título/Nombre' display
-    (excluye variantes Alt/ES/Latam...). Ignora placeholders {..} y valores cortos.
+    1º 'Title/Título/Nombre' display (excluye variantes Alt/ES/Latam...);
+    si no, 'Original title'/'Título original'. Ignora placeholders {..} y valores cortos.
     Misma prioridad que el enriquecedor al propagar al catálogo."""
     try:
         import re as _re_t
@@ -3894,15 +3894,15 @@ def _title_year_from_cover_tags(text):
                 _v3 = (_m3.group(2) or "").strip()
                 if _v3 and len(_v3) >= 2 and "{" not in _v3 and "}" not in _v3 and not _disp:
                     _disp = _v3[:200]
-        return (_orig or _disp, _yr)
+        return (_disp or _orig, _yr)
     except Exception:
         return ("", "")
 
 
 def _display_name_from_details(details, cover_text="", fallback_title="") -> str:
     """Nombre visible del job = tags del cover + año (sin año → solo título).
-    Orden: 1º tags editados (Original title/Title + Year),
-    2º título del catálogo. TMDB NO se usa: solo sirve para enriquecer
+    Orden: 1º Title display, 2º Original title (+ Year),
+    3º título del catálogo. TMDB NO se usa: solo sirve para enriquecer
     (re Cinem... rellenar el modal); los datos salen del cover (tags).
     `details` se conserva por firma pero no decide el nombre."""
     try:

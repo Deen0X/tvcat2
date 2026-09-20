@@ -130,7 +130,9 @@ class TMDBProvider:
             if lst:
                 title_latam = lst[0]
                 break
-        return title_es, title_latam, ordered_alts[:20]
+        # Título inglés (US, si no GB): para el tag foreignname.
+        title_en = ((by_country.get("US") or []) + (by_country.get("GB") or []) + [""])[0]
+        return title_es, title_latam, ordered_alts[:20], title_en
 
     def _format(self, details, media_type):
         if not details:
@@ -161,9 +163,11 @@ class TMDBProvider:
         }
         # Títulos regionales (España / Latam) + lista de alternativos.
         try:
-            title_es, title_latam, alt_titles = self._extract_regional_titles(details)
+            title_es, title_latam, alt_titles, title_en = self._extract_regional_titles(details)
             api_data["api_title_es"] = title_es
             api_data["api_title_latam"] = title_latam
+            if title_en:
+                api_data["api_title_en"] = title_en
             if alt_titles:
                 api_data["api_alt_titles"] = json.dumps(alt_titles)
         except Exception:

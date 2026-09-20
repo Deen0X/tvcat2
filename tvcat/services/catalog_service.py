@@ -340,6 +340,13 @@ def init_db():
         c.execute("ALTER TABLE unified_catalog ADD COLUMN rorder INTEGER DEFAULT NULL")
     except sqlite3.OperationalError:
         pass
+    # Snapshot pre-enriquecido para búsqueda "Original" (solo escribe el
+    # enriquecedor en el primer cambio y el sync cuando está vacío).
+    for col, typ in [("orig_title", "TEXT DEFAULT ''"), ("orig_description", "TEXT DEFAULT ''")]:
+        try:
+            c.execute(f"ALTER TABLE unified_catalog ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass
     # Tabla de metadata de pistas de audio/subtítulos por episodio (HLS multitrack).
     c.execute("""
         CREATE TABLE IF NOT EXISTS episode_tracks (
@@ -1207,6 +1214,31 @@ def migrate_cache_keys():
     return {"migrated": True, **stats}
 
 
+def _load_orig_map(conn, source=None):
+    """{item_id: (orig_title, orig_description)} existentes (no vacíos).
+    Para preservarlos cuando el sync reescribe la fila."""
+    out = {}
+    try:
+        if source:
+            rows = conn.execute("SELECT item_id, orig_title, orig_description FROM unified_catalog"
+                                " WHERE source=?", (source,)).fetchall()
+        else:
+            rows = conn.execute("SELECT item_id, orig_title, orig_description FROM unified_catalog").fetchall()
+        for r in rows:
+            t, d = (r[1] or ""), (r[2] or "")
+            if t or d:
+                out[r[0]] = (t, d)
+    except Exception:
+        pass
+    return out
+
+
+def _orig_for(item_id, incoming_title, incoming_desc, orig_map):
+    """orig existente o incoming (solo se fija una vez: el primer valor)."""
+    old = (orig_map or {}).get(item_id) or ("", "")
+    return (old[0] or (incoming_title or ""), old[1] or (incoming_desc or ""))
+
+
 def sync_plugin_cache(plugin_loader, plugin_name: str):
     """Sincroniza la caché central desde las tablas de exportación de un plugin."""
     if plugin_name not in plugin_loader.registry:
@@ -1255,6 +1287,8 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
 
         # Eliminar datos antiguos del plugin en la caché central
         # Primero episodios, luego catálogo (por FK). Borra por item_id del catálogo (USER-...)
+        # Preservar snapshot Original (se pierde con el DELETE; el sync lo restaura).
+        orig_map = _load_orig_map(conn, plugin_name)
         c.execute("""
             DELETE FROM item_episodes WHERE item_id IN (
                 SELECT item_id FROM unified_catalog WHERE source = ?
@@ -1273,14 +1307,16 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
             active_item_ids.add(item_id)
             info = d.get("info_messages") or ""
             genres = _extract_genres(info, d.get("metadata_json"))
+            ot, od = _orig_for(item_id, d.get("title"), d.get("description"), orig_map)
             c.execute("""
                 INSERT OR REPLACE INTO unified_catalog
                 (item_id, title, category, subcategory, source, origin_depth,
                  description, year, rating, alt_titles, metadata_json, cover_url,
                  telegram_msg_id, group_title, group_title_flat, telegram_link,
                  season_display, info_messages, genres, is_collection, collection_raw,
-                 collection_name, collection_serial, collection_msg_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 collection_name, collection_serial, collection_msg_date,
+                 orig_title, orig_description)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 item_id,
                 d.get("title"),
@@ -1305,7 +1341,8 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 d.get("collection_raw", ""),
                 d.get("collection_name", ""),
                 d.get("collection_serial", ""),
-                int(d.get("collection_msg_date", 0) or 0)
+                int(d.get("collection_msg_date", 0) or 0),
+                ot, od
             ))
             items_inserted += 1
 
@@ -1477,6 +1514,8 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
         def resolve_item_id(raw):
             return id_to_item.get(str(raw), raw)
 
+        # Preservar snapshot Original (INSERT OR REPLACE lo pisaría).
+        orig_map = _load_orig_map(conn, plugin_name)
         items_inserted = 0
         active_set = set()
         for row in pc.execute(f"SELECT * FROM plugin_catalog_export WHERE item_id IN ({ph})", list(item_ids)):
@@ -1487,14 +1526,16 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
             active_set.add(item_id)
             info = d.get("info_messages") or ""
             genres = _extract_genres(info, d.get("metadata_json"))
+            ot, od = _orig_for(item_id, d.get("title"), d.get("description"), orig_map)
             c.execute("""
                 INSERT OR REPLACE INTO unified_catalog
                 (item_id, title, category, subcategory, source, origin_depth,
                  description, year, rating, alt_titles, metadata_json, cover_url,
                  telegram_msg_id, group_title, group_title_flat, telegram_link,
                  season_display, info_messages, genres, is_collection, collection_raw,
-                 collection_name, collection_serial, collection_msg_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 collection_name, collection_serial, collection_msg_date,
+                 orig_title, orig_description)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 item_id, d.get("title"), d.get("category", ""), d.get("subcategory", ""),
                 plugin_name, 0, d.get("description", ""), d.get("year", ""), d.get("rating", 0),
@@ -1503,7 +1544,8 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
                 d.get("telegram_link"), d.get("season_display"), info, genres,
                 int(d.get("is_collection", 0) or 0), d.get("collection_raw", ""),
                 d.get("collection_name", ""), d.get("collection_serial", ""),
-                int(d.get("collection_msg_date", 0) or 0)
+                int(d.get("collection_msg_date", 0) or 0),
+                ot, od
             ))
             items_inserted += 1
 

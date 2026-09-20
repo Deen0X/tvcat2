@@ -40,6 +40,7 @@ class IGDBProvider:
 
     async def search(self, title):
         if not await self._ensure_token():
+            print("[IGDB] search sin token (¿client_id/secret?)", flush=True)
             return []
         headers = {"Client-ID": self.client_id, "Authorization": f"Bearer {self.access_token}"}
         query = (
@@ -50,8 +51,10 @@ class IGDBProvider:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(f"{BASE_URL}/games", headers=headers, data=query)
             if resp.status_code != 200:
+                print(f"[IGDB] search HTTP {resp.status_code}: {(resp.text or '')[:150]}", flush=True)
                 return []
             results = resp.json() or []
+        print(f"[IGDB] search '{title}' -> {len(results)}", flush=True)
         candidates = []
         for g in results:
             poster = None
@@ -68,6 +71,27 @@ class IGDBProvider:
                 "provider": self.name,
             })
         return candidates
+
+    async def get_by_slug(self, slug):
+        """Resuelve un juego por su slug de URL (igdb.com/games/<slug>)."""
+        if not await self._ensure_token():
+            return None
+        headers = {"Client-ID": self.client_id, "Authorization": f"Bearer {self.access_token}"}
+        query = (
+            f'fields name, summary, storyline, total_rating, total_rating_count, '
+            f'first_release_date, cover.url, genres.name, themes.name, '
+            f'screenshots.url, videos.video_id, slug; '
+            f'where slug = "{slug}"; limit 1;'
+        )
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(f"{BASE_URL}/games", headers=headers, data=query)
+            if resp.status_code != 200:
+                print(f"[IGDB] slug HTTP {resp.status_code}: {(resp.text or '')[:150]}", flush=True)
+                return None
+            results = resp.json() or []
+            if not results:
+                return None
+            return self._format(results[0])
 
     async def get_details(self, game_id):
         if not await self._ensure_token():

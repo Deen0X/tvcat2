@@ -548,20 +548,28 @@
                         </div>
                         <div style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
                             <div style="display:flex;align-items:center;gap:8px;">
-                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">TMDB API Key</label>
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;"><a href="https://www.themoviedb.org/settings/api/request" target="_blank" rel="noopener" title="Seleccionar Yes, confirmar personal use. Seleccionar Developer Free" style="color:inherit;">TMDB API Key 🔗</a></label>
                                 <input type="text" id="enrich-tmdb-key" class="settings-input" placeholder="api key de themoviedb.org" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                <button class="btn-secondary" onclick="openAssistant('tmdb_api_key')" title="Guía paso a paso para conseguir la key" style="padding:6px 10px;font-size:0.8rem;flex-shrink:0;">❓</button>
                             </div>
                             <div style="display:flex;align-items:center;gap:8px;">
-                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">IGDB Client ID</label>
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;"><a href="https://api-docs.igdb.com/#getting-started" target="_blank" rel="noopener" title="Seguir las instrucciones de creación de cuenta (Account Creation)" style="color:inherit;">IGDB Client ID 🔗</a></label>
                                 <input type="text" id="enrich-igdb-id" class="settings-input" placeholder="Twitch client id" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                <button class="btn-secondary" onclick="openAssistant('igdb_client_id')" title="Guía paso a paso para conseguir el Client ID" style="padding:6px 10px;font-size:0.8rem;flex-shrink:0;">❓</button>
                             </div>
                             <div style="display:flex;align-items:center;gap:8px;">
-                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">IGDB Secret</label>
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;" title="Se obtiene con el paso anterior (Client ID)">IGDB Secret</label>
                                 <input type="text" id="enrich-igdb-secret" class="settings-input" placeholder="Twitch client secret" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                <button class="btn-secondary" onclick="openAssistant('igdb_secret')" title="Guía paso a paso para conseguir el Secret" style="padding:6px 10px;font-size:0.8rem;flex-shrink:0;">❓</button>
                             </div>
                             <div style="display:flex;align-items:center;gap:8px;">
-                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Comic Vine Key</label>
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;"><a href="https://comicvine.gamespot.com/api/" target="_blank" rel="noopener" title="Crear cuenta y solicitar API key" style="color:inherit;">Comic Vine Key 🔗</a></label>
                                 <input type="text" id="enrich-comicvine-key" class="settings-input" placeholder="api key de comicvine" style="flex:1;padding:6px 8px;font-size:0.8rem;">
+                                <button class="btn-secondary" onclick="openAssistant('comic_vine_key')" title="Guía paso a paso para conseguir la key" style="padding:6px 10px;font-size:0.8rem;flex-shrink:0;">❓</button>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Google Books Key</label>
+                                <input type="text" id="enrich-googlebooks-key" class="settings-input" placeholder="api key de Google Books (cuota sin key)" style="flex:1;padding:6px 8px;font-size:0.8rem;">
                             </div>
                             <div style="display:flex;align-items:center;gap:8px;">
                                 <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Umbral match</label>
@@ -921,7 +929,7 @@
     <script src="js/translate.js?v=20260801"></script>
     <script src="js/api.js?v=20260801"></script>
     <script src="js/plugin_system.js?v=20260910"></script>
-    <script src="js/navEngine.js?v=20260801"></script>
+    <script src="js/assistants.js?v=20260910a"></script>    <script src="js/navEngine.js?v=20260801"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
     <script src="js/inputHelper.js?v=20260903q"></script>
     <script src="js/catalog.js?v=20260910k"></script>

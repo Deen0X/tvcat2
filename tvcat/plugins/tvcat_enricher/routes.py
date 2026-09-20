@@ -175,12 +175,14 @@ class SearchReq(BaseModel):
     category: Optional[str] = None
     subcategory: Optional[str] = None
     episode_count: Optional[int] = None
+    provider: Optional[str] = None  # override manual (tabs del modal)
 
 
 class DetailsReq(BaseModel):
     provider: str
     id: str
     media_type: Optional[str] = None
+    sub_provider: Optional[str] = None  # books: google_books u open_library
 
 
 class SaveReq(BaseModel):
@@ -540,7 +542,8 @@ async def proxy_search(req: SearchReq):
     try:
         import services.enrich_service as es
         res = await es.search(req.query, req.category or "", req.subcategory or "",
-                             episode_count=req.episode_count)
+                             episode_count=req.episode_count,
+                             provider_override=req.provider or "")
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -550,7 +553,8 @@ async def proxy_search(req: SearchReq):
 async def proxy_details(req: DetailsReq):
     try:
         import services.enrich_service as es
-        res = await es.get_details(req.provider, req.id, media_type_hint=req.media_type)
+        res = await es.get_details(req.provider, req.id, media_type_hint=req.media_type,
+                                     sub_provider=req.sub_provider or "")
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -565,6 +569,18 @@ async def save_enriched(item_id: str, body: SaveReq, request: Request):
 
     now = int(time.time())
     conn = _conn()
+    # Sin póster nuevo (reapertura sin reseleccionar): conservar el existente
+    # en vez de pisarlo con NULL (perdía la imagen del cover al re-guardar).
+    if not poster_blob:
+        try:
+            _old = conn.execute(
+                "SELECT poster_blob, poster_mime FROM enriched_covers WHERE channelid_msgid=?",
+                (key,)).fetchone()
+            if _old and _old["poster_blob"]:
+                poster_blob = bytes(_old["poster_blob"])
+                poster_mime = _old["poster_mime"] or poster_mime
+        except Exception:
+            pass
     # Resolver created_by_user_id si existe sesión
     created_by = None
     try:

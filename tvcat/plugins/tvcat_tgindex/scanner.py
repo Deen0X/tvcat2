@@ -1205,8 +1205,14 @@ def _parse_block_title_desc(b, fallback_title=None, _extra_files=None):
     if first_text:
         # El lookahead excluye etiquetas de variante (Title Alt1, Title ES,
         # Title Latam...): esas líneas son alt_titles, no el título principal.
-        # "Original title" / "Título original" SÍ cuentan como principal.
-        match = re.search(r"(?i)" + _TITLE_LABELS + r"(?!\s+" + _TITLE_SUFFIX_LABELS + r"\b)[ \t]*[:= \t-][ \t]*([^\n]+)", first_text)
+        # Prioridad: 1º display (Title/Título/Titulo), 2º "Original title" /
+        # "Título original" (dos pasadas: re.search devuelve la primera
+        # posición en texto, no la primera alternativa).
+        _DISP = r"(?:title|t[ií]tulo|titulo)"
+        _ORIG = r"(?:original\s+title|t[ií]tulo\s+original)"
+        match = re.search(r"(?i)" + _DISP + r"(?!\s+" + _TITLE_SUFFIX_LABELS + r"\b)[ \t]*[:= \t-][ \t]*([^\n]+)", first_text)
+        if not match:
+            match = re.search(r"(?i)" + _ORIG + r"[ \t]*[:= \t-][ \t]*([^\n]+)", first_text)
         if match:
             title = match.group(1).strip()
             # Si el valor está vacío (ej. "Título :\n#Kamen..."), tomar siguiente línea con "#"

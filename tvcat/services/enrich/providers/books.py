@@ -89,6 +89,7 @@ class BooksProvider:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(f"{self.books_url}/{book_id}", params=params)
             if resp.status_code != 200:
+                print(f"[BOOKS] details HTTP {resp.status_code} (¿cuota 429 sin key?): {(resp.text or '')[:120]}", flush=True)
                 return None
             return self._format(resp.json())
 

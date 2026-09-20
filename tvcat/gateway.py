@@ -1189,6 +1189,86 @@ async def ai_test(request: Request):
                                     prompt=(body.get("prompt") or "Responde exactamente: OK"))
 
 
+# ─── Asistentes (guías paso a paso: stepN.md + stepN.png opcional, sin manifiesto) ───
+_ASSISTANTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core", "static", "assistants")
+_ASSISTANT_ID_RE = re.compile(r"^[a-z0-9_-]+$")
+_ASSISTANT_STEP_RE = re.compile(r"^step(\d+)\.md$")
+_ASSISTANT_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _assistant_title(assistant_id, first_md):
+    try:
+        for line in (first_md or "").splitlines():
+            line = line.strip()
+            if line.startswith("# "):
+                return line[2:].strip()[:120]
+    except Exception:
+        pass
+    return assistant_id.replace("_", " ").replace("-", " ").strip().title() or assistant_id
+
+
+def _assistant_steps(assistant_id):
+    folder = os.path.join(_ASSISTANTS_DIR, assistant_id)
+    if not os.path.isdir(folder):
+        return None
+    found = []
+    try:
+        for fname in os.listdir(folder):
+            m = _ASSISTANT_STEP_RE.match(fname)
+            if m:
+                found.append((int(m.group(1)), fname))
+    except Exception:
+        return []
+    found.sort()
+    steps = []
+    for n, fname in found:
+        try:
+            with open(os.path.join(folder, fname), "r", encoding="utf-8") as f:
+                md = f.read()
+        except Exception:
+            md = ""
+        img = ""
+        base = os.path.splitext(fname)[0]
+        for ext in _ASSISTANT_IMG_EXTS:
+            if os.path.isfile(os.path.join(folder, base + ext)):
+                img = f"/static/assistants/{assistant_id}/{base}{ext}"
+                break
+        steps.append({"n": n, "md": md, "img": img})
+    return steps
+
+
+@app.get(api_url("/api/assistants"))
+async def assistants_list(request: Request):
+    from services.auth_service import get_session
+    if not get_session(request.cookies.get("tvcat_session", "")): raise HTTPException(401)
+    out = []
+    try:
+        for aid in sorted(os.listdir(_ASSISTANTS_DIR)):
+            if not _ASSISTANT_ID_RE.match(aid):
+                continue
+            steps = _assistant_steps(aid)
+            if not steps:
+                continue
+            out.append({"id": aid, "title": _assistant_title(aid, steps[0]["md"]),
+                        "steps": len(steps)})
+    except Exception:
+        pass
+    return {"assistants": out}
+
+
+@app.get(api_url("/api/assistants/{assistant_id}"))
+async def assistants_get(assistant_id: str, request: Request):
+    from services.auth_service import get_session
+    if not get_session(request.cookies.get("tvcat_session", "")): raise HTTPException(401)
+    if not _ASSISTANT_ID_RE.match(assistant_id or ""):
+        raise HTTPException(404)
+    steps = _assistant_steps(assistant_id)
+    if not steps:
+        raise HTTPException(404)
+    return {"id": assistant_id, "title": _assistant_title(assistant_id, steps[0]["md"]),
+            "steps": steps}
+
+
 # ─── TransferService (cola de subida/bajada, depuración/programático) ───
 @app.get(api_url("/api/transfer/queue"))
 async def transfer_queue(request: Request):

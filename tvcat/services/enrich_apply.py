@@ -24,7 +24,10 @@ def _title_from_cover_text(text: str) -> str:
     NO son el título principal (van a alt_titles vía _parse_cover_alt_titles).
     2026-09-12 (directiva usuario): PRIMERO "Original title" / "Título original"
     y después display (Title/Título/Nombre, sin variantes). El nombre visible
-    es el original; si no hay original, el display."""
+    es el original; si no hay original, el display.
+    2026-09-20 (directiva usuario): PRIORIDAD INVERTIDA — PRIMERO display
+    (Title/Título/Nombre) y después Original. El Title es el nombre "legible"
+    (p.ej. títulos en chino/japonés llevan el original intraducible)."""
     def _scan(pattern: str) -> str:
         try:
             import re as _re2
@@ -56,10 +59,10 @@ def _title_from_cover_text(text: str) -> str:
             pass
         return ""
 
-    _orig = _scan(r"(?i)^(original\s+title|t[ií]tulo\s+original)\s*[:=\-]?\s*(.*?)\s*$")
-    if _orig:
-        return _orig
-    return _scan(r"(?i)^(t[ií]tulo|titulo|title|nombre)(?!\s+(?:alt\d*|es(?:pa[ñn]a)?|latam|latin[oa]|mx|m[ée]xico|original)\b)\s*[:=\-]?\s*(.*?)\s*$")
+    _disp = _scan(r"(?i)^(t[ií]tulo|titulo|title|nombre)(?!\s+(?:alt\d*|es(?:pa[ñn]a)?|latam|latin[oa]|mx|m[ée]xico|original)\b)\s*[:=\-]?\s*(.*?)\s*$")
+    if _disp:
+        return _disp
+    return _scan(r"(?i)^(original\s+title|t[ií]tulo\s+original)\s*[:=\-]?\s*(.*?)\s*$")
 
 
 # Mismo patrón que scanner._parse_alt_titles (canónico en

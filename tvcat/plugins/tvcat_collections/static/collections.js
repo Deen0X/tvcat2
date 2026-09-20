@@ -184,6 +184,37 @@
             st.cover = { kind: 'url', url: u };
             paintCover();
         };
+        // Pegado por evento (Ctrl+V en el diálogo, igual que el enriquecedor):
+        // funciona donde navigator.clipboard.read() está bloqueado (http
+        // remoto, iframes, permisos). Se auto-elimina al cerrar el diálogo.
+        function onColPasteEvent(e) {
+            try {
+                try {
+                    if (!box || !document.contains(box)) {
+                        document.removeEventListener('paste', onColPasteEvent);
+                        return;
+                    }
+                } catch (e0) { return; }
+                // Solo si el diálogo de colección sigue abierto (no el pre-modal IA).
+                if (document.getElementById('col-ai-overlay')) return;
+                var cd = e.clipboardData || window.clipboardData;
+                if (!cd || !cd.items) return;
+                for (var i = 0; i < cd.items.length; i++) {
+                    var it = cd.items[i];
+                    if (it.type && it.type.indexOf('image/') === 0) {
+                        var blob = it.getAsFile ? it.getAsFile() : null;
+                        if (!blob) continue;
+                        if (blob.size > 10 * 1024 * 1024) { toast('Imagen mayor de 10MB.'); return; }
+                        try { e.preventDefault(); } catch (e2) {}
+                        var rd = new FileReader();
+                        rd.onload = function() { st.cover = { kind: 'upload', b64: rd.result }; paintCover(); toast('Imagen pegada (Ctrl+V).'); };
+                        rd.readAsDataURL(blob);
+                        return;
+                    }
+                }
+            } catch (ex) {}
+        }
+        try { document.addEventListener('paste', onColPasteEvent); } catch (e3) {}
         var rowsEl = box.querySelector('#col-rows');
         var dragIdx = -1;
         function paint() {

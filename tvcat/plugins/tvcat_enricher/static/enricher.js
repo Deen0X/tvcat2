@@ -83,6 +83,7 @@
         var posterMime = 'image/jpeg';
         var selectedDetails = initialDetails;
         var selectedProvider = null;
+        var selectedProviderTab = 'auto';  // override manual de proveedor
         var selectedId = null;
         var selectedPosterUrl = null; // URL del póster del candidato (el servidor la descarga si el b64 falla)
 
@@ -133,15 +134,16 @@
             html += '<div id="enricher-img-placeholder" style="display:none;width:100%;height:140px;border-radius:8px;border:1px dashed #3f3f46;align-items:center;justify-content:center;font-size:0.7rem;color:#71717a;background:#18181b;">sin imagen</div>';
         }
         html += '<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:0.72rem;color:#a1a1aa;cursor:pointer;"><input type="checkbox" id="enricher-use-poster" checked> Usar imagen descargada</label>';
-        html += '<div style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:0.72rem;color:#a1a1aa;"><span>Traer versión</span>' +
-            '<select id="enricher-poster-lang" class="variant-select" style="background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:4px 6px;color:#f4f4f5;font-size:0.72rem;">' +
+        html += '<div style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:0.72rem;color:#a1a1aa;"><span style="white-space:nowrap;">Traer<br>versión</span>' +
+            '<select id="enricher-poster-lang" class="variant-select" style="background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:4px 6px;color:#f4f4f5;font-size:0.72rem;flex:0 0 auto;max-width:110px;">' +
             '<option value="">Cualquiera</option>' +
             '<option value="es">ES - Español</option>' +
             '<option value="en">EN - English</option>' +
             '<option value="ja">JA - Japonés</option>' +
             '<option value="ko">KO - Coreano</option>' +
             '<option value="zh">ZH - Chino</option>' +
-            '</select></div>';
+            '</select>' +
+            '</div>';
         html += '<div style="position:relative;">';
         html += '<div id="enricher-cover-menu" style="display:none;position:absolute;left:0;top:100%;z-index:20;background:#09090b;border:1px solid #3f3f46;border-radius:8px;padding:6px;width:170px;box-sizing:border-box;">';
         html += '<div id="enricher-cover-obt" style="display:none;"></div>';
@@ -158,8 +160,15 @@
         html += '<label style="font-size:0.75rem;color:#a1a1aa;">Buscar en enriquecedor</label>';
         html += '<div style="display:flex;gap:6px;margin-top:4px;">';
         var defaultQuery = (original.title || itemData.title || '').trim();
-        html += '<input type="text" id="enricher-query" value="' + defaultQuery.replace(/"/g, '&quot;') + '" placeholder="Titulo" style="flex:1;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;">';
+        html += '<input type="text" id="enricher-query" value="' + defaultQuery.replace(/"/g, '&quot;') + '" placeholder="Titulo o URL directa (TMDB/IGDB/Books/ComicVine)" style="flex:1;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;">';
         html += '<button id="enricher-search" style="padding:6px 12px;background:#06b6d4;border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:0.8rem;font-weight:700;">Buscar</button>';
+        html += '</div>';
+        // Pestañas de proveedor: override manual (auto = según categoría).
+        html += '<div id="enricher-prov-tabs" style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;">';
+        var _provs = [['auto', 'Auto'], ['tmdb', 'TMDB'], ['igdb', 'IGDB'], ['books', 'Books'], ['comicvine', 'ComicVine']];
+        for (var _pi = 0; _pi < _provs.length; _pi++) {
+            html += '<button data-prov="' + _provs[_pi][0] + '" class="enricher-prov-tab" style="padding:3px 10px;font-size:0.7rem;border-radius:12px;cursor:pointer;border:1px solid #3f3f46;background:' + (_pi === 0 ? '#06b6d4;color:#fff;border-color:#06b6d4;' : '#27272a;color:#a1a1aa;') + '">' + _provs[_pi][1] + '</button>';
+        }
         html += '</div>';
         html += '<div id="enricher-extlinks" style="margin-top:4px;font-size:0.68rem;color:#71717a;"></div>';
         html += '<div id="enricher-cands" style="margin-top:8px;max-height:140px;overflow-y:auto;"></div>';
@@ -176,8 +185,12 @@
         // Textarea de edicion (7.3: edicion libre + tags)
         html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">';
         html += '<label style="font-size:0.75rem;color:#a1a1aa;display:block;">Caption (editable, con tags del enriquecedor)</label>';
+        html += '<span style="display:flex;gap:4px;align-items:center;">';
+        html += '<button id="enricher-copy-title" title="Copiar topic formateado (Title🗓Year)" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Title</button>';
+        html += '<button id="enricher-copy-image" title="Copiar la imagen actual al portapapeles" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Image</button>';
+        html += '<button id="enricher-copy-desc" title="Copiar la descripción actual al portapapeles" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Desc</button>';
         html += '<button id="enricher-tags-btn" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Tags ▾</button>';
-        html += '</div>';
+        html += '</span></div>';
         html += '<div style="font-size:0.68rem;color:#71717a;margin:2px 0 4px;">Escribe {title} y al cerrar } se expande · o usa Tags</div>';
         html += '<textarea id="enricher-text" style="width:100%;height:140px;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;resize:vertical;white-space:pre-wrap;">' + (initialCaption || '').replace(/</g, '&lt;') + '</textarea>';
         html += '<div id="enricher-tags-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;z-index:1000000;background:rgba(0,0,0,0.7);align-items:center;justify-content:center;"><div style="background:#0d0d0f;border:1px solid #3f3f46;border-radius:8px;padding:12px;width:90vw;max-width:560px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;"><div style="font-weight:600;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;"><span>Tags</span><button id="enricher-tags-close" style="width:28px;height:28px;border-radius:50%;background:#27272a;border:1px solid #3f3f46;color:#a1a1aa;cursor:pointer;">×</button></div><div id="enricher-tags-table" style="overflow-y:auto;flex:1;border:1px solid #27272a;border-radius:6px;"></div></div></div>';
@@ -199,6 +212,120 @@
         overlay.appendChild(panel);
         document.body.appendChild(overlay);
         document.getElementById('enricher-close').onclick = function () { overlay.remove(); };
+        // Copiar texto al portapapeles (Clipboard API + fallback legacy).
+        function copyText(t, okMsg) {
+            if (!t) { setStatus('Nada que copiar', true); return; }
+            function done() { setStatus(okMsg || 'Copiado'); }
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(t).then(done, function() { legacyCopy(t); done(); });
+                } else legacyCopy(t), done();
+            } catch (e) { try { legacyCopy(t); done(); } catch (e2) {} }
+        }
+        function legacyCopy(t) {
+            var ta = document.createElement('textarea');
+            ta.value = t;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (e) {}
+            ta.remove();
+        }
+        // Title: topic formateado (Title🗓Year) listo para crear el topic a mano.
+        var _cpTitle = document.getElementById('enricher-copy-title');
+        if (_cpTitle) _cpTitle.onclick = function() {
+            var t = currentTopicName();
+            if (!t) { setStatus('Sin topic todavía (aplica la plantilla primero)', true); return; }
+            copyText(t, 'Topic copiado: ' + t);
+        };
+        // Image: la imagen actual al portapapeles COMO IMAGEN (binario PNG).
+        var _cpImg = document.getElementById('enricher-copy-image');
+        if (_cpImg) _cpImg.onclick = function() {
+            var img = document.getElementById('enricher-img');
+            var src = (img && img.src) || '';
+            if (!src) { setStatus('Sin imagen actual', true); return; }
+            if (!navigator.clipboard || !navigator.clipboard.write) {
+                setStatus('Portapapeles de imágenes no disponible (usa localhost/HTTPS)', true);
+                return;
+            }
+            if (typeof ClipboardItem === 'undefined') {
+                setStatus('ClipboardItem no soportado por este navegador', true);
+                return;
+            }
+            setStatus('Copiando imagen…');
+            fetch(src, { mode: 'cors', credentials: 'same-origin' }).then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.blob();
+            }).then(function(blob) {
+                function toPng(b, cb) {
+                    try {
+                        var url = URL.createObjectURL(b);
+                        var loader = new Image();
+                        loader.onload = function() {
+                            try {
+                                var cv = document.createElement('canvas');
+                                cv.width = loader.naturalWidth || 1;
+                                cv.height = loader.naturalHeight || 1;
+                                cv.getContext('2d').drawImage(loader, 0, 0);
+                                URL.revokeObjectURL(url);
+                                cv.toBlob(cb, 'image/png');
+                            } catch (e) { cb(null); }
+                        };
+                        loader.onerror = function() { URL.revokeObjectURL(url); cb(null); };
+                        loader.src = url;
+                    } catch (e) { cb(null); }
+                }
+                // createImageBitmap es más directo; canvas como respaldo.
+                if (typeof createImageBitmap === 'function') {
+                    createImageBitmap(blob).then(function(bmp) {
+                        try {
+                            var cv = document.createElement('canvas');
+                            cv.width = bmp.width; cv.height = bmp.height;
+                            cv.getContext('2d').drawImage(bmp, 0, 0);
+                            if (bmp.close) bmp.close();
+                            cv.toBlob(function(pb) { writePng(pb); }, 'image/png');
+                        } catch (e) { toPng(blob, writePng); }
+                    }, function() { toPng(blob, writePng); });
+                } else {
+                    toPng(blob, writePng);
+                }
+                function writePng(pb) {
+                    if (!pb) { setStatus('No se pudo convertir la imagen (CORS del origen)', true); return; }
+                    try {
+                        navigator.clipboard.write([new ClipboardItem({ 'image/png': pb })]).then(
+                            function() { setStatus('Imagen copiada'); },
+                            function(e) { setStatus('Portapapeles rechazó la imagen: ' + e, true); });
+                    } catch (e) { setStatus('Error al copiar imagen: ' + e, true); }
+                }
+            }).catch(function(e) {
+                setStatus('No se pudo descargar la imagen: ' + e, true);
+            });
+        };
+        // Desc: copia literal del contenido actual de la caja de caption.
+        var _cpDesc = document.getElementById('enricher-copy-desc');
+        if (_cpDesc) _cpDesc.onclick = function() {
+            var t = (document.getElementById('enricher-text') || {}).value || '';
+            if (!t.trim()) { setStatus('La caja está vacía', true); return; }
+            copyText(t, 'Caption copiado');
+        };
+        // Topic en vivo al editar el caption + clic para copiar.
+        try {
+            var _cap = document.getElementById('enricher-text');
+            if (_cap) {
+                if (_cap.addEventListener) _cap.addEventListener('input', updateTopicName, false);
+                else _cap.oninput = updateTopicName;
+            }
+            var _trow = document.getElementById('enricher-topic-name');
+            if (_trow) _trow.onclick = function() {
+                try {
+                    var _t = document.getElementById('enricher-topic-name').textContent || '';
+                    if (!_t || _t === '—') return;
+                    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(_t);
+                    else { var _ta = document.createElement('textarea'); _ta.value = _t; document.body.appendChild(_ta); _ta.select(); document.execCommand('copy'); _ta.remove(); }
+                    setStatus('Topic copiado: ' + _t);
+                } catch (e) {}
+            };
+            updateTopicName();
+        } catch (e2) {}
         // Toggle preview original vs descargada
         (function(){
             var chk = document.getElementById('enricher-use-poster');
@@ -518,6 +645,8 @@
                     else fm['f' + k] = m[k];
                 }
                 for (var kk in fm) m[kk] = fm[kk];
+                // foreignname: especial, sin ftag (después del merge fm).
+                m['foreignname'] = foreignNameValue(d.api_title, d.api_original_title, d);
                 return m;
             }
             var captionEl = document.getElementById('enricher-text');
@@ -676,6 +805,7 @@
                         var curTpl2 = rawEl ? rawEl.value : (sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].getAttribute('data-tpl') : '');
                         var rendered = renderTpl(selectedDetails, category, subcategory, original.description||'', curTpl2);
                         document.getElementById('enricher-text').value = rendered;
+                        updateTopicName();
                         // Tags {AI:...}: se resuelven en servidor (con {title} etc.
                         // ya sustituidos por el contexto del detalle activo).
                         if (rendered.indexOf('{AI:') !== -1) {
@@ -754,6 +884,7 @@
             try { if (!epCount && opts.epCount) epCount = String(opts.epCount); } catch (e2) { }
             var map = {
                 '{title}': details.api_title || '',
+                '{foreignname}': foreignNameValue(details.api_title, details.api_original_title, details),
                 '{original_title}': details.api_original_title || '',
                 '{titulo_original}': details.api_original_title || '',
                 '{title_es}': details.api_title_es || '',
@@ -948,6 +1079,21 @@
             if (m) m.style.display = 'none';
         }
 
+        // Nombre final del topic desde el caption (misma prioridad que el
+        // servidor: Original title → Title + Year). Sin tags aún, del detalle.
+        function currentTopicName() {
+            try {
+                var cap = (document.getElementById('enricher-text') || {}).value || '';
+                var name = titleFromCaption(cap);
+                if (!name && selectedDetails) {
+                    var t = selectedDetails.api_original_title || selectedDetails.api_title || '';
+                    var m = String(selectedDetails.api_year || '').match(/(\d{4})/);
+                    if (t) name = t + (m ? ('🗓' + m[1]) : '');
+                }
+                return name || '';
+            } catch (e) { return ''; }
+        }
+        function updateTopicName() { /* display eliminado: el badge Title copia directo */ }
         // Sugerencia de título del job (solo localOnly): Original + año desde los datos.
         var jobTitleDirty = false;
         function suggestedJobTitle(det) {
@@ -961,7 +1107,44 @@
                 return y ? (t + '🗓' + y) : t;
             } catch (e) { return ''; }
         }
-        // Nombre desde el caption guardado: Original title primero, luego Title
+        // foreignname: si hay caracteres CJK / hangul / cirílico / devanagari /
+        // tailandés / árabe, expande a 2 líneas (Title + Original Title);
+        // si no, solo "Original Title:". Sin ftag.
+        function hasSpecialChars(s) {
+            return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af\u0400-\u04ff\u0900-\u097f\u0e00-\u0e7f\u0600-\u06ff]/.test(String(s || ''));
+        }
+        function foreignNameValue(apiTitle, apiOriginal, det) {
+            det = det || {};
+            function latin(s) {
+                s = (s || '').toString();
+                return (s && !hasSpecialChars(s)) ? s : '';
+            }
+            var disp = (apiTitle || '').toString();
+            var orig = (apiOriginal || '').toString();
+            var special = hasSpecialChars(orig) ? orig : (hasSpecialChars(disp) ? disp : '');
+            if (special) {
+                // Title legible: inglés → español → cualquiera latino → original.
+                var cands = [det.api_title_en, det.api_title_es, disp,
+                             det.api_title_latam, det.api_title_mx, det.api_title_latino];
+                try {
+                    var al = det.api_alt_titles;
+                    if (typeof al === 'string') { try { al = JSON.parse(al); } catch (e) { al = []; } }
+                    if (al && al.length !== undefined) {
+                        for (var i = 0; i < al.length; i++) cands.push(al[i]);
+                    }
+                } catch (e2) {}
+                cands.push(orig);
+                var t = '';
+                for (var j = 0; j < cands.length; j++) {
+                    var v = latin(cands[j]);
+                    if (v) { t = v; break; }
+                }
+                return 'Title: ' + (t || special) + '\nOriginal Title: ' + special;
+            }
+            var o = orig || disp;
+            return o ? ('Original Title: ' + o) : '';
+        }
+        // Nombre desde el caption guardado: Title primero, luego Original title
         // (misma prioridad que el servidor), + año de Year/Año. Sin tags crudos.
         function titleFromCaption(txt) {
             try {
@@ -986,7 +1169,7 @@
                     }
                     if ((orig || disp) && year) break;
                 }
-                var t = orig || disp;
+                var t = disp || orig;
                 return t ? (t + (year ? '🗓' + year : '')) : '';
             } catch (e) { return ''; }
         }
@@ -1017,7 +1200,7 @@
             fetch('/api/enricher/search', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: q, category: category, subcategory: subcategory, episode_count: episodeCount })
+                body: JSON.stringify({ query: q, category: category, subcategory: subcategory, episode_count: episodeCount, provider: selectedProviderTab !== 'auto' ? selectedProviderTab : null })
             })
             .then(function (r) { return r.json(); })
             .then(function (j) {
@@ -1030,7 +1213,7 @@
                     var origT = (c.original_title || '').trim();
                     var origHtml = (origT && origT !== t) ? ' · <span title="Título original" style="color:#a1a1aa;">orig: ' + origT.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</span>' : '';
                     var poster = c.poster || (c.api_cover && c.api_cover[0]) || '';
-                    return '<div class="enricher-cand" data-idx="' + i + '" data-provider="' + (prov || '') + '" data-cid="' + (c.id || c.api_id || '') + '" data-media-type="' + (c.media_type || '') + '" data-poster="' + (poster || '').replace(/"/g, '&quot;') + '" style="padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent;display:flex;gap:8px;align-items:center;"><div style="width:16px;height:16px;border-radius:50%;border:1px solid #71717a;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><div class="enricher-cand-dot" style="width:8px;height:8px;border-radius:50%;background:#06b6d4;display:none;"></div></div><div style="width:28px;height:40px;background:#18181b;border-radius:4px;flex-shrink:0;overflow:hidden;">' + (poster ? '<img src="' + poster + '" style="width:100%;height:100%;object-fit:cover;">' : '') + '</div><div style="flex:1;min-width:0;"><div style="font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + '</div><div style="font-size:0.68rem;color:#71717a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (y || '') + (prov ? ' · ' + prov : '') + origHtml + '</div></div></div>';
+                    return '<div class="enricher-cand" data-idx="' + i + '" data-provider="' + (prov || '') + '" data-cid="' + (c.id || c.api_id || '') + '" data-media-type="' + (c.media_type || '') + '" data-sub-provider="' + (c.sub_provider || '') + '" data-poster="' + (poster || '').replace(/"/g, '&quot;') + '" style="padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent;display:flex;gap:8px;align-items:center;"><div style="width:16px;height:16px;border-radius:50%;border:1px solid #71717a;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><div class="enricher-cand-dot" style="width:8px;height:8px;border-radius:50%;background:#06b6d4;display:none;"></div></div><div style="width:28px;height:40px;background:#18181b;border-radius:4px;flex-shrink:0;overflow:hidden;">' + (poster ? '<img src="' + poster + '" style="width:100%;height:100%;object-fit:cover;">' : '') + '</div><div style="flex:1;min-width:0;"><div style="font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + '</div><div style="font-size:0.68rem;color:#71717a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (y || '') + (prov ? ' · ' + prov : '') + origHtml + '</div></div></div>';
                 }).join('');
                 if (cands.length > 10) box.innerHTML += '<div style="font-size:0.68rem;color:#71717a;margin-top:4px;">Hay mas (refina la busqueda)</div>';
                 setStatus(cands.length + ' candidatos · ' + (j.provider || '') + (cands.length===1 ? ' · auto-seleccionado' : ' · selecciona uno como fuente activa'));
@@ -1045,6 +1228,7 @@
                         var prov = el.getAttribute('data-provider') || 'tmdb';
                         var cid = el.getAttribute('data-cid');
                         var mt = el.getAttribute('data-media-type') || '';
+                        var subp = el.getAttribute('data-sub-provider') || '';
                         var posterUrl = el.getAttribute('data-poster');
                         if (!cid) return;
                         selectedProvider = prov; selectedId = cid;
@@ -1053,7 +1237,7 @@
                         fetch('/api/enricher/details', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ provider: prov, id: String(cid), media_type: mt })
+                            body: JSON.stringify({ provider: prov, id: String(cid), media_type: mt, sub_provider: subp })
                         })
                         .then(function (r) { return r.json(); })
                         .then(function (det) {
@@ -1065,17 +1249,7 @@
                                 usePosterUrl(posterUrl);
                             }
                             updateTitleSuggestion();
-                            // Si el caption está vacío, rellenarlo con la plantilla actual
-                            // (evita guardar vacío por olvidar "Aplicar").
-                            try {
-                                var _capEl = document.getElementById('enricher-text');
-                                if (_capEl && !_capEl.value.trim()) {
-                                    var _rawEl = document.getElementById('enricher-tpl-raw');
-                                    var _auto = renderTpl(det, category, subcategory, original.description || '', _rawEl ? _rawEl.value : '');
-                                    _capEl.value = _auto;
-                                    if (_auto.indexOf('{AI:') !== -1) resolveAiTags(_auto, det);
-                                }
-                            } catch (_eCap) {}
+                            updateTopicName();
                             setStatus('Fuente activa: ' + (det.api_title || det.title || '—') + ' · pulsa Aplicar para usar la plantilla');
                         })
                         .catch(function () { setStatus('Error al cargar detalle', true); });
@@ -1086,6 +1260,26 @@
             })
             .catch(function () { box.innerHTML = ''; setStatus('Error de red', true); });
         };
+
+        // Pestañas de proveedor: override manual (pintar activa + relanzar si hay query).
+        (function() {
+            var tabs = document.querySelectorAll('#enricher-prov-tabs .enricher-prov-tab');
+            function paintTabs() {
+                for (var i = 0; i < tabs.length; i++) {
+                    var on = tabs[i].getAttribute('data-prov') === selectedProviderTab;
+                    tabs[i].style.background = on ? '#06b6d4' : '#27272a';
+                    tabs[i].style.color = on ? '#fff' : '#a1a1aa';
+                    tabs[i].style.borderColor = on ? '#06b6d4' : '#3f3f46';
+                }
+            }
+            for (var k = 0; k < tabs.length; k++) {
+                tabs[k].onclick = function() {
+                    selectedProviderTab = this.getAttribute('data-prov') || 'auto';
+                    paintTabs();
+                };
+            }
+            paintTabs();
+        })();
 
         document.getElementById('enricher-save-local').onclick = function () {
             doSave(false);

@@ -41,11 +41,11 @@ def _save_credentials(creds: dict):
 
 def _load_templates() -> dict:
     from .catalog_service import get_conn
+    _ensure_default_templates()  # idempotente + rellena fallback vacío
     conn = get_conn()
     row = conn.execute("SELECT value FROM tvcat_settings WHERE key='enrich_templates'").fetchone()
     conn.close()
     if not row or not row[0]:
-        _ensure_default_templates()
         return {}
     try:
         return json.loads(row[0])
@@ -55,7 +55,8 @@ def _load_templates() -> dict:
 
 def _ensure_default_templates():
     """Siembra la plantilla por defecto en instalación limpia o DB antigua
-    sin fila (solo si falta; nunca pisa lo guardado)."""
+    sin fila (solo si falta; nunca pisa lo guardado). Además rellena el
+    fallback si está vacío (migración de DBs sembradas con fallback '')."""
     try:
         from .catalog_service import get_conn
         conn = get_conn()
@@ -79,6 +80,19 @@ def _ensure_default_templates():
             conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
                          ("enrich_templates", json.dumps(seed, ensure_ascii=False)))
             conn.commit()
+            conn.close()
+            return
+        # Backfill: fallback vacío → plantilla por defecto (sin tocar el resto).
+        try:
+            d = json.loads(row[0])
+            if not (d.get("fallback") or "").strip():
+                d["fallback"] = DEFAULT_TEMPLATE
+                conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
+                             ("enrich_templates", json.dumps(d, ensure_ascii=False)))
+                conn.commit()
+                print("[ENRICH] fallback vacío rellenado con plantilla por defecto", flush=True)
+        except Exception:
+            pass
         conn.close()
     except Exception:
         pass
@@ -373,24 +387,44 @@ def render_template(details: dict, category="", subcategory="") -> str:
 # ─── API pública ───────────────────────────────────────────────────
 
 async def search(query: str, category: str = "", subcategory: str = "",
-                episode_count: int = None) -> dict:
+                 episode_count: int = None, provider_override: str = "") -> dict:
     """Busca candidatos de un título. Devuelve {candidates, has_more, provider, threshold}.
-    Si el texto de búsqueda es una URL directa de themoviedb.org (movie/tv), se resuelve el
-    id y media_type del propio enlace y se devuelve ese candidato directamente (sin search)."""
-    provider_name = select_provider_name(category, subcategory)
+    Si el texto es una URL directa conocida (TMDB/IGDB/Google Books/ComicVine),
+    la URL es la autoridad: se resuelve ese candidato directamente (sin search),
+    cambiando al proveedor de la URL si está habilitado."""
+    provider_name = (provider_override or "").strip().lower() or select_provider_name(category, subcategory)
     threshold = _load_threshold()
     creds = _load_credentials()
     providers = build_providers(creds)
-    provider = providers[provider_name]
+    provider = providers.get(provider_name)
+    if not provider:
+        return {"candidates": [], "has_more": False, "provider": provider_name,
+                "configured": False, "threshold": threshold}
 
     if not provider_name or not _provider_enabled(provider_name, creds):
         return {"candidates": [], "has_more": False, "provider": provider_name,
                 "configured": False, "threshold": threshold}
 
+    q = (query or "").strip()
+
+    def _direct_candidate(details, pid, ptitle, pposter, pyear, extra=None):
+        cand = {
+            "id": str(pid or ""),
+            "title": ptitle or "",
+            "poster": pposter,
+            "year": pyear,
+            "provider": provider_name,
+        }
+        if extra:
+            cand.update(extra)
+        return {"candidates": [cand] if cand.get("title") else [],
+                "has_more": False, "provider": provider_name,
+                "configured": True, "threshold": threshold}
+
     # ── URL directa de TMDB: ej. https://www.themoviedb.org/movie/1452176-slug
     #    o https://www.themoviedb.org/tv/108978-reacher → id + media_type del enlace.
     #    La URL es la autoridad: se usa tal cual sin validar contra búsqueda.
-    url_match = re.match(r'^https?://(?:www\.)?themoviedb\.org/(movie|tv)/(\d+)', query.strip())
+    url_match = re.match(r'^https?://(?:www\.)?themoviedb\.org/(movie|tv)/(\d+)', q)
     if url_match and provider_name == 'tmdb':
         media_type = "tv" if url_match.group(1) == "tv" else "movie"
         tmdb_id = url_match.group(2)
@@ -429,6 +463,81 @@ async def search(query: str, category: str = "", subcategory: str = "",
             return {"candidates": [candidate] if candidate.get("title") else [],
                     "has_more": False, "provider": provider_name,
                     "configured": True, "threshold": threshold}
+
+    # ── URL directa de IGDB: https://www.igdb.com/games/<slug> → por slug.
+    #    Cambia al proveedor igdb (si habilitado): la URL es la autoridad.
+    igdb_match = re.match(r'^https?://(?:www\.)?igdb\.com/games/([a-z0-9\-_]+)', q, re.IGNORECASE)
+    if igdb_match and (provider_name == 'igdb' or not provider_override):
+        if provider_name != 'igdb':
+            if not _provider_enabled('igdb', creds):
+                return {"candidates": [], "has_more": False, "provider": 'igdb',
+                        "configured": False, "threshold": threshold}
+            provider_name = 'igdb'
+            provider = providers['igdb']
+        try:
+            details = await provider.get_by_slug(igdb_match.group(1).lower())
+        except Exception as e:
+            print(f"[ENRICH] Error IGDB directo ('{query}'): {e}", flush=True)
+            details = None
+        if details:
+            covers = []
+            try:
+                covers = json.loads(details.get("api_cover") or "[]")
+            except Exception:
+                covers = []
+            return _direct_candidate(details, details.get("api_id"),
+                                     details.get("api_title"),
+                                     covers[0] if covers else None,
+                                     details.get("api_year"))
+
+    # ── URL directa de Google Books: .../books/edition/<titulo>/<VOLID>[?...]
+    #    → volumen directo (funciona sin key).
+    books_match = re.search(r'/books/edition/[^/?#]+/([A-Za-z0-9_\-]+)', q, re.IGNORECASE)
+    if books_match and (provider_name == 'books' or not provider_override):
+        if provider_name != 'books':
+            provider_name = 'books'
+            provider = providers['books']
+        try:
+            details = await provider.get_details(books_match.group(1), sub_provider="google_books")
+        except Exception as e:
+            print(f"[ENRICH] Error Books directo ('{query}'): {e}", flush=True)
+            details = None
+        if details:
+            covers = []
+            try:
+                covers = json.loads(details.get("api_cover") or "[]")
+            except Exception:
+                covers = []
+            return _direct_candidate(details, details.get("api_id"),
+                                     details.get("api_title"),
+                                     covers[0] if covers else None,
+                                     details.get("api_year"),
+                                     extra={"sub_provider": "google_books"})
+
+    # ── URL directa de ComicVine: .../<slug>/<type>-<id>/ → issue directo.
+    cv_match = re.search(r'comicvine\.gamespot\.com/[^?\s]*/(\d+)-(\d+)/?', q, re.IGNORECASE)
+    if cv_match and (provider_name == 'comicvine' or not provider_override):
+        if provider_name != 'comicvine':
+            if not _provider_enabled('comicvine', creds):
+                return {"candidates": [], "has_more": False, "provider": 'comicvine',
+                        "configured": False, "threshold": threshold}
+            provider_name = 'comicvine'
+            provider = providers['comicvine']
+        try:
+            details = await provider.get_details(f"{cv_match.group(1)}-{cv_match.group(2)}")
+        except Exception as e:
+            print(f"[ENRICH] Error ComicVine directo ('{query}'): {e}", flush=True)
+            details = None
+        if details:
+            covers = []
+            try:
+                covers = json.loads(details.get("api_cover") or "[]")
+            except Exception:
+                covers = []
+            return _direct_candidate(details, details.get("api_id"),
+                                     details.get("api_title"),
+                                     covers[0] if covers else None,
+                                     None)
 
     cleaned = clean_title_aggressive(query)
     attempts = []
@@ -503,7 +612,7 @@ async def search(query: str, category: str = "", subcategory: str = "",
 
 
 async def get_details(provider_name: str, item_id: str, category: str = "", subcategory: str = "",
-                      media_type_hint: str = "") -> dict:
+                      media_type_hint: str = "", sub_provider: str = "") -> dict:
     """Obtiene la info completa de un candidato. media_type_hint permite forzar movie/tv
     (p.ej. cuando el candidato vino de una URL directa de themoviedb.org)."""
     creds = _load_credentials()
@@ -517,8 +626,9 @@ async def get_details(provider_name: str, item_id: str, category: str = "", subc
         if provider_name == 'tmdb':
             details = await provider.get_details(item_id, media_type=media_type)
         elif provider_name == 'books':
-            # el id de books incluye sub_provider; se pasa separado
-            details = await provider.get_details(item_id, sub_provider="google_books")
+            # El candidato indica de dónde vino (google_books u open_library).
+            details = await provider.get_details(
+                item_id, sub_provider=sub_provider or "google_books")
         else:
             details = await provider.get_details(item_id)
     except Exception as e:

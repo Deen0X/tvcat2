@@ -492,7 +492,7 @@
                 '<div style="position:absolute;left:0;right:0;bottom:0;height:120px;background:linear-gradient(to bottom, rgba(0,0,0,0), #09090b);"></div>' +
                 '<div style="position:relative;padding:28px 20px 24px 20px;">' +
                 '<div id="colpage-title" style="font-size:2rem;font-weight:800;line-height:1.15;"></div>' +
-                '<div id="colpage-desc" style="color:#d4d4d8;max-width:800px;margin-top:6px;white-space:pre-wrap;"></div>' +
+                '<div id="colpage-desc" style="color:#d4d4d8;margin-top:6px;white-space:pre-wrap;"></div>' +
                 '<div id="colpage-plugin-actions" style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;"></div>' +
                 '</div></div>';
             grid.parentNode.insertBefore(wrap, grid);

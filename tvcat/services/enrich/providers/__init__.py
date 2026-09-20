@@ -5,23 +5,58 @@ from .books import BooksProvider
 from .comicvine import ComicVineProvider
 
 
-# Subcategorías de libros
+# Subcategorías exactas (legado) + keywords para texto libre (p.ej. tópicos
+# "J3m → Audiolibros", "J3m → Comic y manga": contains, no igualdad).
 BOOK_SUBCATS = {'audiobook', 'ebook', 'libro', 'book'}
-# Subcategorías de cómics
 COMIC_SUBCATS = {'comic', 'manga'}
+
+GAME_KEYWORDS = ('videojuego', 'game', 'games', 'juego', 'juegos', 'gaming',
+                 'playstation', 'ps3', 'ps4', 'ps5', 'xbox', 'nintendo', 'switch',
+                 'pc gaming', 'retro', 'arcade')
+BOOK_KEYWORDS = ('audiobook', 'audiobooks', 'audiolibro', 'audiolibros',
+                 'ebook', 'ebooks', 'libro', 'libros', 'book', 'books',
+                 'novela', 'novelas', 'literatura', 'biblioteca')
+COMIC_KEYWORDS = ('comic', 'comics', 'tebeo', 'tebeos', 'teveo', 'manga',
+                  'mangas', 'historieta', 'novela grafica')
+
+
+def _norm(s):
+    import re
+    import unicodedata
+    s = unicodedata.normalize('NFD', str(s or '').lower())
+    s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+    return re.sub(r'[^a-z0-9]+', ' ', s).strip()
+
+
+def _has_kw(text, keywords):
+    t = f" {_norm(text)} "
+    for kw in keywords:
+        if f" {kw} " in t:
+            return True
+    return False
 
 
 def select_provider_name(category, subcategory):
-    """Devuelve el nombre del proveedor según categoría/subcategoría.
-    - game → igdb
-    - media con sub de libro → books
-    - media con sub de cómic → comicvine
+    """Proveedor según categoría/subcategoría (keywords, no igualdad exacta):
+    - game/juego/... (cat o sub) → igdb
+    - book/ebook/libro/... (cat, o sub si media) → books
+    - comic/tebeo/manga/... (cat, o sub si media) → comicvine
     - media resto → tmdb
     """
     cat = (category or "").strip().lower()
     sub = (subcategory or "").strip().lower()
-    if cat == 'game':
+    if cat == 'game' or _has_kw(category, GAME_KEYWORDS) or _has_kw(subcategory, GAME_KEYWORDS):
         return 'igdb'
+    if (cat in ('book', 'libro', 'ebook', 'audiobook')
+            or _has_kw(category, BOOK_KEYWORDS)
+            or (cat in ('media', 'movie', 'tv', 'anime', 'series', '')
+                and _has_kw(subcategory, BOOK_KEYWORDS))):
+        return 'books'
+    if (cat in ('comic', 'manga')
+            or _has_kw(category, COMIC_KEYWORDS)
+            or (cat in ('media', 'movie', 'tv', 'anime', 'series', '')
+                and _has_kw(subcategory, COMIC_KEYWORDS))):
+        return 'comicvine'
     if cat in ('media', 'movie', 'tv', 'anime', 'series'):
         if sub in BOOK_SUBCATS:
             return 'books'

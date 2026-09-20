@@ -9,6 +9,19 @@ USER_AGENT = "TVCat/2.0"
 class ComicVineProvider:
     name = "comicvine"
 
+    # Tipos de recurso de la API (el prefijo de la URL lo indica).
+    RESOURCE_ENDPOINTS = {
+        "4000": "issue",
+        "4005": "character",
+        "4010": "publisher",
+        "4020": "location",
+        "4025": "movie",
+        "4030": "object",
+        "4040": "person",
+        "4050": "volume",
+        "4060": "team",
+    }
+
     def __init__(self, api_key):
         self.api_key = api_key or ""
 
@@ -50,10 +63,27 @@ class ComicVineProvider:
     async def get_details(self, comic_id):
         if not self._enabled():
             return None
-        params = {"api_key": self.api_key, "format": "json", "field_list": "id,issue_number,cover_date,description,image,volume,publisher,character_credits,team_credits,location_credits"}
+        # Acepta "4005-80689" (de la URL: tipo-id) o id suelto (asume issue).
+        cid = str(comic_id or "").strip()
+        endpoint = "issue"
+        if "-" in cid:
+            rtype, _rid = cid.split("-", 1)
+            endpoint = self.RESOURCE_ENDPOINTS.get(rtype.strip(), "issue")
+            cid = f"{rtype.strip()}-{_rid.strip()}"
+        elif cid.isdigit():
+            cid = f"4000-{cid}"
+        else:
+            return None
+        if endpoint == "issue":
+            fields = "id,issue_number,cover_date,description,image,volume,publisher,character_credits,team_credits,location_credits"
+        elif endpoint == "volume":
+            fields = "id,name,description,image,publisher,deck,start_year,count_of_issues"
+        else:
+            fields = "id,name,deck,description,image,publisher"
+        params = {"api_key": self.api_key, "format": "json", "field_list": fields}
         headers = {"User-Agent": USER_AGENT}
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{BASE_URL}/issue/4000-{comic_id}/", params=params, headers=headers)
+            resp = await client.get(f"{BASE_URL}/{endpoint}/{cid}/", params=params, headers=headers)
             if resp.status_code != 200:
                 return None
             data = resp.json().get("results") or {}
@@ -62,15 +92,22 @@ class ComicVineProvider:
     def _format(self, comic):
         if not comic:
             return None
+        # Issues (volume + número) y resto de recursos (nombre directo).
         volume = comic.get("volume", {}) or {}
-        volume_name = volume.get("name", "Unknown")
-        issue_num = comic.get("issue_number", "?")
+        if volume.get("name") or comic.get("issue_number") is not None:
+            volume_name = volume.get("name", "Unknown")
+            issue_num = comic.get("issue_number", "?")
+            title = f"{volume_name} #{issue_num}"
+            category = "comic"
+        else:
+            title = comic.get("name") or "Unknown"
+            category = "comic"
         api_data = {
             "api_id": str(comic.get("id")),
-            "api_title": f"{volume_name} #{issue_num}",
-            "api_description": comic.get("description"),
+            "api_title": title,
+            "api_description": comic.get("description") or comic.get("deck"),
             "api_release_date": comic.get("cover_date"),
-            "api_category": "comic",
+            "api_category": category,
             "provider": self.name,
         }
         publisher = comic.get("publisher", {}).get("name")

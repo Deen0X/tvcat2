@@ -679,6 +679,7 @@ function loadUserbotConfig() {
                 badge('igdb', 'enrich-igdb-id');
                 badge('igdb', 'enrich-igdb-secret');
                 badge('comicvine', 'enrich-comicvine-key');
+                badge('google_books', 'enrich-googlebooks-key');
                 // Plantillas de cover
                 var tpls = cfg.templates || {};
                 renderEnrichTemplates(tpls);
@@ -876,7 +877,8 @@ function loadUserbotConfig() {
                 client_id: (document.getElementById('enrich-igdb-id') || {}).value || '',
                 client_secret: (document.getElementById('enrich-igdb-secret') || {}).value || ''
             },
-            comicvine: { api_key: (document.getElementById('enrich-comicvine-key') || {}).value || '' }
+            comicvine: { api_key: (document.getElementById('enrich-comicvine-key') || {}).value || '' },
+            google_books: { api_key: (document.getElementById('enrich-googlebooks-key') || {}).value || '' }
         };
         var threshold = parseFloat((document.getElementById('enrich-threshold') || {}).value || '0.95');
         if (isNaN(threshold)) threshold = 0.95;
