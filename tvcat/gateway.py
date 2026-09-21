@@ -8963,6 +8963,219 @@ async def test_userbot_session(session_id: int, request: Request):
         return {"success": False, "error": str(e)}
 
 
+# --- Puerta trasera: session strings externas (SessionStrings_Implementation_Plan.md) ---
+# Token aleatorio por proceso para el probe de misma-máquina. Solo en memoria:
+# nunca en disco ni en git. El frontend lo obtiene autenticado y prueba
+# http://127.0.0.1:<puerto>/api/local-probe con él.
+import secrets as _secrets
+_LOCAL_PROBE_TOKEN = _secrets.token_hex(16)
+
+
+@app.get(api_url("/api/userbot/local_probe_token"))
+async def userbot_local_probe_token(request: Request):
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    return {"token": _LOCAL_PROBE_TOKEN, "scripts_dir": _strings_scripts_dir()}
+
+
+@app.get(api_url("/api/local-probe"))
+@app.options(api_url("/api/local-probe"))
+async def local_probe(request: Request):
+    """Probe de misma-máquina: el JS lo llama contra 127.0.0.1:<location.port>.
+    Sin auth (el token es el secreto); respuesta constante sin datos sensibles.
+    Cabeceras CORS+PNA para el preflight de Private Network Access (Chrome)."""
+    from fastapi.responses import JSONResponse as _JR
+    _cors = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "X-Local-Probe, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Private-Network": "true",
+        "Access-Control-Max-Age": "600",
+    }
+    if request.method == "OPTIONS":
+        return _JR({"ok": True}, headers=_cors)
+    tok = request.headers.get("x-local-probe", "")
+    if tok and tok == _LOCAL_PROBE_TOKEN:
+        return _JR({"ok": True}, headers=_cors)
+    return _JR({"ok": False}, status_code=404, headers=_cors)
+
+
+def _strings_scripts_dir() -> str:
+    import os as _os
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    return _os.path.join(here, "scripts")
+
+
+@app.post(api_url("/api/userbot/launch_generator"))
+async def userbot_launch_generator(request: Request):
+    """Abre una consola del SERVIDOR con el script generador. Solo tiene
+    sentido en misma máquina (el modal lo gatea con el probe); si no, se
+    devuelve el comando para lanzamiento manual."""
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    import os as _os
+    import sys as _sys
+    body = await request.json()
+    ctype = (body.get("type") or "").strip()
+    if ctype not in ("telethon", "pyrogram"):
+        return {"success": False, "error": "type debe ser telethon|pyrogram"}
+    script = _os.path.join(_strings_scripts_dir(),
+                           f"generate_session_{ctype}.py")
+    if not _os.path.isfile(script):
+        return {"success": False, "error": f"No existe {script}"}
+    argv = [_sys.executable, script]
+    if body.get("with_params"):
+        # NOTA: api_hash visible en la lista de procesos del servidor unos
+        # segundos. Aceptable en local; advertido en el modal.
+        if str(body.get("api_id") or "").strip():
+            argv += ["--api-id", str(body.get("api_id")).strip()]
+        if str(body.get("api_hash") or "").strip():
+            argv += ["--api-hash", str(body.get("api_hash")).strip()]
+        if str(body.get("phone") or "").strip():
+            argv += ["--phone", str(body.get("phone")).strip()]
+    if body.get("verbose"):
+        argv += ["--verbose"]
+    import subprocess as _sp
+    cmd_str = _sp.list2cmdline(argv)
+    if _os.name != "nt":
+        return {"success": False, "cmd": cmd_str,
+                "error": "Lanzado automático solo en Windows; ejecútalo a mano"}
+    try:
+        # Consola visible que NO se cierra (el script ya tiene input final).
+        _sp.Popen(["cmd", "/c", "start", "TVCat2 generador " + ctype,
+                   _sys.executable] + argv[1:],
+                  cwd=_strings_scripts_dir())
+        return {"success": True, "cmd": cmd_str}
+    except Exception as e:
+        return {"success": False, "cmd": cmd_str, "error": str(e)[:200]}
+
+
+@app.post(api_url("/api/userbot/strings/validate"))
+async def userbot_strings_validate(request: Request):
+    """Pre-validación OFFLINE (sin red) de los strings pegados."""
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    from services.userbot_service import parse_session_string
+    body = await request.json()
+    try:
+        modal_api = int(str(body.get("api_id") or "0").strip() or 0)
+    except Exception:
+        modal_api = 0
+    out = {}
+    for key, expect in (("telethon", "telethon"), ("pyrogram", "pyrogram")):
+        raw = (body.get(key) or "").strip()
+        if not raw:
+            out[key] = {"empty": True}
+            continue
+        p = parse_session_string(raw)
+        warn = None
+        if p["kind"] not in (expect, "pyrogram-old") or (
+                expect == "pyrogram" and p["kind"] == "telethon") or (
+                expect == "telethon" and p["kind"] in ("pyrogram", "pyrogram-old")):
+            warn = f"Parece {p['kind']}, no {expect}: ¿cajas cruzadas?"
+        elif (p.get("api_id") and modal_api and p["api_id"] != modal_api):
+            warn = (f"El string trae api_id={p['api_id']} pero el modal dice "
+                    f"{modal_api}")
+        out[key] = {"empty": False, "kind": p["kind"], "api_id": p.get("api_id"),
+                    "user_id": p.get("user_id"), "detail": p.get("detail"),
+                    "warning": warn}
+    return {"success": True, "fields": out}
+
+
+@app.post(api_url("/api/userbot/strings/test"))
+async def userbot_strings_test(request: Request):
+    """Test ONLINE: conecta cada string informado y devuelve identidad."""
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    from services.userbot_service import test_session_string
+    body = await request.json()
+    try:
+        api_id = int(str(body.get("api_id") or "0").strip() or 0)
+    except Exception:
+        return {"success": False, "error": "API ID inválido"}
+    api_hash = (body.get("api_hash") or "").strip()
+    if not api_id or not api_hash:
+        return {"success": False, "error": "API ID y API Hash requeridos"}
+    out = {}
+    for key in ("telethon", "pyrogram"):
+        raw = (body.get(key) or "").strip()
+        if not raw:
+            out[key] = {"empty": True}
+            continue
+        out[key] = {"empty": False, **await test_session_string(
+            key, raw, api_id, api_hash)}
+    mismatch = (not out["telethon"].get("empty") and not out["pyrogram"].get("empty")
+                and out["telethon"].get("ok") and out["pyrogram"].get("ok")
+                and out["telethon"].get("id") != out["pyrogram"].get("id"))
+    return {"success": True, "fields": out, "mismatch": bool(mismatch)}
+
+
+@app.post(api_url("/api/userbot/strings/save"))
+async def userbot_strings_save(request: Request):
+    """Guardar: SIEMPRE AÑADE filas nuevas con is_active=False (nunca
+    reemplaza ni cambia preferencias). Nombres <base>_T / <base>_P."""
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s or s.get("role") != "admin": raise HTTPException(403)
+    from services.userbot_service import (
+        build_session_name, save_session, save_telegram_user,
+        get_telegram_user, test_session_string)
+    body = await request.json()
+    try:
+        api_id = int(str(body.get("api_id") or "0").strip() or 0)
+    except Exception:
+        return {"success": False, "error": "API ID inválido"}
+    api_hash = (body.get("api_hash") or "").strip()
+    if not api_id or not api_hash:
+        return {"success": False, "error": "API ID y API Hash requeridos"}
+    base = (body.get("base_name") or "").strip()
+    items = [(k, (body.get(k) or "").strip()) for k in ("telethon", "pyrogram")]
+    items = [(k, v) for k, v in items if v]
+    if not items:
+        return {"success": False, "error": "Pega al menos un session string"}
+    # Identidad: del Test en vivo (única fuente fiable).
+    ids = {}
+    for k, v in items:
+        t = await test_session_string(k, v, api_id, api_hash)
+        if not t.get("ok") or not t.get("id"):
+            return {"success": False,
+                    "error": f"Test {k} falló ({t.get('error', '?')}): haz Test antes de Guardar"}
+        ids[k] = t
+    if len(ids) == 2 and ids["telethon"]["id"] != ids["pyrogram"]["id"]:
+        return {"success": False,
+                "error": "Los dos strings son de cuentas distintas"}
+    tg_user_id = int(body.get("tg_user_id") or 0) or ids[items[0][0]]["id"]
+    if not get_telegram_user(tg_user_id):
+        me0 = ids[items[0][0]]
+        uname = (me0.get("username") or "").strip()
+        save_telegram_user(tg_user_id=tg_user_id,
+                           name=uname or f"Cuenta-{tg_user_id}",
+                           phone=me0.get("phone"),
+                           api_id=api_id, api_hash=api_hash,
+                           is_default=False)
+    if not base:
+        me0 = ids[items[0][0]]
+        base = (me0.get("username") or f"Cuenta-{tg_user_id}").strip()
+    import re as _re
+    base = _re.sub(r"(_T|_P|_2)+$", "", base) or f"Cuenta-{tg_user_id}"
+    created = []
+    phone = (body.get("phone") or "").strip()
+    for k, v in items:
+        suffix = "_T" if k == "telethon" else "_P"
+        name = build_session_name(k, base + suffix)
+        row = save_session(name=name, client_type=k, phone=phone,
+                           api_id=api_id, api_hash=api_hash,
+                           session_string=v, tg_user_id=tg_user_id,
+                           is_active=False)
+        row.pop("session_string", None)
+        created.append(row)
+    return {"success": True, "tg_user_id": tg_user_id, "sessions": created}
+
+
 # Auth sessions temporales (mantener cliente conectado entre send_code y confirm_code).
 # Clave: "phone|client_type" para poder tener Telethon y Pyrofork en paralelo durante el flujo.
 _auth_sessions = {}

@@ -1972,6 +1972,237 @@ window.openSessionGenerator = function() {
     };
 };
 
+// --- Anadir Session Strings externas (puerta trasera, diseno 2026-09-22) ---
+window.openSessionStrings = function() {
+    var _s = { test: null, probe: null, scriptsDir: '' };
+
+    var subModal = document.createElement('div');
+    subModal.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(9,9,11,0.9);z-index:999999;display:flex;align-items:center;justify-content:center;';
+    var subDialog = document.createElement('div');
+    subDialog.style.cssText = 'background:rgba(24,24,27,0.98);border:1px solid rgba(168,85,247,0.4);border-radius:12px;width:94%;max-width:560px;max-height:92vh;overflow-y:auto;padding:20px;box-shadow:0 25px 50px -12px rgba(0,0,0,0.8);display:flex;flex-direction:column;';
+
+    var dName = window._userbotHostname || 'unknown';
+    var apiId = getUserbotField('userbot-api-id') || '';
+    var apiHash = getUserbotField('userbot-api-hash') || '';
+    var phone = getUserbotField('userbot-phone') || '';
+
+    var h = '<div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(63,63,70,0.4);padding-bottom:10px;">';
+    h += '<h3 style="margin:0;font-size:1.1rem;color:#f4f4f5;">A\u00F1adir Session Strings</h3>';
+    h += '<button id="sstr-close" style="background:none;border:none;color:#a1a1aa;font-size:1.2rem;cursor:pointer;">X</button></div>';
+    h += '<div style="display:flex;flex-direction:column;gap:8px;padding-top:8px;">';
+    h += '<div style="font-size:0.75rem;color:#fbbf24;background:rgba(251,191,36,0.08);padding:6px 8px;border-radius:4px;">Pega strings generados fuera (scripts). Opcional: una sola caja. Al guardar se A\u00D1ADEN como <i>base</i>_T / <i>base</i>_P inactivas, sin tocar las existentes.</div>';
+    h += '<div><label style="font-size:0.75rem;color:#a1a1aa;">Nombre base</label><input type="text" id="sstr-name" value="" placeholder="' + dName + '" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div>';
+    h += '<div style="display:flex;gap:8px;"><div style="flex:1;"><label style="font-size:0.75rem;color:#a1a1aa;">API ID</label><input type="text" id="sstr-api-id" value="' + apiId + '" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div>';
+    h += '<div style="flex:2;"><label style="font-size:0.75rem;color:#a1a1aa;">API Hash</label><input type="text" id="sstr-api-hash" value="' + apiHash + '" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div></div>';
+    h += '<div><label style="font-size:0.75rem;color:#a1a1aa;">Tel\u00E9fono</label><input type="text" id="sstr-phone" value="' + phone + '" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div>';
+    h += '<label style="font-size:0.75rem;color:#a1a1aa;"><input type="checkbox" id="sstr-params" checked style="vertical-align:middle;"> Pasar API ID/Hash/Tel\u00E9fono como par\u00E1metros al script</label>';
+    h += '<label style="font-size:0.75rem;color:#a1a1aa;"><input type="checkbox" id="sstr-verbose" style="vertical-align:middle;"> Usar modo Verbose (--verbose: traza detallada en la consola)</label>';
+
+    h += '<div style="border:1px solid rgba(63,63,70,0.5);border-radius:8px;padding:10px;">';
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;"><span style="font-size:0.8rem;font-weight:700;color:#a855f7;">Telethon</span><button id="sstr-gen-t" title="Lanzar script generador" style="background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:4px 10px;color:#f4f4f5;font-size:0.75rem;cursor:pointer;">\u25B6 script</button></div>';
+    h += '<textarea id="sstr-t" rows="2" placeholder="Pega el string de Telethon (empieza por 1…)" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.75rem;box-sizing:border-box;word-break:break-all;"></textarea>';
+    h += '<div id="sstr-t-info" style="font-size:0.72rem;color:#a1a1aa;margin-top:4px;"></div></div>';
+
+    h += '<div style="border:1px solid rgba(63,63,70,0.5);border-radius:8px;padding:10px;">';
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;"><span style="font-size:0.8rem;font-weight:700;color:#06b6d4;">Pyrogram</span><button id="sstr-gen-p" title="Lanzar script generador" style="background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:4px 10px;color:#f4f4f5;font-size:0.75rem;cursor:pointer;">\u25B6 script</button></div>';
+    h += '<textarea id="sstr-p" rows="2" placeholder="Pega el string de Pyrogram" style="width:100%;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.75rem;box-sizing:border-box;word-break:break-all;"></textarea>';
+    h += '<div id="sstr-p-info" style="font-size:0.72rem;color:#a1a1aa;margin-top:4px;"></div></div>';
+
+    h += '<div id="sstr-status" style="font-size:0.75rem;"></div>';
+    h += '<div id="sstr-manual" style="display:none;font-size:0.72rem;color:#fbbf24;background:rgba(251,191,36,0.08);padding:6px 8px;border-radius:4px;word-break:break-all;"></div>';
+    h += '<div style="display:flex;gap:8px;margin-top:4px;">';
+    h += '<button id="sstr-test" style="flex:1;background:#0ea5e9;border:none;border-radius:6px;padding:8px;color:white;font-weight:700;font-size:0.8rem;cursor:pointer;">Test</button>';
+    h += '<button id="sstr-save" style="flex:1;background:#22c55e;border:none;border-radius:6px;padding:8px;color:white;font-weight:700;font-size:0.8rem;cursor:pointer;">Guardar</button>';
+    h += '<button id="sstr-cancel" style="flex:1;background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;font-weight:700;font-size:0.8rem;cursor:pointer;">Cancelar</button>';
+    h += '</div></div>';
+    subDialog.innerHTML = h;
+    subModal.appendChild(subDialog);
+    document.body.appendChild(subModal);
+
+    var closeS = function() {
+        subModal.style.opacity = '0';
+        setTimeout(function() { subModal.remove(); }, 200);
+    };
+    document.getElementById('sstr-close').onclick = closeS;
+    document.getElementById('sstr-cancel').onclick = closeS;
+    subModal.addEventListener('click', function(e) { if (e.target === subModal) closeS(); });
+    subDialog.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeS(); });
+
+    function fmtInfo(el, r, expect) {
+        if (!el) return;
+        if (r.empty) { el.innerHTML = ''; return; }
+        var t = 'Formato: <b>' + r.kind + '</b>';
+        if (r.user_id) t += ' · user_id=' + r.user_id;
+        if (r.api_id) t += ' · api_id=' + r.api_id;
+        if (r.warning) t += '<br>\u26A0\uFE0F ' + r.warning;
+        else if (r.kind === expect || (expect === 'pyrogram' && r.kind === 'pyrogram-old')) t += ' \u2705';
+        else t += ' \u274C';
+        el.innerHTML = t;
+    }
+
+    var _vt = null;
+    function doValidate() {
+        var status = document.getElementById('sstr-status');
+        window.API.ajax({
+            method: 'POST', url: '/api/userbot/strings/validate',
+            data: { telethon: document.getElementById('sstr-t').value.trim(),
+                    pyrogram: document.getElementById('sstr-p').value.trim(),
+                    api_id: document.getElementById('sstr-api-id').value.trim() },
+            success: function(res) {
+                if (!res || !res.success) return;
+                fmtInfo(document.getElementById('sstr-t-info'), res.fields.telethon, 'telethon');
+                fmtInfo(document.getElementById('sstr-p-info'), res.fields.pyrogram, 'pyrogram');
+                _s.test = null;
+            },
+            error: function() { if (status) status.innerHTML = '\u274C Error de red'; }
+        });
+    }
+    function scheduleValidate() {
+        if (_vt) clearTimeout(_vt);
+        _vt = setTimeout(doValidate, 600);
+    }
+    document.getElementById('sstr-t').addEventListener('input', scheduleValidate);
+    document.getElementById('sstr-p').addEventListener('input', scheduleValidate);
+
+    document.getElementById('sstr-test').onclick = function() {
+        var status = document.getElementById('sstr-status');
+        var t = document.getElementById('sstr-t').value.trim();
+        var p = document.getElementById('sstr-p').value.trim();
+        if (!t && !p) { alert('Pega al menos un session string.'); return; }
+        status.innerHTML = '\u23F3 Probando conexi\u00F3n...';
+        document.getElementById('sstr-test').disabled = true;
+        window.API.ajax({
+            method: 'POST', url: '/api/userbot/strings/test',
+            data: { telethon: t, pyrogram: p,
+                    api_id: document.getElementById('sstr-api-id').value.trim(),
+                    api_hash: document.getElementById('sstr-api-hash').value.trim() },
+            success: function(res) {
+                document.getElementById('sstr-test').disabled = false;
+                if (!res || !res.success) { status.innerHTML = '\u274C ' + (res ? res.error : 'Error'); return; }
+                _s.test = res;
+                function one(key, label) {
+                    var r = res.fields[key];
+                    if (r.empty) return label + ': (vac\u00EDa)<br>';
+                    if (!r.ok) return label + ': \u274C ' + (r.error || '?') + '<br>';
+                    return label + ': \u2705 @' + (r.username || r.first_name || r.id) + ' (id ' + r.id + ')<br>';
+                }
+                var msg = one('telethon', 'Telethon') + one('pyrogram', 'Pyrogram');
+                if (res.mismatch) msg += '<b style="color:#f87171;">\u26D4 Las dos son cuentas DISTINTAS: no se puede guardar la pareja.</b>';
+                else if (res.fields.telethon.ok || res.fields.pyrogram.ok) msg += 'Ya puedes Guardar.';
+                status.innerHTML = msg;
+            },
+            error: function() { document.getElementById('sstr-test').disabled = false; status.innerHTML = '\u274C Error de red'; }
+        });
+    };
+
+    document.getElementById('sstr-save').onclick = function() {
+        var status = document.getElementById('sstr-status');
+        var t = document.getElementById('sstr-t').value.trim();
+        var p = document.getElementById('sstr-p').value.trim();
+        if (!t && !p) { alert('Pega al menos un session string.'); return; }
+        if (_s.test && _s.test.mismatch) { alert('Cuentas distintas: no se puede guardar.'); return; }
+        status.innerHTML = '\u23F3 Guardando...';
+        document.getElementById('sstr-save').disabled = true;
+        window.API.ajax({
+            method: 'POST', url: '/api/userbot/strings/save',
+            data: { base_name: document.getElementById('sstr-name').value.trim(),
+                    telethon: t, pyrogram: p,
+                    api_id: document.getElementById('sstr-api-id').value.trim(),
+                    api_hash: document.getElementById('sstr-api-hash').value.trim(),
+                    phone: document.getElementById('sstr-phone').value.trim() },
+            success: function(res) {
+                document.getElementById('sstr-save').disabled = false;
+                if (res && res.success) {
+                    var names = res.sessions.map(function(x) { return x.name; }).join(', ');
+                    status.innerHTML = '\u2705 Creadas (inactivas): ' + names + '. Act\u00EDvalas con \u25B6 en la lista.';
+                    setTimeout(function() { closeS(); loadUserbotConfig(); loadUserbotSessions(); }, 1800);
+                } else {
+                    status.innerHTML = '\u274C ' + (res ? res.error : 'Error');
+                }
+            },
+            error: function() { document.getElementById('sstr-save').disabled = false; status.innerHTML = '\u274C Error de red'; }
+        });
+    };
+
+    // Probe misma-maquina + lanzamiento de script
+    function probeLocal(cb) {
+        window.API.ajax({
+            url: '/api/userbot/local_probe_token',
+            success: function(res) {
+                if (!res || !res.token) { cb(false, ''); return; }
+                _s.scriptsDir = res.scripts_dir || '';
+                var port = window.location.port || '80';
+                var ctrl = null;
+                try { ctrl = new AbortController(); } catch (e) {}
+                var done = false;
+                var to = setTimeout(function() { if (!done) { done = true; try { if (ctrl) ctrl.abort(); } catch (e) {} cb(false, res.token); } }, 2500);
+                var opts = { headers: { 'X-Local-Probe': res.token } };
+                if (ctrl) opts.signal = ctrl.signal;
+                fetch('http://127.0.0.1:' + port + '/api/local-probe', opts).then(function(r) {
+                    if (done) return; done = true; clearTimeout(to);
+                    cb(r.ok, res.token);
+                }).catch(function() {
+                    if (done) return; done = true; clearTimeout(to);
+                    cb(false, res.token);
+                });
+            },
+            error: function() { cb(false, ''); }
+        });
+    }
+
+    function manualCmd(ctype) {
+        var dir = _s.scriptsDir || '<carpeta tvcat/scripts>';
+        var cmd = 'python "' + dir + '/generate_session_' + ctype + '.py"';
+        if (document.getElementById('sstr-params').checked) {
+            var a = document.getElementById('sstr-api-id').value.trim();
+            var hh = document.getElementById('sstr-api-hash').value.trim();
+            var ph = document.getElementById('sstr-phone').value.trim();
+            if (a) cmd += ' --api-id ' + a;
+            if (hh) cmd += ' --api-hash ' + hh;
+            if (ph) cmd += ' --phone ' + ph;
+        }
+        if (document.getElementById('sstr-verbose').checked) cmd += ' --verbose';
+        return cmd;
+    }
+
+    function launchGen(ctype) {
+        var status = document.getElementById('sstr-status');
+        var man = document.getElementById('sstr-manual');
+        status.innerHTML = '\u23F3 Comprobando si el servidor est\u00E1 en esta m\u00E1quina...';
+        probeLocal(function(isLocal) {
+            if (!isLocal) {
+                status.innerHTML = '\u26A0\uFE0F No est\u00E1s en local: no puedo abrir la consola del servidor. L\u00E1nzalo a mano:';
+                man.style.display = 'block';
+                man.textContent = manualCmd(ctype);
+                return;
+            }
+            man.style.display = 'none';
+            status.innerHTML = '\u23F3 Abriendo consola del generador (' + ctype + ')...';
+            window.API.ajax({
+                method: 'POST', url: '/api/userbot/launch_generator',
+                data: { type: ctype,
+                        api_id: document.getElementById('sstr-api-id').value.trim(),
+                        api_hash: document.getElementById('sstr-api-hash').value.trim(),
+                        phone: document.getElementById('sstr-phone').value.trim(),
+                        with_params: document.getElementById('sstr-params').checked,
+                        verbose: document.getElementById('sstr-verbose').checked },
+                success: function(res) {
+                    if (res && res.success) {
+                        status.innerHTML = '\u2705 Consola abierta. Copia el string entre BEGIN/END y p\u00E9galo arriba.';
+                    } else {
+                        status.innerHTML = '\u26A0\uFE0F ' + ((res && res.error) || 'No se pudo lanzar') + '. Comando manual:';
+                        man.style.display = 'block';
+                        man.textContent = (res && res.cmd) || manualCmd(ctype);
+                    }
+                },
+                error: function() { status.innerHTML = '\u274C Error de red'; }
+            });
+        });
+    }
+    document.getElementById('sstr-gen-t').onclick = function() { launchGen('telethon'); };
+    document.getElementById('sstr-gen-p').onclick = function() { launchGen('pyrogram'); };
+};
+
 window.toggleTgAutoCollap = function() {
     var body = document.getElementById('tgauto-collap-body');
     var ind = document.getElementById('tgauto-collap-ind');

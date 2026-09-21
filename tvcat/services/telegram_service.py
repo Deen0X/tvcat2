@@ -160,12 +160,14 @@ async def _shared_temp_client(session_string, api_id, api_hash, ctype):
                 name=f"tvcat_shared_{key}",
                 session_string=session_string,
                 api_id=int(api_id), api_hash=api_hash,
+                device_model="TVCat2", system_version="TVCat2",
                 in_memory=True, workdir=_tf.gettempdir())
         else:
             from telethon import TelegramClient
             from telethon.sessions import StringSession
             cli = TelegramClient(StringSession(session_string), int(api_id), api_hash,
-                                 device_model="TVCat_Central", app_version="1.0")
+                                 device_model="TVCat2", system_version="TVCat2",
+                                 app_version="2.0", lang_code="es")
         await cli.connect()
         if ctype == "pyrogram":
             try:
@@ -300,7 +302,9 @@ class TelegramClientPool:
             client = TelegramClient(
                 StringSession(sess.get("session_string", "")),
                 api_id=sess.get("api_id", 0),
-                api_hash=sess.get("api_hash", "")
+                api_hash=sess.get("api_hash", ""),
+                device_model="TVCat2", system_version="TVCat2",
+                app_version="2.0", lang_code="es"
             )
         else:
             from pyrogram import Client
@@ -310,6 +314,7 @@ class TelegramClientPool:
                 session_string=sess.get("session_string", ""),
                 api_id=sess.get("api_id", 0),
                 api_hash=sess.get("api_hash", ""),
+                device_model="TVCat2", system_version="TVCat2",
                 in_memory=True,
                 workdir=_tf.gettempdir()
             )

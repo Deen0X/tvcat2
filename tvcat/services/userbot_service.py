@@ -319,6 +319,127 @@ def get_session_by_name(name: str, client_type: str = "telethon") -> Optional[di
     return dict(row) if row else None
 
 
+def parse_session_string(s: str) -> dict:
+    """Clasifica un session string pegado SIN red (puerta trasera).
+    Devuelve {"kind", "api_id", "user_id", "detail"} con kind en
+    telethon | pyrogram | pyrogram-old | invalid.
+    - Telethon: empieza por CURRENT_VERSION ('1') + base64 válido.
+    - Pyrogram nuevo (SESSION_STRING_FORMAT ">BI?256sQ?"): lleva api_id y
+      user_id incrustados → se extraen sin conectar.
+    - Pyrogram viejo (351/356 chars): sin api_id dentro → solo kind.
+    Referencia verificada: telethon/sessions/string.py y
+    pyrogram/storage/{storage,memory_storage}.py instalados."""
+    out = {"kind": "invalid", "api_id": None, "user_id": None, "detail": ""}
+    s = (s or "").strip()
+    if not s:
+        out["detail"] = "vacío"
+        return out
+    if s[0] == "1":
+        # Candidato Telethon: resto base64 urlsafe (~351 chars).
+        try:
+            import base64 as _b64
+            import struct as _st
+            raw = _b64.urlsafe_b64decode(s[1:])
+            if len(raw) in (263, 275):  # '>B4sH256s' IPv4 / '>B16sH256s' IPv6
+                out["kind"] = "telethon"
+                return out
+            out["detail"] = f"longitud {len(raw)} no telethon"
+            return out
+        except Exception as e:
+            out["detail"] = f"no decodifica como telethon: {type(e).__name__}"
+            return out
+    # Candidato Pyrogram: base64 puro sin prefijo.
+    try:
+        import base64 as _b64
+        import struct as _st
+        padded = s + "=" * (-len(s) % 4)
+        if len(s) in (351, 356):
+            _dc, _tm, _ak, _uid, _bot = _st.unpack(
+                ">B?256sI?" if len(s) == 351 else ">B?256sQ?",
+                _b64.urlsafe_b64decode(padded))
+            out["kind"] = "pyrogram-old"
+            out["user_id"] = int(_uid)
+            return out
+        _dc, _api, _tm, _ak, _uid, _bot = _st.unpack(
+            ">BI?256sQ?", _b64.urlsafe_b64decode(padded))
+        out["kind"] = "pyrogram"
+        out["api_id"] = int(_api)
+        out["user_id"] = int(_uid)
+        return out
+    except Exception as e:
+        out["detail"] = f"no decodifica como pyrogram: {type(e).__name__}"
+        return out
+
+
+async def test_session_string(client_type: str, session_string: str,
+                              api_id: int, api_hash: str,
+                              timeout: float = 20.0) -> dict:
+    """Prueba UN session string externo: conecta temporal in_memory, get_me,
+    desconecta en finally. Devuelve {"ok", "id", "username", "first_name",
+    "phone"} o {"ok": False, "error"}. Si es la MISMA clave que el wrapper
+    vivo del pool, prueba sobre él (no duplicar conexión: AUTH_KEY_DUPLICATED)."""
+    import asyncio as _aio
+    want = (session_string or "").strip()
+    if not want:
+        return {"ok": False, "error": "String vacío"}
+    # Misma clave que el pool: reusar wrapper vivo.
+    try:
+        _wrapper = await get_active_client(client_type)
+        _wraw = getattr(_wrapper, "_client", None) if _wrapper else None
+        _wss = str(((getattr(_wrapper, "session_data", None) or {}).get("session_string")) or "")
+        if _wraw is not None and _wss and _wss == want:
+            try:
+                me = await _aio.wait_for(_wraw.get_me(), timeout=timeout)
+                return {"ok": True,
+                        "id": getattr(me, "id", None),
+                        "username": getattr(me, "username", None),
+                        "first_name": getattr(me, "first_name", "") or "",
+                        "phone": getattr(me, "phone", None),
+                        "via": "pool"}
+            except Exception as e:
+                return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+    except Exception:
+        pass
+    # Clave distinta: temporal dedicado in_memory.
+    cli = None
+    try:
+        if client_type == "pyrogram":
+            from pyrogram import Client as _Pyro
+            import tempfile as _tf
+            cli = _Pyro(name="tvcat2_strtest", session_string=want,
+                        api_id=int(api_id), api_hash=api_hash,
+                        device_model="TVCat2", in_memory=True,
+                        workdir=_tf.gettempdir())
+            await _aio.wait_for(cli.connect(), timeout=timeout)
+            try:
+                me = await _aio.wait_for(cli.get_me(), timeout=timeout)
+            except Exception:
+                await _aio.wait_for(cli.start(), timeout=timeout)
+                me = await _aio.wait_for(cli.get_me(), timeout=timeout)
+        else:
+            from telethon import TelegramClient as _TC
+            from telethon.sessions import StringSession as _SS
+            cli = _TC(_SS(want), int(api_id), api_hash,
+                      device_model="TVCat2", system_version="TVCat2",
+                      app_version="2.0", lang_code="es")
+            await _aio.wait_for(cli.connect(), timeout=timeout)
+            me = await _aio.wait_for(cli.get_me(), timeout=timeout)
+        return {"ok": True,
+                "id": getattr(me, "id", None),
+                "username": getattr(me, "username", None),
+                "first_name": getattr(me, "first_name", "") or "",
+                "phone": getattr(me, "phone", None),
+                "via": "temp"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+    finally:
+        if cli is not None:
+            try:
+                await cli.disconnect()
+            except Exception:
+                pass
+
+
 def save_session(name: str, client_type: str, phone: str, api_id: int, api_hash: str,
                  session_string: str, tg_user_id: int = None, is_active: bool = False) -> dict:
     conn = _get_conn()
@@ -593,7 +714,11 @@ class UserbotClient:
         self._client = TelegramClient(
             ss,
             self.session_data["api_id"],
-            self.session_data["api_hash"]
+            self.session_data["api_hash"],
+            device_model="TVCat2",
+            system_version="TVCat2",
+            app_version="2.0",
+            lang_code="es"
         )
         await self._client.connect()
         return self._client
@@ -621,6 +746,10 @@ class UserbotClient:
             session_string=self.session_data.get("session_string") or None,
             api_id=self.session_data["api_id"],
             api_hash=self.session_data["api_hash"],
+            device_model="TVCat2",
+            system_version="TVCat2",
+            app_version="2.0",
+            lang_code="es",
             in_memory=True,
             workers=workers,
             # F2 FastDownload: transmisiones concurrentes (Nanaki usa 4).

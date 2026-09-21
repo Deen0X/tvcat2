@@ -439,7 +439,10 @@
                         </div>
                         <div id="collap-sessions-body" style="padding:10px 12px;">
                             <div id="userbot-sessions-list" style="margin-bottom:10px;"></div>
-                            <button class="btn-secondary" onclick="openSessionGenerator()" style="padding:6px 12px;font-size:0.8rem;width:100%;">+ Sesión Dual (Telethon + Pyrogram)</button>
+                            <div style="display:flex;gap:8px;">
+                                <button class="btn-secondary" onclick="openSessionGenerator()" style="padding:6px 12px;font-size:0.8rem;flex:1;">+ Sesión Dual (Telethon + Pyrogram)</button>
+                                <button class="btn-secondary" onclick="openSessionStrings()" style="padding:6px 12px;font-size:0.8rem;flex:1;">Añadir Session Strings</button>
+                            </div>
                         </div>
                     </div>
 
@@ -914,14 +917,14 @@
     <!-- EPISODES MODAL -->
     <div id="episodes-modal" class="modal hidden">
         <div class="floating-episodes-content">
-            <div class="floating-header">
-                <h2>📋 Lista de Episodios</h2>
+            <div class="floating-header floating-header-episodes">
+                <h2>📋 Episodios</h2>
                 <div class="floating-controls">
-                    <div style="text-align: right; display: flex; align-items: center; gap: 10px;">
-                        <label for="season-selector" style="font-size: 0.85rem; color: var(--text-secondary);">Temporada:</label>
-                        <select id="season-selector" class="season-combo" onchange="Catalog.onSeasonChange()"></select>
-                    </div>
                     <span class="close-btn-mini" onclick="Catalog.closeEpisodesModal()">&times;</span>
+                </div>
+                <div class="season-row">
+                    <label for="season-selector" style="font-size: 0.85rem; color: var(--text-secondary);">Temporada:</label>
+                    <select id="season-selector" class="season-combo" onchange="Catalog.onSeasonChange()"></select>
                 </div>
             </div>
             <div id="episodes-list" class="episodes-grid-floating"></div>
@@ -938,6 +941,6 @@
     <script src="js/catalog.js?v=20260910k"></script>
     <script src="js/player.js?v=20260801"></script>
     <script src="js/ui2.js?v=20260910b"></script>
-    <script src="js/app.js?v=20260922"></script>
+    <script src="js/app.js?v=20260922c"></script>
 </body>
 </html>
