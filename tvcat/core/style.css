@@ -1984,6 +1984,29 @@ select[id^="setting-"] option {
     gap: 16px;
 }
 
+/* Cabecera del modal de episodios: título + X en la primera línea,
+   combo de temporada en la segunda, alineado a la derecha. */
+.floating-header-episodes {
+    flex-wrap: wrap;
+    row-gap: 0;
+}
+
+.floating-header-episodes .season-row {
+    flex-basis: 100%;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    min-width: 0;
+}
+
+.floating-header-episodes .season-row .season-combo {
+    min-width: 0;
+    max-width: 100%;
+    text-overflow: ellipsis;
+}
+
 .season-combo {
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.15);

@@ -1054,10 +1054,29 @@ def _segment_blocks(msgs):
     """Heurística file->image: segmenta mensajes en bloques {images, texts, files}.
     Frontera entre títulos = imagen (foto o documento-imagen) tras ficheros, o texto
     'tipo cover' (p. ej. '🎬 Nombre: ...') que aparece después de los ficheros del
-    bloque anterior (covers donde el texto va ANTES que la portada/imagen)."""
+    bloque anterior (covers donde el texto va ANTES que la portada/imagen).
+    Firewall por topic (topo2 = topo1 dentro de cada topic): al cambiar _topic_id
+    se cierra el bloque anterior (solo se conserva si tiene ficheros, igual que
+    al final) y se empieza uno nuevo. Dentro del mismo topic se acumula sin
+    límite de salto por msg_id (una serie puede continuar 1000 mensajes después).
+    Los mensajes sin topic (None/0) forman una única rama "sin topic" con
+    segmentación secuencial clásica (no un grupo por mensaje)."""
     blocks = []
     current = {"images": [], "texts": [], "files": []}
+    current_topic = None
+    _first = True
     for msg in sorted(msgs, key=lambda x: x.id):
+        _tid = getattr(msg, "_topic_id", None) or 0
+        if _first:
+            current_topic = _tid
+            _first = False
+        elif _tid != current_topic:
+            # Firewall: el mensaje es de otro topic -> cerrar el bloque
+            # anterior (misma regla que al final: solo si tiene ficheros).
+            if current["files"]:
+                blocks.append(current)
+            current = {"images": [], "texts": [], "files": []}
+            current_topic = _tid
         is_image = msg.photo is not None
         is_file = msg.document is not None or msg.video is not None or msg.audio is not None
         is_text = bool(msg.text) and not is_image and not is_file
@@ -1836,7 +1855,10 @@ async def parse_topology(scan_id, stop_event=None):
                 else:
                     topic_groups = {}
                     for m in msgs:
-                        tid = m._topic_id or m.id
+                        # Rama única "sin topic" (0) para NULLs: un grupo por
+                        # mensaje fabricaba un título fantasma por cada vídeo
+                        # huérfano (fallback a nombre de fichero).
+                        tid = m._topic_id if m._topic_id else 0
                         topic_groups.setdefault(tid, []).append(m)
                     _t2t = list(topic_groups.items())
                     for _t2i, (tid, tmsgs) in enumerate(_t2t):
