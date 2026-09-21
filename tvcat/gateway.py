@@ -9117,13 +9117,15 @@ async def userbot_strings_test(request: Request):
 @app.post(api_url("/api/userbot/strings/save"))
 async def userbot_strings_save(request: Request):
     """Guardar: SIEMPRE AÑADE filas nuevas con is_active=False (nunca
-    reemplaza ni cambia preferencias). Nombres <base>_T / <base>_P."""
+    reemplaza ni cambia preferencias). El Test es OPCIONAL: se intenta
+    best-effort solo para asociar la cuenta; si falla, se guarda igual
+    (ya reclamará el cliente al usarla). Nombres <base>_T / <base>_P."""
     from services.auth_service import get_session
     s = get_session(request.cookies.get("tvcat_session", ""))
     if not s or s.get("role") != "admin": raise HTTPException(403)
     from services.userbot_service import (
         build_session_name, save_session, save_telegram_user,
-        get_telegram_user, test_session_string)
+        get_telegram_user, get_default_telegram_user, test_session_string)
     body = await request.json()
     try:
         api_id = int(str(body.get("api_id") or "0").strip() or 0)
@@ -9137,29 +9139,54 @@ async def userbot_strings_save(request: Request):
     items = [(k, v) for k, v in items if v]
     if not items:
         return {"success": False, "error": "Pega al menos un session string"}
-    # Identidad: del Test en vivo (única fuente fiable).
+    # Identidad best-effort (no bloquea): si el test en vivo da id, se usa
+    # para asociar/crear el usuario; si no, usuario indicado o default.
+    warnings = []
     ids = {}
     for k, v in items:
-        t = await test_session_string(k, v, api_id, api_hash)
-        if not t.get("ok") or not t.get("id"):
-            return {"success": False,
-                    "error": f"Test {k} falló ({t.get('error', '?')}): haz Test antes de Guardar"}
-        ids[k] = t
+        try:
+            t = await test_session_string(k, v, api_id, api_hash)
+        except Exception as e:
+            t = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:100]}"}
+        if t.get("ok") and t.get("id"):
+            ids[k] = t
+        else:
+            warnings.append(f"{k}: sin verificar ({t.get('error', '?')})")
     if len(ids) == 2 and ids["telethon"]["id"] != ids["pyrogram"]["id"]:
+        warnings.append("Aviso: T y P parecen de cuentas distintas; se guardan igual.")
+    tg_user_id = int(body.get("tg_user_id") or 0) or None
+    if tg_user_id is None and ids:
+        tg_user_id = ids[items[0][0]]["id"]
+    if tg_user_id is None:
+        _du = None
+        try:
+            _du = get_default_telegram_user()
+        except Exception:
+            pass
+        tg_user_id = (_du or {}).get("tg_user_id")
+    if tg_user_id is None:
         return {"success": False,
-                "error": "Los dos strings son de cuentas distintas"}
-    tg_user_id = int(body.get("tg_user_id") or 0) or ids[items[0][0]]["id"]
+                "error": "Sin identidad (el test no conectó y no hay usuario "
+                         "default): haz Test una vez o crea el usuario antes."}
     if not get_telegram_user(tg_user_id):
-        me0 = ids[items[0][0]]
-        uname = (me0.get("username") or "").strip()
-        save_telegram_user(tg_user_id=tg_user_id,
-                           name=uname or f"Cuenta-{tg_user_id}",
-                           phone=me0.get("phone"),
-                           api_id=api_id, api_hash=api_hash,
-                           is_default=False)
+        if ids:
+            me0 = ids[items[0][0]]
+            uname = (me0.get("username") or "").strip()
+            save_telegram_user(tg_user_id=tg_user_id,
+                               name=uname or f"Cuenta-{tg_user_id}",
+                               phone=me0.get("phone"),
+                               api_id=api_id, api_hash=api_hash,
+                               is_default=False)
+        else:
+            save_telegram_user(tg_user_id=tg_user_id,
+                               name=(base or f"Cuenta-{tg_user_id}"),
+                               phone=(body.get("phone") or "").strip() or None,
+                               api_id=api_id, api_hash=api_hash,
+                               is_default=False)
     if not base:
-        me0 = ids[items[0][0]]
-        base = (me0.get("username") or f"Cuenta-{tg_user_id}").strip()
+        me0 = ids.get(items[0][0]) or {}
+        base = ((me0.get("username") or "").strip()
+                or f"Cuenta-{tg_user_id}")
     import re as _re
     base = _re.sub(r"(_T|_P|_2)+$", "", base) or f"Cuenta-{tg_user_id}"
     created = []
@@ -9173,7 +9200,8 @@ async def userbot_strings_save(request: Request):
                            is_active=False)
         row.pop("session_string", None)
         created.append(row)
-    return {"success": True, "tg_user_id": tg_user_id, "sessions": created}
+    return {"success": True, "tg_user_id": tg_user_id, "sessions": created,
+            "warnings": warnings}
 
 
 # Auth sessions temporales (mantener cliente conectado entre send_code y confirm_code).

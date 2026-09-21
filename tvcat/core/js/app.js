@@ -2100,7 +2100,6 @@ window.openSessionStrings = function() {
         var t = document.getElementById('sstr-t').value.trim();
         var p = document.getElementById('sstr-p').value.trim();
         if (!t && !p) { alert('Pega al menos un session string.'); return; }
-        if (_s.test && _s.test.mismatch) { alert('Cuentas distintas: no se puede guardar.'); return; }
         status.innerHTML = '\u23F3 Guardando...';
         document.getElementById('sstr-save').disabled = true;
         window.API.ajax({
@@ -2114,8 +2113,10 @@ window.openSessionStrings = function() {
                 document.getElementById('sstr-save').disabled = false;
                 if (res && res.success) {
                     var names = res.sessions.map(function(x) { return x.name; }).join(', ');
-                    status.innerHTML = '\u2705 Creadas (inactivas): ' + names + '. Act\u00EDvalas con \u25B6 en la lista.';
-                    setTimeout(function() { closeS(); loadUserbotConfig(); loadUserbotSessions(); }, 1800);
+                    var msg = '\u2705 Creadas (inactivas): ' + names + '. Act\u00EDvalas con \u25B6 en la lista.';
+                    if (res.warnings && res.warnings.length) msg += '<br>\u26A0\uFE0F ' + res.warnings.join('<br>\u26A0\uFE0F ');
+                    status.innerHTML = msg;
+                    setTimeout(function() { closeS(); loadUserbotConfig(); loadUserbotSessions(); }, 2500);
                 } else {
                     status.innerHTML = '\u274C ' + (res ? res.error : 'Error');
                 }
