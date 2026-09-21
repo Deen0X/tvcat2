@@ -918,7 +918,7 @@ function loadUserbotConfig() {
             success: function(data) {
                 var ftags = data.ftags || data || {};
                 var keys = Object.keys(ftags).sort();
-                var defaults = ["tagtitle","title","year","release_year","rating","rating_count","genres","generos","themes","temas","author","autor","director","release_date","fecha","category","categoria","id","cover","episodes","ext","extension","description","sinopsis","overview","originalmsg"];
+                var defaults = ["tagtitle","title","title_en","year","release_year","season","temporada","season_episodes","rating","rating_count","genres","generos","themes","temas","author","autor","director","release_date","fecha","category","categoria","id","cover","episodes","ext","extension","description","sinopsis","overview","originalmsg"];
                 for (var i=0;i<defaults.length;i++) if (keys.indexOf(defaults[i])===-1) keys.push(defaults[i]);
                 keys.sort();
                 sel.innerHTML = '';

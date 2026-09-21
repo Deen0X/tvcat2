@@ -671,7 +671,10 @@
                     <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;">
                         <div style="padding:10px 12px;background:var(--bg-card);display:flex;align-items:center;justify-content:space-between;">
                             <h4 style="margin:0;font-size:0.85rem;">Proveedores (por prioridad)</h4>
+                            <span style="display:flex;gap:6px;">
+                            <button class="btn-secondary" onclick="openAssistant('gemini_api_key')" title="Guía paso a paso para conseguir la API key de Gemini" style="padding:6px 10px;font-size:0.8rem;">❓</button>
                             <button class="btn-secondary" onclick="aiProviderAdd()" style="padding:6px 12px;font-size:0.8rem;">+ Añadir</button>
+                            </span>
                         </div>
                         <div id="ai-providers-list" style="padding:10px 12px;display:flex;flex-direction:column;gap:10px;"></div>
                     </div>
@@ -935,6 +938,6 @@
     <script src="js/catalog.js?v=20260910k"></script>
     <script src="js/player.js?v=20260801"></script>
     <script src="js/ui2.js?v=20260910b"></script>
-    <script src="js/app.js?v=20260910k"></script>
+    <script src="js/app.js?v=20260922"></script>
 </body>
 </html>

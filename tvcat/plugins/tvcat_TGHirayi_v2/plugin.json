@@ -1,6 +1,7 @@
 {
   "name": "tvcat_TGHirayi_v2",
-  "displayName": "TGHirayi v2 (Enviar a Canal Telegram)",  "description": "Copia t\u00edtulos completos (cover + episodios) a canales Telegram destino, descargando y re-subiendo para generar nuevos file_ids. Soporta m\u00faltiples destinos, topolog\u00edas 1/2/3 y forward opcional entre canales.",
+  "displayName": "TGHirayi v2 (Enviar a Canal Telegram)",
+  "description": "Copia títulos completos (cover + episodios) a canales Telegram destino, descargando y re-subiendo para generar nuevos file_ids. Soporta múltiples destinos, topologías 1/2/3 y forward opcional entre canales.",
   "type": "player",
   "group": "destinos",
   "version": "1.0.0",
@@ -9,9 +10,13 @@
   "action_category": "playback",
   "single_button": true,
   "priority": 20,
-  "js": ["TGHirayi_v2.js?v=20260913b"],
+  "js": [
+    "TGHirayi_v2.js?v=20260922f"
+  ],
   "css": [],
-  "applies_to": ["*"],
+  "applies_to": [
+    "*"
+  ],
   "settings_ui": "/plugin-static/tvcat_TGHirayi_v2/config.html",
   "tray": [
     {
@@ -27,8 +32,21 @@
       "icon": "static/plugin_button2.png",
       "color": "#22c55e",
       "action": "config"
+    },
+    {
+      "id": "hide_uploaded",
+      "label": "Ocultar subidos",
+      "icon": "static/hide_uploaded.png",
+      "iconEmoji": "🙈",
+      "color": "#eab308",
+      "action": "config"
     }
   ],
   "has_interface": false,
-  "access": { "admin": true, "user": true, "child": false }
+  "access": {
+    "admin": true,
+    "user": true,
+    "child": false
+  },
+  "provides_channels": true
 }

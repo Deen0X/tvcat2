@@ -86,6 +86,7 @@
         var selectedProviderTab = 'auto';  // override manual de proveedor
         var selectedId = null;
         var selectedPosterUrl = null; // URL del póster del candidato (el servidor la descarga si el b64 falla)
+        var selectedSeason = null; // temporada detectada en la búsqueda (T1/S01/temporada N) para details
 
         // Overlay
         var overlay = document.createElement('div');
@@ -600,6 +601,9 @@
                     'id': d.api_id || '',
                     'cover': jv(d.api_cover),
                     'episodes': (function(){ try { if (itemData && itemData.episodes && itemData.episodes.length) return String(itemData.episodes.length); } catch (e) { } return ''; })(),
+                    'season': (d.api_season_number !== undefined && d.api_season_number !== null && String(d.api_season_number) !== '') ? String(d.api_season_number) : ((d.api_seasons !== undefined && d.api_seasons !== null && String(d.api_seasons) !== '') ? String(d.api_seasons) : ''),
+                    'temporada': (d.api_season_number !== undefined && d.api_season_number !== null && String(d.api_season_number) !== '') ? String(d.api_season_number) : ((d.api_seasons !== undefined && d.api_seasons !== null && String(d.api_seasons) !== '') ? String(d.api_seasons) : ''),
+                    'season_episodes': (d.api_season_episodes !== undefined && d.api_season_episodes !== null && String(d.api_season_episodes) !== '') ? String(d.api_season_episodes) : '',
                     'ext': '',
                     'extension': '',
                     'description': d.api_description || '',
@@ -628,6 +632,9 @@
                     "actors": "Cast: {value}",
                     "year": "Year: {value}",
                     "release_year": "Year: {value}",
+                    "season": "Season: {value}",
+                    "temporada": "Season: {value}",
+                    "season_episodes": "Season episodes: {value}",
                     "description": "Description:\n{value}",
                     "sinopsis": "Sinopsis:\n{value}",
                     "overview": "Overview:\n{value}",
@@ -923,6 +930,9 @@
                 '{id}': details.api_id || '',
                 '{cover}': jv(details.api_cover),
                 '{episodes}': epCount,
+                '{season}': (details.api_season_number !== undefined && details.api_season_number !== null && String(details.api_season_number) !== '') ? String(details.api_season_number) : ((details.api_seasons !== undefined && details.api_seasons !== null && String(details.api_seasons) !== '') ? String(details.api_seasons) : ''),
+                '{temporada}': (details.api_season_number !== undefined && details.api_season_number !== null && String(details.api_season_number) !== '') ? String(details.api_season_number) : ((details.api_seasons !== undefined && details.api_seasons !== null && String(details.api_seasons) !== '') ? String(details.api_seasons) : ''),
+                '{season_episodes}': (details.api_season_episodes !== undefined && details.api_season_episodes !== null && String(details.api_season_episodes) !== '') ? String(details.api_season_episodes) : '',
                 '{originalmsg}': originalMsg || '',
             };
             var FTAGS = {
@@ -960,6 +970,9 @@
                 "id": "ID: {value}",
                 "cover": "Cover: {value}",
                 "episodes": "Episodes: {value}",
+                "season": "Season: {value}",
+                "temporada": "Season: {value}",
+                "season_episodes": "Season episodes: {value}",
                 "ext": "Ext: {value}",
                 "extension": "Ext: {value}",
                 "description": "Description:\n{value}",
@@ -1209,6 +1222,7 @@
             .then(function (r) { return r.json(); })
             .then(function (j) {
                 var cands = (j && (j.candidates || j.results || j.items)) || (Array.isArray(j) ? j : []);
+                selectedSeason = (j && j.season !== undefined && j.season !== null) ? j.season : null;
                 if (!cands.length) { box.innerHTML = '<div style="font-size:0.72rem;color:#71717a;">Sin resultados (proveedor: ' + (j.provider || j.source || '?') + ')</div>'; setStatus(''); return; }
                 box.innerHTML = cands.slice(0, 10).map(function (c, i) {
                     var t = c.title || c.api_title || c.name || '—';
@@ -1220,7 +1234,7 @@
                     return '<div class="enricher-cand" data-idx="' + i + '" data-provider="' + (prov || '') + '" data-cid="' + (c.id || c.api_id || '') + '" data-media-type="' + (c.media_type || '') + '" data-sub-provider="' + (c.sub_provider || '') + '" data-poster="' + (poster || '').replace(/"/g, '&quot;') + '" style="padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent;display:flex;gap:8px;align-items:center;"><div style="width:16px;height:16px;border-radius:50%;border:1px solid #71717a;flex-shrink:0;display:flex;align-items:center;justify-content:center;"><div class="enricher-cand-dot" style="width:8px;height:8px;border-radius:50%;background:#06b6d4;display:none;"></div></div><div style="width:28px;height:40px;background:#18181b;border-radius:4px;flex-shrink:0;overflow:hidden;">' + (poster ? '<img src="' + poster + '" style="width:100%;height:100%;object-fit:cover;">' : '') + '</div><div style="flex:1;min-width:0;"><div style="font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + '</div><div style="font-size:0.68rem;color:#71717a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (y || '') + (prov ? ' · ' + prov : '') + origHtml + '</div></div></div>';
                 }).join('');
                 if (cands.length > 10) box.innerHTML += '<div style="font-size:0.68rem;color:#71717a;margin-top:4px;">Hay mas (refina la busqueda)</div>';
-                setStatus(cands.length + ' candidatos · ' + (j.provider || '') + (cands.length===1 ? ' · auto-seleccionado' : ' · selecciona uno como fuente activa'));
+                setStatus(cands.length + ' candidatos · ' + (j.provider || '') + (selectedSeason !== null ? ' · temporada ' + selectedSeason + ' detectada' : '') + (cands.length===1 ? ' · auto-seleccionado' : ' · selecciona uno como fuente activa'));
                 var candEls = box.querySelectorAll('.enricher-cand');
                 function setActiveCand(el){
                     for (var a=0;a<candEls.length;a++){ candEls[a].style.borderColor='transparent'; candEls[a].style.background='transparent'; var d=candEls[a].querySelector('.enricher-cand-dot'); if(d) d.style.display='none'; }
@@ -1241,7 +1255,7 @@
                         fetch('/api/enricher/details', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ provider: prov, id: String(cid), media_type: mt, sub_provider: subp })
+                            body: JSON.stringify({ provider: prov, id: String(cid), media_type: mt, sub_provider: subp, season: selectedSeason })
                         })
                         .then(function (r) { return r.json(); })
                         .then(function (det) {

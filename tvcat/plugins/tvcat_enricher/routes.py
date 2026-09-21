@@ -183,6 +183,7 @@ class DetailsReq(BaseModel):
     id: str
     media_type: Optional[str] = None
     sub_provider: Optional[str] = None  # books: google_books u open_library
+    season: Optional[int] = None  # tmdb/tv: fusiona /tv/{id}/season/{n}
 
 
 class SaveReq(BaseModel):
@@ -326,8 +327,15 @@ async def get_ftags(request: Request):
             ftags = {
                 "tagtitle": "{value}",
                 "title": "Title: {value}",
+                "title_en": "Title EN: {value}",
                 "year": "Year: {value}",
                 "release_year": "Year: {value}",
+                "season": "Season: {value}",
+                "temporada": "Season: {value}",
+                "season_episodes": "Season episodes: {value}",
+                "season": "Season: {value}",
+                "temporada": "Season: {value}",
+                "season_episodes": "Season episodes: {value}",
                 "rating": "Rating: {value}",
                 "rating_count": "Rating count: {value}",
                 "genres": "Genres: {value}",
@@ -554,7 +562,8 @@ async def proxy_details(req: DetailsReq):
     try:
         import services.enrich_service as es
         res = await es.get_details(req.provider, req.id, media_type_hint=req.media_type,
-                                     sub_provider=req.sub_provider or "")
+                                     sub_provider=req.sub_provider or "",
+                                     season=req.season)
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

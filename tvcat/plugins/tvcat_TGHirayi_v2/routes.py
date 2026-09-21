@@ -117,6 +117,12 @@ except Exception:
 # 'skipped' = título saltado por no tener cover válido en el origen.
 _TERMINAL_STATUSES = ("completed", "error", "skipped")
 
+# Umbral a partir del cual un fichero SOLO puede subirse con Pyrogram
+# (Telethon no sube >2GB; 1.9GB deja margen). Jobs con algún fichero por
+# encima se pausan si no hay sesión Pyrogram válida (no bloquean la cola).
+_PYRO_REQUIRED_BYTES = int(1.9 * 1024 * 1024 * 1024)
+_PYRO_PAUSE_TEXT = "Pausado: sin sesión Pyrogram válida (fichero >1.9GB)"
+
 # Subcadenas de error transitorio de cliente (merecen reintento del episodio
 # con refresh + backoff en vez de abortar el job).
 _TRANSIENT_CLIENT_ERRORS = (
@@ -220,6 +226,7 @@ class ConfigUpdate(BaseModel):
     default_sub_lang: Optional[str] = None      # Idioma subs por defecto para jobs nuevos (vacío = ninguno)
     skip_if_exists_topo3: Optional[bool] = None  # Omitir si existe en destino (solo topología 3)
     topics_cache_ttl_min: Optional[int] = None   # TTL caché de topics en minutos
+    clean_year_from_title: Optional[bool] = None  # Limpiar año (YYYY) del título para generar topic
 
 
 class TestLink(BaseModel):
@@ -348,6 +355,7 @@ def _load_config():
         "default_sub_lang": "",
         "skip_if_exists_topo3": False,
         "topics_cache_ttl_min": 60,
+        "clean_year_from_title": True,
     }
     if isinstance(cfg, dict):
         for k, v in defaults.items():
@@ -367,7 +375,8 @@ def _session_user(request: Request):
     s = get_session(token) if token else None
     if not s:
         return None
-    return {"user_id": s["user_id"], "role": s.get("role", "user")}
+    return {"user_id": s["user_id"], "role": s.get("role", "user"),
+            "profile_id": s.get("profile_id") or s["user_id"]}
 
 
 def _get_base_url(request: Request) -> str:
@@ -497,6 +506,106 @@ async def _get_pyrogram_client():
     if not raw:
         raise ValueError("El cliente Pyrogram no expone _client")
     return raw
+
+
+def _job_pyro_check(job: dict):
+    """Devuelve (needs_pyro, max_bytes) según el mayor file_size de los
+    episodios del item. Best-effort: ante cualquier fallo devuelve
+    (False, 0) y el gate de procesado lo reevalúa."""
+    try:
+        eps = _fetch_episodes_sync(job.get("item_id", "")) or []
+    except Exception:
+        return False, 0
+    mx = 0
+    for ep in eps:
+        try:
+            sz = int((ep or {}).get("file_size") or 0)
+        except Exception:
+            continue
+        if sz > mx:
+            mx = sz
+    return (mx > _PYRO_REQUIRED_BYTES), mx
+
+
+async def _pyro_available(timeout: float = 15.0) -> bool:
+    """True si hay sesión Pyrogram válida obtenible (sin lanzar). Solo valida
+    obtención, no uso: un pyro muerto-en-uso cae en la red de subida y el job
+    vuelve a pausar."""
+    try:
+        c = await asyncio.wait_for(_get_pyrogram_client(), timeout=timeout)
+        return bool(c)
+    except Exception:
+        return False
+
+
+def _pause_job_for_pyro(job: dict, max_bytes: int = 0):
+    """Pausa un job por falta de Pyrogram sin bloquear la cola.
+    Usa el flag `paused` (lo único que respeta el picker) + `paused_pyro`
+    para distinguirlo de la pausa manual y poder auto-reanudarlo."""
+    job["paused"] = True
+    job["paused_pyro"] = True
+    job["needs_pyro"] = True
+    job["status"] = "paused"
+    txt = _PYRO_PAUSE_TEXT
+    try:
+        if max_bytes and float(max_bytes) > 0:
+            txt = ("Pausado: sin sesión Pyrogram válida "
+                   f"({float(max_bytes) / (1024 ** 3):.2f}GB > 1.9GB)")
+    except Exception:
+        pass
+    job["status_text"] = txt
+    print(f"[TGHirayi_v2] Job {job.get('id')} pausado por falta de Pyrogram", flush=True)
+
+
+async def _refresh_pyro_paused_jobs(db: dict):
+    """Backfill de `needs_pyro` + pausar/reanudar por disponibilidad de pyro.
+    Una sola comprobación de pyro por pasada. No toca jobs en `processing`
+    (podrían estar a mitad de subida) ni pausas manuales (sin flag)."""
+    try:
+        cands = [j for j in (db.get("queue", []) or [])
+                 if isinstance(j, dict) and j.get("status") not in _TERMINAL_STATUSES]
+    except Exception:
+        return
+    if not cands:
+        return
+    changed = False
+    for j in cands:
+        if "needs_pyro" not in j:
+            try:
+                need, _mx = _job_pyro_check(j)
+                j["needs_pyro"] = bool(need)
+            except Exception:
+                j["needs_pyro"] = False
+            changed = True
+    to_pause = [j for j in cands
+                if j.get("needs_pyro") and not j.get("paused_pyro")
+                and not j.get("paused") and j.get("status") == "queued"]
+    to_resume = [j for j in cands if j.get("paused_pyro")]
+    if not to_pause and not to_resume:
+        if changed:
+            try:
+                _save_db(db)
+            except Exception:
+                pass
+        return
+    pyro_ok = await _pyro_available()
+    for j in to_pause:
+        if not pyro_ok:
+            _pause_job_for_pyro(j)
+            changed = True
+    for j in to_resume:
+        if pyro_ok:
+            j["paused"] = False
+            j["paused_pyro"] = False
+            j["status"] = "queued"
+            j["status_text"] = "En cola"
+            changed = True
+            print(f"[TGHirayi_v2] Job {j.get('id')} reanudado (Pyrogram disponible)", flush=True)
+    if changed:
+        try:
+            _save_db(db)
+        except Exception:
+            pass
 
 
 async def _refresh_pyrogram_client():
@@ -730,6 +839,8 @@ async def update_config(body: ConfigUpdate, request: Request):
         cfg["skip_if_exists_topo3"] = bool(body.skip_if_exists_topo3)
     if body.topics_cache_ttl_min is not None:
         cfg["topics_cache_ttl_min"] = max(5, min(1440, int(body.topics_cache_ttl_min)))
+    if body.clean_year_from_title is not None:
+        cfg["clean_year_from_title"] = bool(body.clean_year_from_title)
     _save_config(cfg)
     return {"ok": True}
 
@@ -853,6 +964,331 @@ async def delete_destination(did: str, request: Request):
     del db["destinations"][did]
     _save_db(db)
     return {"ok": True}
+
+
+class HideUploadedItem(BaseModel):
+    item_id: str = ""
+    title: str = ""
+    year: str = ""
+    description: str = ""  # texto del cover (mensaje original); local manda si se aporta cover_text
+    cover_text: str = ""  # edición local guardada (prioridad sobre description)
+
+
+class HideUploadedCheck(BaseModel):
+    destination_ids: List[str] = []
+    items: List[HideUploadedItem] = []
+    full_catalog: bool = False  # True: compara TODO el catálogo central (ignora items/filtros)
+    for_hide: bool = True  # False: modo mostrar (no excluye ya-ocultos)
+    include_queue: bool = False  # True: además oculta los que estén en la cola (no terminales)
+
+
+def _hide_skip_sets(session: dict) -> set:
+    """Item_ids a omitir en modo ocultar: ya ocultos (+bloqueados si no admin).
+    Respeta el toggle personal vía get_hidden_sets."""
+    skip: set = set()
+    try:
+        import sqlite3 as _sq3
+        from tvcat.services.userbot_service import DB_PATH as _CENTRAL_DB
+        from tvcat.services.catalog_service import get_hidden_sets as _ghs
+    except Exception:
+        return skip
+    try:
+        _conn = _sq3.connect(_CENTRAL_DB)
+        try:
+            _h, _b = _ghs(_conn, user_id=session.get("user_id"),
+                          profile_id=session.get("profile_id") or session.get("user_id"),
+                          role=session.get("role", "user"))
+            skip |= set(_h or set()) | set(_b or set())
+        finally:
+            _conn.close()
+    except Exception as e:
+        print(f"[TGHirayi_v2] hide-uploaded: error leyendo ocultos: {e}", flush=True)
+    return skip
+
+
+def _hide_full_catalog_items() -> list:
+    """Todos los items del catálogo central sincronizado (no colecciones).
+    Solo lectura; para full_catalog (sin mandar descripciones al navegador)."""
+    out: list = []
+    try:
+        import sqlite3 as _sq3
+        from tvcat.services.userbot_service import DB_PATH as _CENTRAL_DB
+        _conn = _sq3.connect(_CENTRAL_DB)
+        _conn.row_factory = _sq3.Row
+        try:
+            _cols = [r[1] for r in _conn.execute("PRAGMA table_info(unified_catalog)").fetchall()]
+        except Exception:
+            _cols = []
+        if "item_id" not in _cols:
+            return []
+        _sel = ["item_id", "title"]
+        if "year" in _cols:
+            _sel.append("year")
+        if "description" in _cols:
+            _sel.append("description")
+        _q = f"SELECT {', '.join(_sel)} FROM unified_catalog"
+        _w = []
+        if "is_collection" in _cols:
+            _w.append("(is_collection IS NULL OR is_collection=0)")
+        _w.append("item_id NOT LIKE 'COL-%'")
+        if _w:
+            _q += " WHERE " + " AND ".join(_w)
+        for _r in _conn.execute(_q).fetchall():
+            try:
+                out.append({
+                    "item_id": str(_r["item_id"] or ""),
+                    "title": str(_r["title"] or ""),
+                    "year": str(_r["year"] or "") if "year" in _cols else "",
+                    "description": str(_r["description"] or "") if "description" in _cols else "",
+                    "cover_text": "",
+                })
+            except Exception:
+                continue
+        _conn.close()
+    except Exception as e:
+        print(f"[TGHirayi_v2] hide-uploaded: error leyendo catálogo central: {e}", flush=True)
+    return [d for d in out if d.get("item_id")]
+
+
+def _hide_candidate_topic_name(title: str = "", year: str = "", description: str = "", cover_text: str = "", item_id: str = "") -> str:
+    """Genera el nombre de topic candidato igual que al crear el topic.
+    Prioridad: a) cover local guardado (registry por item_id: el topic se
+    generó con el nombre enriquecido) o cover_text explícito, b) tags del
+    mensaje original (description), c) año entre paréntesis en el título
+    (se quita del título base), d) campo year del catálogo.
+    Sin año -> solo título."""
+    try:
+        _cover = (cover_text or "").strip()
+        if not _cover and item_id:
+            try:
+                from tvcat.services.cover_override_registry import get_enriched_by_item_id as _gebi
+                _enr = _gebi(str(item_id))
+                if _enr and _enr.get("cover_text"):
+                    _cover = str(_enr.get("cover_text") or "").strip()
+            except Exception:
+                pass
+        if not _cover:
+            _cover = description or ""
+        _t, _y = _title_year_from_cover_tags(_cover) if _cover else ("", "")
+        if not _t:
+            _t = (title or "").strip()
+        if not _y:
+            _clean = bool(_load_config().get("clean_year_from_title", True))
+            if _clean and _t:
+                import re as _re_y
+                _m = _re_y.search(r"\((19|20)\d{2}\)", _t)
+                if _m:
+                    _y = _m.group(0)[1:-1]
+                    _t = _re_y.sub(r"\((19|20)\d{2}\)", "", _t).strip()
+                    _t = _re_y.sub(r"\s{2,}", " ", _t).strip()
+            if not _y:
+                _y = (year or "").strip()
+        if not _t:
+            return ""
+        return "%s🗓%s" % (_t, _y) if _y else _t
+    except Exception:
+        return (title or "").strip()
+
+
+async def _probe_topics_count(channel_id: str):
+    """Una sola página (limit=1) para leer el `count` del servidor y capturar
+    el error REAL (acceso, entidad, FloodWait...). Usa el pool compartido:
+    no crea conexión nueva ni desconecta. Devuelve (count|None, error|None)."""
+    try:
+        from tvcat.services.userbot_service import get_active_client
+        wrapper = await get_active_client("telethon")
+        client = getattr(wrapper, "_client", wrapper) if wrapper else None
+        if not client:
+            return None, "sin cliente telethon en el pool (¿solo pyrogram?)"
+        from telethon.tl.functions.messages import GetForumTopicsRequest
+        try:
+            _cid: object = int(str(channel_id))
+        except Exception:
+            _cid = str(channel_id)
+        entity = await client.get_entity(_cid)
+        peer = await client.get_input_entity(entity)
+        res = await client(GetForumTopicsRequest(
+            peer=peer, offset_date=0, offset_id=0, offset_topic=0, limit=1))
+        return int(getattr(res, "count", 0) or 0), None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+@router.post("/api/telegram-copy-v2/hide-uploaded/check")
+async def check_hide_uploaded(body: HideUploadedCheck, request: Request):
+    """Compara títulos contra los topics existentes de los destinos (asume topo3).
+    Devuelve la unión (existe en cualquiera). Con caché vigente NO toca red
+    (skip_delta); solo el primer check tras expirar lista completo.
+    full_catalog=True: compara TODO el catálogo central (para el checkbox)."""
+    session = _session_user(request)
+    if not session:
+        raise HTTPException(401, "Inicia sesion")
+    if not body.destination_ids:
+        raise HTTPException(400, "Selecciona al menos un destino")
+    _items: list = []
+    if body.full_catalog:
+        _items = _hide_full_catalog_items()
+        if not _items:
+            return {"ok": True, "matched": [], "titles": {}, "total_items": 0,
+                    "topics_count": 0, "destinations_checked": 0, "skipped_hidden": 0,
+                    "detail": []}
+    else:
+        for _it in (body.items or []):
+            try:
+                _iid = str(_it.item_id or "")
+                if not _iid or _iid.startswith("COL-"):
+                    continue
+                _items.append({
+                    "item_id": _iid,
+                    "title": _it.title or "",
+                    "year": _it.year or "",
+                    "description": _it.description or "",
+                    "cover_text": _it.cover_text or "",
+                })
+            except Exception:
+                continue
+        if not _items:
+            return {"ok": True, "matched": [], "titles": {}, "total_items": 0,
+                    "topics_count": 0, "destinations_checked": 0, "skipped_hidden": 0,
+                    "detail": []}
+    db = _load_db()
+    dests = []
+    for _did in body.destination_ids:
+        _d = db.get("destinations", {}).get(_did)
+        if _d:
+            _dd = dict(_d)
+            _dd["id"] = _did
+            dests.append(_dd)
+    if not dests:
+        raise HTTPException(404, "Destinos no encontrados")
+    # En modo ocultar, excluir los ya ocultos/bloqueados: re-ejecutar debe
+    # devolver vacío (antes repetía siempre la misma lista).
+    _skipped_hidden = 0
+    if body.for_hide:
+        try:
+            _skip = _hide_skip_sets(session)
+        except Exception:
+            _skip = set()
+        if _skip:
+            _before = len(_items)
+            _items = [d for d in _items if str(d.get("item_id") or "") not in _skip]
+            _skipped_hidden = _before - len(_items)
+        if not _items:
+            return {"ok": True, "matched": [], "titles": {}, "total_items": 0,
+                    "topics_count": 0, "destinations_checked": 0,
+                    "skipped_hidden": _skipped_hidden, "detail": []}
+    # NOTA: el listado va por el servicio central; no se necesita cliente crudo.
+    # Mapa unión en minúsculas (clave lógica): {norm_lower: True}
+    import time as _time2
+    try:
+        _ttl2 = max(5, min(1440, int(_load_config().get("topics_cache_ttl_min", 60) or 60)))
+    except Exception:
+        _ttl2 = 60
+    _union: dict = {}
+    _topics_total = 0
+    _checked = 0
+    _detail: list = []
+    for _dest in dests:
+        _dname = str(_dest.get("name") or _dest.get("channel_id") or "?")
+        try:
+            _ent0 = _TOPIC_CACHE.get(_topic_cache_key(_dest))
+            _was_cached = bool(_ent0 and (_time2.time() - float(_ent0.get("ts", 0))) < _ttl2 * 60
+                               and _ent0.get("map"))
+        except Exception:
+            _was_cached = False
+        try:
+            _map = await _get_topics_map_cached(None, _dest, skip_delta=True)
+        except Exception as e:
+            print(f"[TGHirayi_v2] hide-uploaded: error listando topics ({_dname}): {e}", flush=True)
+            _detail.append({"dest": _dname, "topics": 0, "cached": False, "error": True})
+            continue
+        if not _map:
+            # Sin topics (topo1/2 o grupo no-foro): se salta sin comparar.
+            # Si tampoco hay caché, sondar el error real (acceso/entidad/Flood).
+            _err = ""
+            _srv = None
+            try:
+                _ent0b = _TOPIC_CACHE.get(_topic_cache_key(_dest))
+                if not _ent0b or not _ent0b.get("map"):
+                    _srv, _err = await _probe_topics_count(str(_dest.get("channel_id") or ""))
+                    if _err is None and (_srv or 0) > 0:
+                        _err = f"listado vacío pero el servidor dice {_srv} (ver consola)"
+                    _err = _err or ""
+            except Exception:
+                _err = ""
+            _d = {"dest": _dname, "topics": 0, "cached": _was_cached}
+            if _srv is not None:
+                _d["server_count"] = _srv
+            if _err:
+                _d["error"] = _err
+            _detail.append(_d)
+            continue
+        _checked += 1
+        _topics_total += len(_map)
+        _dd = {"dest": _dname, "topics": len(_map), "cached": _was_cached}
+        # Conteo del servidor para mapas sospechosamente pequeños (<500):
+        # distingue "el canal tiene N" de "paginado truncado".
+        if len(_map) < 500:
+            try:
+                _srv2, _err2 = await _probe_topics_count(str(_dest.get("channel_id") or ""))
+                if _srv2 is not None:
+                    _dd["server_count"] = _srv2
+                if _err2:
+                    _dd["probe_error"] = _err2
+            except Exception:
+                pass
+        _detail.append(_dd)
+        print(f"[TGHirayi_v2] hide-uploaded: {_dname} -> {len(_map)} topics "
+              f"({'cache' if _was_cached else 'completo'})", flush=True)
+        for _tn in _map.keys():
+            try:
+                _union[str(_tn or "").strip().lower()] = True
+            except Exception:
+                continue
+    _matched: list = []
+    _titles: dict = {}
+    _in_queue: set = set()
+    if body.include_queue:
+        # Items en la cola (no terminales): encolados, procesando, pausados...
+        try:
+            for _j in (_load_db().get("queue") or []):
+                if not isinstance(_j, dict):
+                    continue
+                if str(_j.get("status") or "") in _TERMINAL_STATUSES:
+                    continue
+                _qid = str(_j.get("item_id") or "")
+                if _qid:
+                    _in_queue.add(_qid)
+        except Exception as e:
+            print(f"[TGHirayi_v2] hide-uploaded: error leyendo cola: {e}", flush=True)
+    for _it in _items:
+        try:
+            _iid = str(_it["item_id"])
+            _titles[_iid] = _it.get("title") or ""
+            if _iid in _in_queue:
+                if _iid not in _matched:
+                    _matched.append(_iid)
+                continue
+            _cand = _hide_candidate_topic_name(
+                title=_it.get("title") or "",
+                year=_it.get("year") or "",
+                description=_it.get("description") or "",
+                cover_text=_it.get("cover_text") or "",
+                item_id=_it.get("item_id") or "",
+            )
+            if not _cand:
+                continue
+            if _cand.strip().lower() in _union:
+                _matched.append(_it["item_id"])
+        except Exception:
+            continue
+    _matched_queue = [i for i in _matched if i in _in_queue]
+    return {"ok": True, "matched": _matched,
+            "titles": {k: _titles[k] for k in _matched if k in _titles},
+            "total_items": len(_items), "topics_count": _topics_total,
+            "destinations_checked": _checked, "skipped_hidden": _skipped_hidden,
+            "matched_queue": _matched_queue, "queue_count": len(_in_queue),
+            "detail": _detail}
 
 
 # ─── Endpoints de Cola ────────────────────────────────────────────
@@ -1081,6 +1517,16 @@ async def add_to_queue(body: QueueAdd, request: Request):
         job["is_archive"] = False
         print(f"[TGHirayi_v2] <<-- backtrace in add_to_queue -->>", flush=True)
         import traceback; traceback.print_exc()
+    # Badge "requiere Pyrogram": best-effort desde file_size de episodios.
+    # Desconocido (0) => sin marca; el gate de procesado lo reevalúa.
+    try:
+        _need, _mx = _job_pyro_check(job)
+        job["needs_pyro"] = bool(_need)
+        if _need:
+            print(f"[TGHirayi_v2] Job {job['id']} marcado needs_pyro "
+                  f"({_mx / (1024 ** 3):.2f}GB)", flush=True)
+    except Exception:
+        job["needs_pyro"] = False
     _save_db(db)
     # Si el worker esta pausado y hay trabajos, sugerir reanudar
     return {"ok": True, "job_id": job["id"], "worker_paused": _worker_paused}
@@ -1801,6 +2247,11 @@ async def toggle_worker(request: Request):
     global _worker_paused, _worker_task, _worker_running, _current_job, _worker_gen
     _worker_paused = not _worker_paused
     if not _worker_paused:
+        # Al reanudar: refrescar pausas por Pyrogram (misma pasada que al arrancar).
+        try:
+            await _refresh_pyro_paused_jobs(_load_db())
+        except Exception as e:
+            print(f" [TGHirayi_v2] Error en refresh pyro (toggle): {e}", flush=True)
         # Solo crear worker si no hay uno corriendo
         if not _worker_running or (_worker_task is None) or _worker_task.done():
             _worker_gen += 1
@@ -1942,6 +2393,11 @@ async def _start_worker(gen: int = 0):
         print(f" [TGHirayi_v2] Error en reset: {e}", flush=True)
         import traceback
         traceback.print_exc()
+    # Pausa por falta de Pyrogram: backfill needs_pyro + pausar/reanudar.
+    try:
+        await _refresh_pyro_paused_jobs(db)
+    except Exception as e:
+        print(f" [TGHirayi_v2] Error en refresh pyro: {e}", flush=True)
 
     try:
         while _worker_running:
@@ -2186,6 +2642,21 @@ async def _process_job(job: dict, db: dict):
             job["error"] = "No hay destinos validos"
             _persist_job(job)
             return
+
+        # Gate Pyrogram: si algún fichero supera 1.9GB y no hay sesión pyro
+        # válida, pausar en vez de morir en error y bloquear la cola. Cubre el
+        # reanudado forzado y el ▶ manual (que se re-pausa si sigue sin pyro).
+        try:
+            _need_pyro, _max_b = _job_pyro_check(job)
+        except Exception:
+            _need_pyro, _max_b = False, 0
+        if _need_pyro:
+            job["needs_pyro"] = True
+            _persist_job(job)
+            if not await _pyro_available():
+                _pause_job_for_pyro(job, _max_b)
+                _persist_job(job)
+                return
 
         job["status"] = "processing"
         job["progress"] = 0.0
@@ -2956,8 +3427,14 @@ async def _process_job(job: dict, db: dict):
         print(f"[TGHirayi_v2] ERROR en _process_job: {e}", flush=True)
         import traceback
         traceback.print_exc()
-        job["status"] = "error"
-        if _is_auth_dead(str(e)):
+        if "requiere Pyrogram" in str(e):
+            # Red de seguridad (p. ej. archives: el tamaño final solo se sabe
+            # tras extraer): pausar con flag en vez de error para no bloquear.
+            _pause_job_for_pyro(job)
+            job["error"] = str(e)[:300]
+            _persist_job(job)
+        elif _is_auth_dead(str(e)):
+            job["status"] = "error"
             job["error"] = ("Sesión de Telegram invalidada o cliente caído "
                             "(¿dos gateways a la vez? ¿cambio de IP/VPN?). Regenera la sesión del userbot "
                             "en Configuración y reanuda la cola. Detalle: " + str(e)[:200])
@@ -2968,6 +3445,7 @@ async def _process_job(job: dict, db: dict):
                 pass
             print(f"[TGHirayi_v2] Worker pausado por sesión invalidada", flush=True)
         else:
+            job["status"] = "error"
             job["error"] = str(e)
         _persist_job(job)
     # No desconectar cliente: es del pool compartido de userbot_service
@@ -3055,8 +3533,10 @@ async def _fetch_recent_topics(client, dest: dict, limit: int = 100, job: dict =
     # con el ajuste global a pyrogram: GetForumTopicsRequest no existe en pyro.
     return await _list_forum_topics(client, dest, job)
 
-async def _get_topics_map_cached(client, dest: dict, job: dict = None) -> dict:
-    """Mapa {norm_title: topic_id} con TTL. Completa al expirar; delta 100 en ventana vigente."""
+async def _get_topics_map_cached(client, dest: dict, job: dict = None, skip_delta: bool = False) -> dict:
+    """Mapa {norm_title: topic_id} con TTL. Completa al expirar; delta 100 en ventana vigente.
+    skip_delta=True: con caché vigente NO toca red (instantáneo; omite topics
+    creados dentro de la ventana TTL). Para comparaciones masivas (hide-uploaded)."""
     global _TOPIC_CACHE_LOCK
     import time as _time
     try:
@@ -3072,7 +3552,12 @@ async def _get_topics_map_cached(client, dest: dict, job: dict = None) -> dict:
         ttl_min = 60
     now = _time.time()
     entry = _TOPIC_CACHE.get(key)
-    if entry and (now - float(entry.get("ts", 0))) < ttl_min * 60:
+    fresh = bool(entry and (now - float(entry.get("ts", 0))) < ttl_min * 60)
+    # Mapa vacío (fallo de listado anterior) = miss: reintentar en vez de
+    # servir vacío 60 min (envenenaba el check con solo el delta de 100).
+    if fresh and entry.get("map"):
+        if skip_delta:
+            return dict(entry.get("map", {}))
         try:
             merged = dict(entry.get("map", {}))
             for nt, _tid in _topics_to_map(await _fetch_recent_topics(client, dest, 100, job)).items():
@@ -3088,10 +3573,13 @@ async def _get_topics_map_cached(client, dest: dict, job: dict = None) -> dict:
         await lock.acquire()
     try:
         entry2 = _TOPIC_CACHE.get(key)
-        if entry2 and (now - float(entry2.get("ts", 0))) < ttl_min * 60:
+        if entry2 and (now - float(entry2.get("ts", 0))) < ttl_min * 60 and entry2.get("map"):
             return dict(entry2.get("map", {}))
         m = _topics_to_map(await _list_forum_topics(client, dest, job))
-        _TOPIC_CACHE[key] = {"ts": now, "map": m}
+        if m:
+            _TOPIC_CACHE[key] = {"ts": now, "map": m}
+        elif entry2:
+            return dict(entry2.get("map", {}))
         return m
     except Exception as e:
         print(f"[TGHirayi_v2] Error listado completo topics ({key}): {e}", flush=True)
@@ -5821,6 +6309,9 @@ def _load_cover_tags() -> dict:
         "id": "ID: {value}",
         "cover": "Cover: {value}",
         "episodes": "Episodes: {value}",
+        "season": "Season: {value}",
+        "temporada": "Season: {value}",
+        "season_episodes": "Season episodes: {value}",
         "ext": "Ext: {value}",
         "extension": "Ext: {value}",
         "description": "Description:\n{value}",
@@ -5880,6 +6371,8 @@ def _cover_tag_values(title: str, total_episodes: int, details: dict) -> dict:
     description = str(details.get("api_description") or "")
     cover = _json_list(details.get("api_cover"))
     episodes = str(int(total_episodes or 0)) if (total_episodes or 0) > 0 else ""
+    season = str(details.get("api_season_number") if details.get("api_season_number") is not None else (details.get("api_seasons") or ""))
+    season_episodes = str(details.get("api_season_episodes") or "")
     original_title = str(details.get("api_original_title") or "")
     title_es = str(details.get("api_title_es") or "")
     title_latam = str(details.get("api_title_latam") or "")
@@ -5926,6 +6419,9 @@ def _cover_tag_values(title: str, total_episodes: int, details: dict) -> dict:
         "sinopsis": description,
         "overview": description,
         "episodes": episodes,
+        "season": season,
+        "temporada": season,
+        "season_episodes": season_episodes,
         "ext": "",
         "extension": "",
     }
@@ -5984,7 +6480,8 @@ _SIMPLE_TAG_NAMES = (
     "year", "release_year", "rating", "rating_count",
     "genres", "generos", "themes", "temas", "author", "autor", "director",
     "directores", "release_date", "fecha", "category", "categoria", "id", "cover",
-    "description", "sinopsis", "overview", "episodes", "ext", "extension",
+    "description", "sinopsis", "overview", "episodes", "season", "temporada",
+    "season_episodes", "ext", "extension",
 )
 
 
@@ -6844,7 +7341,7 @@ async def _upload_episode_to_destination(client, pyro_client, episode: dict, med
     # MTProto: una parte de upload máximo 512KB
     part_size_kb = max(32, min(block_kb, 512))
     threads = max(1, int(cfg.get("upload_threads", 4) or 4))
-    BIG_FILE_LIMIT = int(1.9 * 1024 * 1024 * 1024)  # <1.9GB Telethon, >=1.9GB Pyrogram (Telethon no sube >2GB)
+    BIG_FILE_LIMIT = _PYRO_REQUIRED_BYTES  # <1.9GB Telethon, >=1.9GB Pyrogram (Telethon no sube >2GB)
     BIG_UPLOAD_THRESHOLD = 10 * 1024 * 1024
     sent_ids: List[int] = []
 
@@ -7093,3 +7590,29 @@ def init_plugin():
 
 # Inicializar al cargar el modulo
 init_plugin()
+
+# ─── Convención Indexator: destinos con acceso ──────────────────────────
+def get_indexator_channels():
+    """Lista [{name, channel_id, topology}] desde TGHirayi_v2.json.
+    Convención para Indexator (no es endpoint)."""
+    import os as _os
+    import json as _js
+    try:
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        jf = _os.path.join(here, "data", "TGHirayi_v2.json")
+        if not _os.path.isfile(jf):
+            return []
+        with open(jf, "r", encoding="utf-8") as f:
+            jd = _js.load(f) or {}
+        out = []
+        for did, d in ((jd.get("destinations") or {}).items()):
+            if not isinstance(d, dict):
+                continue
+            out.append({
+                "name": d.get("name") or did,
+                "channel_id": str(d.get("channel_id") or ""),
+                "topology": d.get("topology"),
+            })
+        return out
+    except Exception:
+        return []

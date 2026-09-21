@@ -36,5 +36,6 @@
       "color": "#22c55e",
       "action": "add_scan_item"
     }
-  ]
+  ],
+  "provides_channels": true
 }

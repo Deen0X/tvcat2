@@ -73,7 +73,7 @@ class TMDBProvider:
                     }
         return list(seen.values())
 
-    async def get_details(self, tmdb_id, media_type="movie"):
+    async def get_details(self, tmdb_id, media_type="movie", season=None):
         if not self._enabled():
             return None
         url = f"{self.base_url}/{media_type}/{tmdb_id}"
@@ -86,7 +86,62 @@ class TMDBProvider:
             resp = await client.get(url, params=params)
             if resp.status_code != 200:
                 return None
-            return self._format(resp.json(), media_type)
+            api_data = self._format(resp.json(), media_type)
+            if api_data and season is not None and (api_data.get("api_category") or media_type) == "tv":
+                try:
+                    _s = await self._get_season(client, tmdb_id, int(season))
+                    if _s:
+                        api_data = self._merge_season(api_data, _s, int(season))
+                except Exception as e:
+                    print(f"[TMDB] season {season} de {tmdb_id}: {e}", flush=True)
+            return api_data
+
+    async def _get_season(self, client, tmdb_id, season):
+        """Detalle de una temporada: /tv/{id}/season/{n} (cover, episodios, año)."""
+        url = f"{self.base_url}/tv/{tmdb_id}/season/{season}"
+        resp = await client.get(url, params={"api_key": self.api_key, "language": "es-ES"})
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+
+    @classmethod
+    def _merge_season(cls, api_data, s, season):
+        """Fusiona el detalle de temporada: año/fecha/descripción pasan a la
+        temporada (también mandan en el nombre del topic), el póster de la
+        temporada queda primero en la lista de covers."""
+        air = (s.get("air_date") or "").strip()
+        if air and air[:4].isdigit():
+            api_data["api_season_year"] = int(air[:4])
+            api_data["api_year"] = int(air[:4])
+            api_data["api_release_date"] = air
+        api_data["api_season_number"] = int(season)
+        try:
+            api_data["api_season_episodes"] = len(s.get("episodes") or [])
+        except Exception:
+            pass
+        if (s.get("overview") or "").strip():
+            api_data["api_season_overview"] = s["overview"].strip()
+            api_data["api_description"] = s["overview"].strip()
+        _sp = s.get("poster_path")
+        if _sp:
+            _url = f"{IMAGE_BASE}{_sp}"
+            api_data["api_season_poster"] = _url
+            try:
+                import json as _js
+                _all = _js.loads(api_data.get("api_covers_all") or "[]") or []
+                _urls = [_u for _u in [_url] + [c.get("url") for c in _all if isinstance(c, dict)] if _u]
+                seen, _ded = set(), []
+                for _u in _urls:
+                    if _u not in seen:
+                        seen.add(_u)
+                        _ded.append(_u)
+                api_data["api_covers_all"] = _js.dumps(
+                    [{"url": _u, "lang": ""} for _u in _ded[:12]])
+                _cov = _js.loads(api_data.get("api_cover") or "[]") or []
+                api_data["api_cover"] = _js.dumps([_url] + [c for c in _cov if c != _url])
+            except Exception:
+                pass
+        return api_data
 
     # Países latam hispanohablantes por prioridad (MX primero).
     _LATAM_PRIORITY = ("MX", "AR", "CL", "CO", "PE", "VE", "UY", "EC", "BO",
@@ -247,4 +302,11 @@ class TMDBProvider:
         date_str = api_data.get("api_release_date") or ""
         if date_str and date_str[:4].isdigit():
             api_data["api_year"] = int(date_str[:4])
+        # Temporadas (solo TV; en películas no existe → el tag se omite).
+        try:
+            _ns = details.get("number_of_seasons")
+            if _ns is not None and str(_ns).strip() != "":
+                api_data["api_seasons"] = int(_ns)
+        except Exception:
+            pass
         return api_data

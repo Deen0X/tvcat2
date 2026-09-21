@@ -285,6 +285,210 @@
         return '<a href="' + escHtml(link) + '" target="_blank" rel="noopener noreferrer" title="Abrir mensaje original en Telegram" style="color:#60a5fa;text-decoration:none;border-bottom:1px dashed rgba(96,165,250,0.4);">' + titleEsc + '</a>';
     }
 
+    // ─── Ocultar subidos: compara la sección actual contra los topics de los destinos ───
+    function _hideItemIdOf(it) {
+        return String((it && (it.item_id || it.id)) || '');
+    }
+
+    function _hideIsCollection(it) {
+        var id = _hideItemIdOf(it);
+        return (id.indexOf('COL-') === 0) || !!(it && it.is_collection);
+    }
+
+    function showHideUploadedModal() {
+        var section = '';
+        try { section = (window.Catalog && window.Catalog.currentCategory) || 'home'; } catch (e) {}
+        var showMode = (section === 'hidden' || section === 'hidden_blocked');
+        var items = ((window.Catalog && window.Catalog.currentItems) || []).filter(function(it) {
+            return _hideItemIdOf(it) && !_hideIsCollection(it);
+        });
+        if (!items.length) { alert('No hay elementos (items) en la sección actual.'); return; }
+        api(API + '/destinations', {}, function(res) {
+            var dests = (res && res.destinations) || [];
+            if (!dests.length) { alert('No hay destinos configurados. Ve a Configuración del plugin TGHirayi v2 para añadir destinos.'); return; }
+            var lastSel = {};
+            try { lastSel = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch (e) {}
+            openModal(showMode ? 'Mostrar subidos' : 'Ocultar subidos', function(content, overlay) {
+                var html = '<div class="muted" style="margin-bottom:8px;font-size:12px;color:#a1a1aa;">' +
+                    'Se comparan los ' + items.length + ' títulos de la sección actual contra los topics de los destinos (asume topo3, unión).</div>';
+                if (!showMode) {
+                    html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
+                        '<input type="checkbox" class="tgcopy-hide-full-cb" style="accent-color:#eab308;">' +
+                        '<span style="flex:1;font-size:12px;">Comparar todo el catálogo (ignora el filtrado actual)</span></label>';
+                    html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
+                        '<input type="checkbox" class="tgcopy-hide-queue-cb" style="accent-color:#eab308;">' +
+                        '<span style="flex:1;font-size:12px;">Ocultar los que estén en la cola de TGHirayi</span></label>';
+                }
+                for (var i = 0; i < dests.length; i++) {
+                    var d = dests[i];
+                    var checked = lastSel[d.id] ? 'checked' : '';
+                    html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;cursor:pointer;">' +
+                        '<input type="checkbox" class="tgcopy-hide-dest-cb" value="' + d.id + '" ' + checked + ' style="accent-color:#eab308;">' +
+                        '<span style="flex:1;">' + escHtml(d.name) + '</span>' +
+                        '<span style="font-size:11px;color:#a1a1aa;">' + escHtml(d.channel_title || '') + '</span></label>';
+                }
+                content.innerHTML = html;
+                var btnRow = document.createElement('div');
+                btnRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
+                var go = document.createElement('button');
+                go.textContent = 'Comparar';
+                go.style.cssText = 'flex:1;padding:8px;background:#eab308;border:none;color:#000;border-radius:6px;cursor:pointer;font-weight:600;';
+                go.onclick = function() {
+                    var ids = [];
+                    var boxes = content.querySelectorAll('.tgcopy-hide-dest-cb:checked');
+                    for (var j = 0; j < boxes.length; j++) ids.push(boxes[j].value);
+                    if (!ids.length) { alert('Selecciona al menos un destino.'); return; }
+                    var sel = {};
+                    for (var k = 0; k < dests.length; k++) sel[dests[k].id] = ids.indexOf(dests[k].id) >= 0;
+                    try { localStorage.setItem(LS_KEY, JSON.stringify(sel)); } catch (e) {}
+                    go.textContent = 'Comparando...';
+                    go.disabled = true;
+                    var fullBox = content.querySelector('.tgcopy-hide-full-cb');
+                    var fullMode = !!(fullBox && fullBox.checked);
+                    var queueBox = content.querySelector('.tgcopy-hide-queue-cb');
+                    var queueMode = !!(queueBox && queueBox.checked);
+                    var payload = { destination_ids: ids, items: [], full_catalog: fullMode, for_hide: !showMode, include_queue: queueMode };
+                    if (!fullMode) {
+                        for (var n = 0; n < items.length; n++) {
+                            payload.items.push({
+                                item_id: _hideItemIdOf(items[n]),
+                                title: items[n].title || items[n].name || '',
+                                year: String(items[n].year || ''),
+                                description: items[n].description || '',
+                                cover_text: items[n].cover_text || ''
+                            });
+                        }
+                    }
+                    api(API + '/hide-uploaded/check', { method: 'POST', data: payload }, function(r, st) {
+                        overlay.remove();
+                        if (!r || !r.ok) {
+                            alert('Error al comparar: ' + ((r && r.detail) || ('HTTP ' + st)));
+                            return;
+                        }
+                        if (!r.destinations_checked) {
+                            var det0 = r.detail || [];
+                            var lines0 = [];
+                            for (var d0 = 0; d0 < det0.length; d0++) {
+                                var l0 = (det0[d0].dest || '?') + ': ' + (det0[d0].topics || 0) + ' topics';
+                                if (det0[d0].error) l0 += ' -> ' + det0[d0].error;
+                                lines0.push(l0);
+                            }
+                            alert('Ningún destino tiene topics (¿topo1/2 o grupo no-foro?). Nada que comparar.' + (lines0.length ? '\n' + lines0.join('\n') : ''));
+                            return;
+                        }
+                        if (!(r.matched || []).length) {
+                            var det = r.detail || [];
+                            var lines = [];
+                            for (var dd = 0; dd < det.length; dd++) {
+                                var dl = (det[dd].dest || '?') + ': ' + (det[dd].topics || 0) + ' topics (' + (det[dd].cached ? 'caché' : 'completo') + ')';
+                                if (det[dd].server_count !== undefined && det[dd].server_count !== null) dl += ' [servidor: ' + det[dd].server_count + ']';
+                                if (det[dd].error) dl += ' -> ' + det[dd].error;
+                                if (det[dd].probe_error) dl += ' [' + det[dd].probe_error + ']';
+                                lines.push(dl);
+                            }
+                            alert('Ningún título coincide con los destinos (' + (r.topics_count || 0) + ' topics comparados).' + (lines.length ? '\n' + lines.join('\n') : ''));
+                            return;
+                        }
+                        showHideUploadedResults(items, r.matched || [], showMode, r.topics_count || 0, r.titles || {}, r.skipped_hidden || 0, r.detail || [], r.matched_queue || []);
+                    });
+                };
+                var cancel = document.createElement('button');
+                cancel.textContent = 'Cancelar';
+                cancel.style.cssText = 'padding:8px 14px;background:none;border:1px solid #3f3f46;color:rgba(255,255,255,0.6);border-radius:6px;cursor:pointer;';
+                cancel.onclick = function() { overlay.remove(); };
+                btnRow.appendChild(go);
+                btnRow.appendChild(cancel);
+                content.appendChild(btnRow);
+            });
+        });
+    }
+
+    function showHideUploadedResults(items, matchedIds, showMode, topicsCount, titlesMap, skippedHidden, detail, matchedQueue) {
+        var set = {};
+        for (var m = 0; m < matchedIds.length; m++) set[String(matchedIds[m])] = true;
+        var qset = {};
+        for (var qm = 0; qm < (matchedQueue || []).length; qm++) qset[String(matchedQueue[qm])] = true;
+        var byId = {};
+        for (var b = 0; b < items.length; b++) byId[_hideItemIdOf(items[b])] = items[b];
+        var matched = [];
+        for (var i = 0; i < matchedIds.length; i++) {
+            var mid = String(matchedIds[i]);
+            if (byId[mid]) { matched.push(byId[mid]); continue; }
+            var t = (titlesMap && titlesMap[mid]) || mid;
+            matched.push({ item_id: mid, title: t });
+        }
+        if (!matched.length) {
+            var dl = detail || [];
+            var ls = [];
+            for (var q0 = 0; q0 < dl.length; q0++) ls.push((dl[q0].dest || '?') + ': ' + (dl[q0].topics || 0));
+            alert('Ningún título coincide (' + topicsCount + ' topics comparados).' + (ls.length ? '\n' + ls.join('\n') : ''));
+            return;
+        }
+        openModal((showMode ? 'Mostrar subidos (' : 'Ocultar subidos (') + matched.length + ')', function(content, overlay) {
+            var html = '<div style="display:flex;gap:8px;margin-bottom:8px;">' +
+                '<button class="tgcopy-hide-all" style="flex:1;padding:6px;background:#27272a;border:1px solid #3f3f46;color:#fff;border-radius:6px;cursor:pointer;">Marcar todo</button>' +
+                '<button class="tgcopy-hide-none" style="flex:1;padding:6px;background:none;border:1px solid #3f3f46;color:rgba(255,255,255,0.6);border-radius:6px;cursor:pointer;">Desmarcar todo</button></div>' +
+                '<div style="font-size:11px;color:#a1a1aa;margin-bottom:6px;">Comparados ' + topicsCount + ' topics (unión de destinos).' +
+                (skippedHidden ? ' Omitidos ' + skippedHidden + ' ya ocultos.' : '') +
+                ((matchedQueue || []).length ? ' ' + matchedQueue.length + ' en cola.' : '') +
+                (function() {
+                    var dl2 = detail || [];
+                    if (!dl2.length) return '';
+                    var ps = [];
+                    for (var q1 = 0; q1 < dl2.length; q1++) {
+                        var s2 = escHtml(dl2[q1].dest || '?') + ': ' + (dl2[q1].topics || 0);
+                        if (dl2[q1].server_count !== undefined && dl2[q1].server_count !== null) s2 += ' [srv:' + dl2[q1].server_count + ']';
+                        ps.push(s2);
+                    }
+                    return '<br>' + ps.join(' · ');
+                })() + '</div>' +
+                '<div class="tgcopy-hide-list" style="max-height:50vh;overflow-y:auto;">';
+            for (var k = 0; k < matched.length; k++) {
+                var iid = _hideItemIdOf(matched[k]);
+                var t = escHtml(matched[k].title || matched[k].name || iid);
+                var qbadge = qset[iid] ? ' <span title="Está en la cola de TGHirayi" style="background:rgba(234,179,8,0.15);color:#eab308;border:1px solid rgba(234,179,8,0.3);border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">en cola</span>' : '';
+                html += '<label style="display:flex;align-items:center;gap:8px;padding:6px;margin:3px 0;background:rgba(255,255,255,0.05);border-radius:6px;cursor:pointer;font-size:13px;">' +
+                    '<input type="checkbox" class="tgcopy-hide-cb" value="' + iid.replace(/"/g, '&quot;') + '" checked style="accent-color:#eab308;">' +
+                    '<span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + qbadge + '</span></label>';
+            }
+            html += '</div>';
+            content.innerHTML = html;
+            var btnAll = content.querySelector('.tgcopy-hide-all');
+            var btnNone = content.querySelector('.tgcopy-hide-none');
+            if (btnAll) btnAll.onclick = function() { var c = content.querySelectorAll('.tgcopy-hide-cb'); for (var a = 0; a < c.length; a++) c[a].checked = true; };
+            if (btnNone) btnNone.onclick = function() { var c = content.querySelectorAll('.tgcopy-hide-cb'); for (var a = 0; a < c.length; a++) c[a].checked = false; };
+            var row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
+            var go = document.createElement('button');
+            go.textContent = showMode ? 'Mostrar' : 'Ocultar';
+            go.style.cssText = 'flex:1;padding:8px;background:#eab308;border:none;color:#000;border-radius:6px;cursor:pointer;font-weight:600;';
+            go.onclick = function() {
+                var ids = [];
+                var boxes = content.querySelectorAll('.tgcopy-hide-cb:checked');
+                for (var q = 0; q < boxes.length; q++) ids.push(boxes[q].value);
+                if (!ids.length) { alert('Marca al menos uno.'); return; }
+                var payload = showMode
+                    ? { item_ids: ids, mode: 'show' }
+                    : { item_ids: ids, mode: 'hide' };
+                api('/api/hidden/bulk', { method: 'POST', data: payload }, function(r) {
+                    overlay.remove();
+                    if (r && r.success) {
+                        var n = showMode ? (r.shown || 0) : (r.hidden || 0);
+                        showToast(showMode ? ('Visibles: ' + n) : ('Ocultados: ' + n));
+                    } else { showToast('Error'); }
+                    try { if (window.Catalog) window.Catalog.load(window.Catalog.currentCategory || 'home'); } catch (e) {}
+                });
+            };
+            var cancel = document.createElement('button');
+            cancel.textContent = 'Cancelar';
+            cancel.style.cssText = 'padding:8px 14px;background:none;border:1px solid #3f3f46;color:rgba(255,255,255,0.6);border-radius:6px;cursor:pointer;';
+            cancel.onclick = function() { overlay.remove(); };
+            row.appendChild(go);
+            row.appendChild(cancel);
+            content.appendChild(row);
+        });
+    }
+
     // ─── Modal de cola de trabajos ───
     function showQueueModal() {
         var overlay = document.createElement('div');
@@ -617,6 +821,9 @@ html += '</div>';
                 else if (phase === 'uploading' || phase === 'ready_upload') pcolor = '#4ade80';
                 h += '<span style="background:rgba(0,0,0,0.35);color:' + pcolor + ';border:1px solid ' + pcolor + ';border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">' + phaseLabels[phase] + '</span>';
             }
+        }
+        if (j.needs_pyro) {
+            h += '<span title="Requiere sesión Pyrogram (>1.9GB)" style="background:rgba(168,85,247,0.15);color:#c084fc;border:1px solid rgba(168,85,247,0.4);border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">\uD83D\uDC0D Pyro</span>';
         }
         if (!isDone) {
             h += '<button onclick="window._tgcopy2EditCover(\'' + j.id + '\')" title="Editar cover" class="tgcopy2-presskey" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:10px;padding:1px 5px;white-space:nowrap;">Cover</button>';
@@ -995,7 +1202,7 @@ html += '</div>';
 
             // Plantilla (editable, con tags)
             html += '<label style="font-size:0.75rem;color:#a1a1aa;margin-top:10px;display:block;">Plantilla</label>';
-            html += '<div style="font-size:0.7rem;color:#71717a;margin:2px 0 4px;">Tags: {title} {tagtitle} {episodes} · f-tags: {ftitle} {ftagtitle} {fyear} {frating} {fgenres} {fsinopsis} {fepisodes} (solo si hay dato) · Enter para saltos de l&iacute;nea</div>';
+            html += '<div style="font-size:0.7rem;color:#71717a;margin:2px 0 4px;">Tags: {title} {tagtitle} {episodes} {season} · f-tags: {ftitle} {ftagtitle} {fyear} {frating} {fgenres} {fsinopsis} {fepisodes} {fseason} (solo si hay dato) · Enter para saltos de l&iacute;nea</div>';
             html += '<textarea id="cover-template" style="width:100%;height:120px;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;resize:vertical;">' + template + '</textarea>';
 
             // Resultado (resuelto en vivo, solo lectura)
@@ -1262,6 +1469,7 @@ html += '</div>';
                 var orig = window.handleTrayAction;
                 window.handleTrayAction = function(pluginName, btnIndex, el) {
                     if (pluginName === 'tvcat_TGHirayi_v2') {
+                        if (btnIndex === 2) { showHideUploadedModal(); return; }
                         if (btnIndex === 1) { showBulkSendModal(); } else { showQueueModal(); }
                         return;
                     }

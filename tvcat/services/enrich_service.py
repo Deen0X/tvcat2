@@ -386,12 +386,40 @@ def render_template(details: dict, category="", subcategory="") -> str:
 
 # ─── API pública ───────────────────────────────────────────────────
 
+_SEASON_SUFFIX_PATTERNS = (
+    re.compile(r"(?i)/season/(?P<n>\d{1,2})\s*$"),  # URL .../season/N
+    re.compile(r"(?i)\s+(temporada|season)\s+(?P<n>\d{1,2})\s*$"),
+    re.compile(r"(?i)[\s\-_]+[TS](?P<n>\d{1,2})\s*$"),  # "X T1" / "X S01"
+)
+
+
+def _split_season_query(q: str):
+    """Separa sufijo de temporada: (título limpio, nº|None). Solo sufijo final
+    y con resto no vacío (no toca "T1" a mitad ni títulos solo-numéricos)."""
+    for pat in _SEASON_SUFFIX_PATTERNS:
+        m = pat.search(q or "")
+        if not m:
+            continue
+        try:
+            n = int(m.group("n"))
+        except Exception:
+            continue
+        if not (0 <= n <= 99):
+            continue
+        title = (q[:m.start()] or "").strip(" \t-_")
+        if title:
+            return title, n
+    return q, None
+
+
 async def search(query: str, category: str = "", subcategory: str = "",
                  episode_count: int = None, provider_override: str = "") -> dict:
-    """Busca candidatos de un título. Devuelve {candidates, has_more, provider, threshold}.
+    """Busca candidatos de un título. Devuelve {candidates, has_more, provider, threshold, season}.
     Si el texto es una URL directa conocida (TMDB/IGDB/Google Books/ComicVine),
     la URL es la autoridad: se resuelve ese candidato directamente (sin search),
-    cambiando al proveedor de la URL si está habilitado."""
+    cambiando al proveedor de la URL si está habilitado.
+    Sufijo de temporada (solo tmdb): "X temporada N" / "X season N" / "X TN" /
+    "X SN" / URL .../season/N → se busca X y se devuelve season=N."""
     provider_name = (provider_override or "").strip().lower() or select_provider_name(category, subcategory)
     threshold = _load_threshold()
     creds = _load_credentials()
@@ -407,6 +435,10 @@ async def search(query: str, category: str = "", subcategory: str = "",
 
     q = (query or "").strip()
 
+    season_n = None
+    if provider_name == 'tmdb':
+        q, season_n = _split_season_query(q)
+
     def _direct_candidate(details, pid, ptitle, pposter, pyear, extra=None):
         cand = {
             "id": str(pid or ""),
@@ -419,7 +451,7 @@ async def search(query: str, category: str = "", subcategory: str = "",
             cand.update(extra)
         return {"candidates": [cand] if cand.get("title") else [],
                 "has_more": False, "provider": provider_name,
-                "configured": True, "threshold": threshold}
+                "configured": True, "threshold": threshold, "season": season_n}
 
     # ── URL directa de TMDB: ej. https://www.themoviedb.org/movie/1452176-slug
     #    o https://www.themoviedb.org/tv/108978-reacher → id + media_type del enlace.
@@ -462,7 +494,7 @@ async def search(query: str, category: str = "", subcategory: str = "",
             }
             return {"candidates": [candidate] if candidate.get("title") else [],
                     "has_more": False, "provider": provider_name,
-                    "configured": True, "threshold": threshold}
+                    "configured": True, "threshold": threshold, "season": season_n}
 
     # ── URL directa de IGDB: https://www.igdb.com/games/<slug> → por slug.
     #    Cambia al proveedor igdb (si habilitado): la URL es la autoridad.
@@ -608,13 +640,14 @@ async def search(query: str, category: str = "", subcategory: str = "",
     candidates = all_candidates[:10]
 
     return {"candidates": candidates, "has_more": has_more, "provider": provider_name,
-            "configured": True, "threshold": threshold}
+            "configured": True, "threshold": threshold, "season": season_n}
 
 
 async def get_details(provider_name: str, item_id: str, category: str = "", subcategory: str = "",
-                      media_type_hint: str = "", sub_provider: str = "") -> dict:
+                      media_type_hint: str = "", sub_provider: str = "", season: int = None) -> dict:
     """Obtiene la info completa de un candidato. media_type_hint permite forzar movie/tv
-    (p.ej. cuando el candidato vino de una URL directa de themoviedb.org)."""
+    (p.ej. cuando el candidato vino de una URL directa de themoviedb.org).
+    season (solo tmdb/tv): fusiona el detalle de /tv/{id}/season/{n}."""
     creds = _load_credentials()
     providers = build_providers(creds)
     provider = providers.get(provider_name)
@@ -624,7 +657,7 @@ async def get_details(provider_name: str, item_id: str, category: str = "", subc
                   else resolve_media_type(category, subcategory)) if provider_name == 'tmdb' else None
     try:
         if provider_name == 'tmdb':
-            details = await provider.get_details(item_id, media_type=media_type)
+            details = await provider.get_details(item_id, media_type=media_type, season=season)
         elif provider_name == 'books':
             # El candidato indica de dónde vino (google_books u open_library).
             details = await provider.get_details(

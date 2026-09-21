@@ -47,21 +47,92 @@
         ['{url}', 'URL t.me del topic'],
         ['{year}', 'Año tras 🗓'],
         ['{img:file}', 'Imagen (static/pack); si falta, se omite'],
-        ['**x** __x__ `x` [t](u)', 'Negrita, itálica, código, enlace']
+        ['**x** __x__ `x` [t](u)', 'Negrita, itálica, código, enlace'],
+        ['<b>x</b> <i>x</i> <code>x</code>', 'Igual en HTML (plantillas por defecto)']
     ];
 
+    // URL t.me para un canal privado: t.me/c/<bare>/<msg>.
+    // channel_id estilo "-100XXXX" -> bare = XXXX (sin el -100).
+    function tgUrlForChannel(cid) {
+        var s = String(cid || '').trim();
+        if (!s) return '';
+        var bare = s;
+        if (bare.indexOf('-100') === 0) bare = bare.substring(4);
+        else bare = bare.replace(/^-/, '');
+        if (!bare) return '';
+        return 'https://t.me/c/' + bare + '/1';
+    }
+
+    function channelOptions(channels) {
+        var h = '';
+        for (var i = 0; i < channels.length; i++) {
+            var c = channels[i];
+            var lock = (c.can_post === false) ? ' 🔒' : '';
+            var stale = c.stale ? ' (…)' : '';
+            h += '<option value="' + esc(c.channel_id) + '">' + esc(c.label || (c.channel_id + ' - ' + (c.name || ''))) + lock + stale + '</option>';
+        }
+        if (!h) h = '<option value="">(sin canales en las fuentes marcadas)</option>';
+        return h;
+    }
+
+    // Reintenta traer nombres pendientes (el backend los resuelve en
+    // segundo plano): hasta 3 pasadas, conservando la selección.
+    function repollNames(box, left) {
+        if (left <= 0) return;
+        setTimeout(function() {
+            if (!document.contains(box)) return;
+            var keep = box.querySelector('#ix-channel').value;
+            api('/api/indexator/channels', {}, function(chres) {
+                if (!document.contains(box)) return;
+                var all = (chres && chres.channels) || [];
+                var sel = selectedSources(box);
+                var filt = [];
+                for (var k = 0; k < all.length; k++) {
+                    var pl = all[k].plugins || [];
+                    var ok = true;
+                    if (sel.length) {
+                        ok = false;
+                        for (var j = 0; j < sel.length; j++) {
+                            if (pl.indexOf(sel[j]) !== -1) { ok = true; break; }
+                        }
+                    }
+                    if (ok) filt.push(all[k]);
+                }
+                box.querySelector('#ix-channel').innerHTML = channelOptions(filt);
+                var chsel = box.querySelector('#ix-channel');
+                for (var o = 0; o < chsel.options.length; o++) {
+                    if (chsel.options[o].value === keep) { chsel.selectedIndex = o; break; }
+                }
+                var pend = 0;
+                for (var p = 0; p < filt.length; p++) if (filt[p].stale) pend++;
+                var note = box.querySelector('#ix-names-note');
+                if (note) note.textContent = pend ? ('Resolviendo nombres… (' + pend + ')') : '';
+                if (pend) repollNames(box, left - 1);
+            });
+        }, 8000);
+    }
+
+    function selectedSources(box) {
+        var out = [];
+        var cbs = box.querySelectorAll('.ix-src-cb:checked');
+        for (var i = 0; i < cbs.length; i++) out.push(cbs[i].value);
+        return out;
+    }
+
     function openModal() {
-        api('/api/indexator/channels', {}, function(chres) {
-            var channels = (chres && chres.channels) || [];
-            var missing = (chres && chres.missing) || [];
-            api('/api/indexator/config', {}, function(cfgres) {
-                var cfg = (cfgres && cfgres.config) || {};
-                renderModal(channels, missing, cfg, (cfgres && cfgres.packs) || []);
+        api('/api/indexator/sources', {}, function(sres) {
+            var sources = (sres && sres.sources) || [];
+            api('/api/indexator/channels', {}, function(chres) {
+                var channels = (chres && chres.channels) || [];
+                api('/api/indexator/config', {}, function(cfgres) {
+                    var cfg = (cfgres && cfgres.config) || {};
+                    renderModal(channels, sources, cfg, (cfgres && cfgres.packs) || []);
+                });
             });
         });
     }
 
-    function renderModal(channels, missing, cfg, packs) {
+    function renderModal(channels, sources, cfg, packs) {
         var old = document.getElementById('indexator-overlay');
         if (old && old.parentNode) old.parentNode.removeChild(old);
         var o = document.createElement('div');
@@ -69,16 +140,27 @@
         o.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.75);z-index:50000;display:block;overflow:auto;';
         var box = document.createElement('div');
         box.style.cssText = 'background:#18181b;color:#f4f4f5;max-width:680px;margin:30px auto;padding:16px;border:1px solid #3f3f46;border-radius:8px;';
-        var h = '<h3 style="margin:0 0 4px 0;">🗂️ Indexator — índice de topics</h3>';
-        if (missing.length) {
-            h += '<div style="font-size:0.8rem;color:#fbbf24;margin-bottom:8px;">Falta/ apagado: ' + esc(missing.join(', ')) + ' (sus canales no salen).</div>';
+        var h = '<h3 style="margin:0 0 4px 0;display:flex;align-items:center;gap:8px;"><img src="/plugin-static/tvcat_indexator/plugin_icon.png" style="width:28px;height:28px;object-fit:contain;flex-shrink:0;" onerror="this.style.display=\'none\'"> Indexator — índice de topics</h3>';
+        // Fuentes: plugins habilitados que aportan canales (checks = filtro).
+        h += '<div style="font-size:0.8rem;color:#a1a1aa;margin-bottom:4px;">Fuentes (plugins con canales):</div>';
+        h += '<div id="ix-sources" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">';
+        if (!sources.length) {
+            h += '<span style="font-size:0.8rem;color:#fbbf24;">Sin fuentes con canales (¿plugins apagados?).</span>';
         }
-        h += '<label>Canal:<br><select id="ix-channel" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;">';
-        for (var i = 0; i < channels.length; i++) {
-            var c = channels[i];
-            h += '<option value="' + esc(c.channel_id) + '">[' + esc(c.kind) + '] ' + esc(c.name || c.channel_id) + '</option>';
+        for (var si = 0; si < sources.length; si++) {
+            var sp = sources[si];
+            h += '<label style="font-size:0.8rem;display:flex;gap:5px;align-items:center;cursor:pointer;">' +
+                '<input type="checkbox" class="ix-src-cb" value="' + esc(sp.name) + '"' +
+                (sp.selected === false ? '' : ' checked') + '> ' +
+                esc(sp.display || sp.name) + ' (' + (sp.channels || 0) + ')</label>';
         }
+        h += '</div>';
+        h += '<div style="display:flex;gap:8px;align-items:flex-end;">';
+        h += '<label style="flex:1;min-width:0;">Canal: <span id="ix-names-note" style="font-size:0.75rem;color:#a1a1aa;"></span><br><select id="ix-channel" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;">';
+        h += channelOptions(channels);
         h += '</select></label>';
+        h += '<button id="ix-open-tg" title="Abrir el canal en Telegram para comprobar datos" style="background:#229ED9;border:none;color:#fff;border-radius:6px;padding:10px 12px;cursor:pointer;white-space:nowrap;">Abrir en Telegram</button>';
+        h += '</div>';
         h += '<div style="font-size:0.8rem;color:#a1a1aa;margin:6px 0;">Solo canales con topics (topología 3). Los topics se listan en vivo.</div>';
         h += '<label>Topic índice:<br><input id="ix-topic" value="' + esc(cfg.index_topic || 'TVCat-Index') + '" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;"></label>';
         h += '<label>Excluir topics (separados por coma):<br><input id="ix-excl" value="' + esc((cfg.exclude_topics || []).join(', ')) + '" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;"></label>';
@@ -101,6 +183,18 @@
         document.body.appendChild(o);
         o.onclick = function(e) { if (e.target === o) closeModal(); };
         box.querySelector('#ix-close').onclick = closeModal;
+        (function() {
+            var b = box.querySelector('#ix-open-tg');
+            if (!b) return;
+            b.onclick = function() {
+                var cid = '';
+                try { cid = box.querySelector('#ix-channel').value || ''; } catch (e) {}
+                if (!cid) { showToast('Elige canal'); return; }
+                var url = tgUrlForChannel(cid);
+                if (!url) { showToast('Canal sin enlace válido'); return; }
+                try { window.open(url, '_blank'); } catch (e) {}
+            };
+        })();
         try {
             box.querySelector('#ix-header').value = cfg.header_template || '';
             box.querySelector('#ix-body').value = cfg.body_template || '';
@@ -119,9 +213,57 @@
                 exclude_topics: excl.split(','),
                 noletras_mode: box.querySelector('#ix-noletras').checked ? 'hash' : 'separado',
                 header_template: box.querySelector('#ix-header').value || '',
-                body_template: box.querySelector('#ix-body').value || ''
+                body_template: box.querySelector('#ix-body').value || '',
+                sources: selectedSources(box)
             } }, cb || function() {});
         }
+        // Cambiar fuentes re-filtra el combo sin cerrar el modal.
+        (function() {
+            var cbs = box.querySelectorAll('.ix-src-cb');
+            function inSel(ch, sel) {
+                if (!sel.length) return true;
+                var pl = ch.plugins || (ch.plugin ? [ch.plugin] : []);
+                for (var j = 0; j < sel.length; j++) {
+                    if (pl.indexOf(sel[j]) !== -1) return true;
+                }
+                return false;
+            }
+            for (var i = 0; i < cbs.length; i++) {
+                cbs[i].onchange = function() {
+                    var keep = box.querySelector('#ix-channel').value;
+                    api('/api/indexator/channels', {}, function(chres) {
+                        var all = (chres && chres.channels) || [];
+                        var sel = selectedSources(box);
+                        var filt = [];
+                        for (var k = 0; k < all.length; k++) {
+                            if (inSel(all[k], sel)) filt.push(all[k]);
+                        }
+                        var chsel = box.querySelector('#ix-channel');
+                        chsel.innerHTML = channelOptions(filt);
+                        for (var o = 0; o < chsel.options.length; o++) {
+                            if (chsel.options[o].value === keep) { chsel.selectedIndex = o; break; }
+                        }
+                        var pend = 0;
+                        for (var p = 0; p < filt.length; p++) if (filt[p].stale) pend++;
+                        var note = box.querySelector('#ix-names-note');
+                        if (note) note.textContent = pend ? ('Resolviendo nombres… (' + pend + ')') : '';
+                    });
+                };
+            }
+        })();
+        // Primera pasada: si hay nombres pendientes, reintentar para pintarlos.
+        (function() {
+            var pend0 = 0;
+            try {
+                var sel0 = box.querySelector('#ix-channel');
+                for (var o = 0; o < sel0.options.length; o++) {
+                    if ((sel0.options[o].text || '').indexOf('(…)') !== -1) { pend0++; break; }
+                }
+            } catch (e) {}
+            var note0 = box.querySelector('#ix-names-note');
+            if (note0 && pend0) note0.textContent = 'Resolviendo nombres…';
+            repollNames(box, 3);
+        })();
         box.querySelector('#ix-help').onclick = function() {
             var hb = box.querySelector('#ix-helpbox');
             if (!hb) return;

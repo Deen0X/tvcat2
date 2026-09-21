@@ -187,6 +187,7 @@ class PluginLoader:
                 "has_interface": data.get("has_interface", False),
                 "interface_icon": data.get("interface_icon", ""),
                 "group": data.get("group", ""),
+                "provides_channels": bool(data.get("provides_channels", False)),
                 "tray": data.get("tray", []),
                 "access": data.get("access", {"admin": True, "user": True, "child": False}),
                 "load_error": data.get("load_error"),

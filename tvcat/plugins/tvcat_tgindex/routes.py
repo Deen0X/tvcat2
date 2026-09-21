@@ -1731,3 +1731,31 @@ async def cache_relay_download_full(request: Request):
         return {"ok": False, "error": "No se pudo descargar el backup"}
     result = import_channel_cache(gz, "*", cfg.get("overwrite", False), manifest, cfg["chat_aux"])
     return result
+
+
+
+# ─── Convención Indexator: canales con acceso (fuentes) ─────────────────
+def get_indexator_channels():
+    """Lista [{name, channel_id, topology}] desde tvcat_scanned_channels
+    (DB central/sistema, igual que /api/user/channels).
+    Convención para Indexator (no es endpoint)."""
+    try:
+        from services.catalog_service import get_conn
+        conn = get_conn()
+        conn.row_factory = __import__("sqlite3").Row
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(tvcat_scanned_channels)").fetchall()]
+        sel = [c for c in ("id", "channel_id", "display_name", "title", "name", "topology_type") if c in cols]
+        out = []
+        if sel:
+            q = "SELECT " + ", ".join(sel) + " FROM tvcat_scanned_channels"
+            for r in conn.execute(q).fetchall():
+                d = dict(r)
+                out.append({
+                    "name": d.get("display_name") or d.get("title") or d.get("name") or d.get("channel_id"),
+                    "channel_id": str(d.get("channel_id") or ""),
+                    "topology": d.get("topology_type"),
+                })
+        conn.close()
+        return out
+    except Exception:
+        return []

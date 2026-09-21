@@ -604,6 +604,18 @@ class UserbotClient:
         name = f"tvcat_pyro_{abs(hash(str(self.session_data.get('session_string',''))))}"
         # Workers de red configurables (por defecto 16). Afecta a subida/descarga del cliente.
         workers = int(self.session_data.get("workers", 16) or 16)
+        # 2026-09: desconectar el anterior ANTES de conectar el nuevo. Conectar
+        # el nuevo con el viejo aún vivo = dos conexiones con la MISMA auth_key
+        # → Telegram responde 406 AUTH_KEY_DUPLICATED y QUEMA la sesión
+        # (visto en ráfagas de get_entity del Indexator). in_memory no usa
+        # fichero sqlite, así que no hay "storage bajo los pies" que proteger.
+        old = self._client
+        self._client = None
+        if old is not None:
+            try:
+                await old.disconnect()
+            except Exception:
+                pass
         new_client = Client(
             name=name,
             session_string=self.session_data.get("session_string") or None,
@@ -631,15 +643,7 @@ class UserbotClient:
             except Exception:
                 pass
             raise
-        # Nuevo OK: ahora sí retirar el anterior (antes se cerraba primero y el
-        # storage sqlite moría bajo los pies de otras tareas que lo usaban).
-        old = self._client
         self._client = new_client
-        if old is not None:
-            try:
-                await old.disconnect()
-            except Exception:
-                pass
         return self._client
 
     async def get_me(self):

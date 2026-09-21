@@ -19,6 +19,7 @@ import os
 import re
 import sys
 import time
+import asyncio
 import json as _json
 import sqlite3
 
@@ -51,50 +52,75 @@ def _require_user(request: Request):
     return sess
 
 
-def _loader():
-    """Plugin loader global (gateway lo expone en sys.modules)."""
+def _plugins_root() -> str:
+    return os.path.join(_TVCAT_DIR, "plugins")
+
+
+def _read_manifest(folder: str):
     try:
-        from tvcat.gateway import _plugin_loader as _pl
-        return _pl
+        with open(os.path.join(folder, "plugin.json"), "r", encoding="utf-8") as f:
+            return _json.load(f) or {}
     except Exception:
-        pass
+        return {}
+
+
+def _plugin_enabled(name: str, manifest: dict = None) -> bool:
+    """Estado real: defaultEnabled del manifest + state.json (igual que el
+    loader, pero sin depender de su instancia viva)."""
     try:
-        import tvcat.gateway as _gw
-        for k in ("_plugin_loader", "plugin_loader", "_loader", "loader"):
-            _pl = getattr(_gw, k, None)
-            if _pl is not None and hasattr(_pl, "registry"):
-                return _pl
-    except Exception:
-        pass
-    return None
-
-
-def _plugin_entry(name: str):
-    try:
-        pl = _loader()
-        if pl is None:
-            return None
-        return (pl.registry or {}).get(name)
-    except Exception:
-        return None
-
-
-def _plugin_enabled(name: str) -> bool:
-    try:
-        e = _plugin_entry(name)
-        return bool(e and e.get("enabled"))
+        if manifest is None:
+            manifest = _read_manifest(os.path.join(_plugins_root(), name))
+        enabled = bool(manifest.get("defaultEnabled", False))
+        sp = os.path.join(_plugins_root(), name, "state.json")
+        if os.path.isfile(sp):
+            with open(sp, "r", encoding="utf-8") as f:
+                st = _json.load(f) or {}
+            if "enabled" in st:
+                enabled = bool(st.get("enabled"))
+        return enabled
     except Exception:
         return False
 
 
-def _plugin_dir(name: str) -> str:
-    e = _plugin_entry(name) or {}
-    d = e.get("_dir") or ""
-    if d and os.path.isdir(d):
-        return d
-    # Fallback por convención (el registry manda; esto es último recurso).
-    fb = os.path.join(_TVCAT_DIR, "plugins", name)
-    return fb if os.path.isdir(fb) else ""
+# Plugins conocidos con canales (fallback si no exponen la convención).
+_KNOWN_CHANNEL_PLUGINS = ("tvcat_tgindex", "tvcat_TGHirayi", "tvcat_TGHirayi_v2")
+
+
+def _provider_plugins() -> list:
+    """Plugins que pueden aportar canales: manifiestan provides_channels
+    o son conocidos. Devuelve [{name, display, enabled}]."""
+    out = []
+    try:
+        root = _plugins_root()
+        for folder in sorted(os.listdir(root)):
+            pdir = os.path.join(root, folder)
+            if not os.path.isdir(pdir):
+                continue
+            man = _read_manifest(pdir)
+            if not man.get("name"):
+                continue
+            name = man.get("name")
+            if man.get("provides_channels") or name in _KNOWN_CHANNEL_PLUGINS:
+                out.append({"name": name,
+                            "display": man.get("displayName") or name,
+                            "enabled": _plugin_enabled(name, man)})
+    except Exception:
+        pass
+    return out
+
+
+def _channels_via_convention(name: str) -> list:
+    """Llama a tvcat.plugins.<name>.routes.get_indexator_channels() si existe."""
+    try:
+        import importlib
+        mod = importlib.import_module(f"tvcat.plugins.{name}.routes")
+        fn = getattr(mod, "get_indexator_channels", None)
+        if callable(fn):
+            res = fn() or []
+            return [dict(c) for c in res if isinstance(c, dict)]
+    except Exception as e:
+        print(f"[Indexator] convención {name}: {e}", flush=True)
+    return None
 
 
 def _cfg_path() -> str:
@@ -113,9 +139,11 @@ def _load_cfg() -> dict:
         "special_allow": "",
         "special_replace": "?",
         "header_template": "<b>Índice</b> ({total_all} títulos)",
-        "body_template": "{letters}<b>{letter}</b> ({total})\n{entries}{index}. {title_link}\n{/letters}",
+        "body_template": "{letters}<b>{letter}</b> ({total})\n{entries}{index}. {title_link}{/entries}\n{/letters}",
         "header_image": "",
         "show_tray": True,
+        "sources": [],
+        "names_ttl_h": 1,
     }
     try:
         if os.path.isfile(_cfg_path()):
@@ -150,6 +178,110 @@ class ConfigUpdate(BaseModel):
     body_template: Optional[str] = None
     header_image: Optional[str] = None
     show_tray: Optional[bool] = None
+    sources: Optional[List[str]] = None
+    names_ttl_h: Optional[int] = None
+
+
+# ─── Nombres de canal (caché con TTL; los nombres cambian poco) ────
+_NAMES_PATH = os.path.join(_DATA_DIR, "channels_cache.json")
+_NAMES_REFRESHING = False
+
+
+def _names_cache_load() -> dict:
+    try:
+        if os.path.isfile(_NAMES_PATH):
+            with open(_NAMES_PATH, "r", encoding="utf-8") as f:
+                d = _json.load(f) or {}
+                return d if isinstance(d, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _names_cache_save(cache: dict):
+    try:
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        with open(_NAMES_PATH, "w", encoding="utf-8") as f:
+            _json.dump(cache, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _channel_names(ids: list, ttl_h: int = 1, force: bool = False) -> dict:
+    """{channel_id: {name, username, can_post}} desde caché. Lo ausente o
+    caducado se refresca en segundo plano (sin bloquear la respuesta)."""
+    now = time.time()
+    try:
+        ttl = max(1, int(float(ttl_h or 1) * 3600))
+    except Exception:
+        ttl = 3600
+    cache = _names_cache_load()
+    out = {}
+    missing = []
+    for cid in ids:
+        cid = str(cid or "")
+        if not cid:
+            continue
+        e = cache.get(cid) or {}
+        fresh = bool(e.get("name")) and (now - float(e.get("updated_at", 0) or 0)) < ttl
+        if fresh and not force:
+            out[cid] = e
+        else:
+            out[cid] = {"name": e.get("name") or "", "username": e.get("username") or "",
+                        "can_post": e.get("can_post"), "stale": True}
+            missing.append(cid)
+    if missing:
+        _refresh_names_bg(missing)
+    return out
+
+
+def _refresh_names_bg(ids: list):
+    """Resuelve nombres en segundo plano (una sola tarea a la vez)."""
+    global _NAMES_REFRESHING
+    if _NAMES_REFRESHING or not ids:
+        return
+    _NAMES_REFRESHING = True
+
+    async def _run():
+        global _NAMES_REFRESHING
+        try:
+            try:
+                from tvcat.services.userbot_service import get_preferred_client_type
+                ctype = get_preferred_client_type() or "telethon"
+            except Exception:
+                ctype = "telethon"
+            from services.telegram_service import get_telegram_service
+            svc = get_telegram_service()
+            cache = _names_cache_load()
+            now = time.time()
+            for cid in ids[:50]:
+                try:
+                    ent = await svc.get_entity(str(cid), client_type=ctype)
+                    if ent and (ent.get("title") or ent.get("username")):
+                        cache[str(cid)] = {
+                            "name": ent.get("title") or ent.get("username") or "",
+                            "username": ent.get("username") or "",
+                            "can_post": ent.get("can_post"),
+                            "updated_at": now,
+                        }
+                except Exception as e:
+                    print(f"[Indexator] nombre {cid}: {e}", flush=True)
+            _names_cache_save(cache)
+        finally:
+            _NAMES_REFRESHING = False
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_run())
+            return
+    except Exception:
+        pass
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        print(f"[Indexator] refresh nombres: {e}", flush=True)
+        _NAMES_REFRESHING = False
 
 
 # ─── Motor de plantilla (F2) ──────────────────────────────────────────
@@ -165,6 +297,7 @@ _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 
 def _plain_len(s: str) -> int:
     """Longitud visible (sin tags de formato propio)."""
+    s = _html_to_mini(s or "")
     s = _MD_BOLD.sub(r"\1", s)
     s = _MD_ITALIC.sub(r"\1", s)
     s = _MD_CODE.sub(r"\1", s)
@@ -173,13 +306,32 @@ def _plain_len(s: str) -> int:
     return len(s)
 
 
+def _html_to_mini(s: str) -> str:
+    """Convierte HTML básico de plantillas a mini-sintaxis (**/__/`/[]()).
+    Las plantillas por defecto usan <b>; sin esto el tag llegaba literal a Telegram."""
+    if not s or "<" not in s:
+        return s
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
+    s = re.sub(r'<a\s+href="([^"]+)">(.+?)</a>', r"[\2](\1)", s,
+               flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r"<(b|strong)>(.+?)</\1>", r"**\2**", s,
+               flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r"<(i|em)>(.+?)</\1>", r"__\2__", s,
+               flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r"<code>(.+?)</code>", r"`\1`", s,
+               flags=re.IGNORECASE | re.DOTALL)
+    return s
+
+
 def _resolve_entities(text: str):
     """Mini-sintaxis **bold** __italic__ `code` [txt](url) → (texto, entidades MTProto).
 
     Devuelve (clean_text, entities) con offsets sobre el texto limpio.
     Las entidades usan dicts serializables (el llamador las convierte al tipo
     de cliente: telethon MessageEntity* / pyro raw types).
+    Acepta también HTML básico (<b>/<i>/<code>/<a href>) de plantillas.
     """
+    text = _html_to_mini(text or "")
     out = []
     ents = []
 
@@ -311,6 +463,8 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
 
     def _render_entry(tpl: str, t: dict, idx_in_letter: int) -> str:
         title = _norm_text(str(t.get("title") or ""), cfg)
+        # Blindar el markdown del enlace: [ ] ` en títulos romperían el parseo.
+        title_md = title.replace("[", "(").replace("]", ")").replace("`", "'")
         url = _topic_url(channel_id, t.get("id"))
         year = ""
         if "🗓" in str(t.get("title") or ""):
@@ -318,8 +472,8 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
         rep = {
             "{index}": str(idx_in_letter),
             "{global_index}": str(t.get("_gi", "")),
-            "{title}": title,
-            "{title_link}": f"[{title}]({url})",
+            "{title}": title_md,
+            "{title_link}": f"[{title_md}]({url})",
             "{url}": url,
             "{year}": year,
             "{letter}": t.get("_letter", ""),
@@ -340,14 +494,26 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
         # Posición del bloque (se sustituye por las entradas ya renderizadas).
         # La plantilla de entrada viaja en entries_tpl (parámetro); el bloque
         # {entries} solo marca la posición (su contenido se ignora).
+        # Tolerar {entries} sin {/entries}: lo posterior es la plantilla.
         em = re.search(r"\{entries\}.*?\{\/entries\}", inner, re.DOTALL)
+        if em:
+            entries_tpl_use = inner[em.start() + len("{entries}"):em.end() - len("{/entries}")]
+            head_src = inner[:em.start()]
+        else:
+            m2 = re.search(r"\{entries\}", inner)
+            if m2:
+                entries_tpl_use = inner[m2.end():]
+                head_src = inner[:m2.start()]
+            else:
+                entries_tpl_use = entries_tpl
+                head_src = inner
         chunks = []
         for lk in letters_here:
             rendered = []
             for i, t in enumerate(groups[lk], 1):
-                rendered.append(_render_entry(entries_tpl, t, i))
+                rendered.append(_render_entry(entries_tpl_use, t, i))
             # Cabecera de letra: inner hasta el bloque + total (sin duplicar).
-            head = (inner[:em.start()] if em else inner).rstrip("\n")
+            head = head_src.rstrip("\n")
             head = head.replace("{letter}", lk).replace("{total}", str(len(groups[lk])))
             for k, v in _ctx_global().items():
                 head = head.replace("{entries}", "").replace("{%s}" % k, v)
@@ -369,8 +535,19 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
     # Plantilla de entrada: {entries}...{/entries} a nivel de cuerpo.
     # Si el cuerpo NO trae bloque letters pero SÍ entries, las entradas se
     # renderizan con esa plantilla y el resto del cuerpo queda literal.
-    bem = re.search(r"\{entries\}(.*?)\{/entries\}", body, re.DOTALL)
-    entries_tpl = bem.group(1) if bem else "{index}. {title_link}"
+    bem = re.search(r"\{entries\}(.*?)\{\/entries\}", body, re.DOTALL)
+    if bem:
+        entries_tpl = bem.group(1)
+        bem_start, bem_end = bem.start(), bem.end()
+    else:
+        # Tolerar {entries} sin cierre: lo posterior es la plantilla.
+        m2 = re.search(r"\{entries\}", body)
+        if m2:
+            entries_tpl = body[m2.end():]
+            bem_start, bem_end = m2.start(), len(body)
+        else:
+            entries_tpl = "{index}. {title_link}"
+            bem_start = bem_end = None
     has_letters = "{letters}" in body
     # Si no hay bloque letters: un solo grupo con todo (lista simple).
     if not has_letters:
@@ -378,8 +555,8 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
         for lk in order:
             for i, t in enumerate(groups[lk], 1):
                 rendered_all.append(_render_entry(entries_tpl, t, i))
-        if bem:
-            core = (body[:bem.start()] + "\n".join(rendered_all) + body[bem.end():]).replace("{entries}", "")
+        if bem_start is not None:
+            core = (body[:bem_start] + "\n".join(rendered_all) + body[bem_end:]).replace("{entries}", "")
         else:
             core = body + ("\n" if body and not body.endswith("\n") else "") + "\n".join(rendered_all)
         for k, v in _ctx_global().items():
@@ -563,6 +740,7 @@ async def generate_index(request: Request, body: GenerateReq):
     # Topic índice: buscar o crear.
     idx_name = str(cfg.get("index_topic") or "TVCat-Index")
     idx_id = None
+    created = False
     for t in topics:
         if str(t.get("title") or "").strip().lower() == idx_name.strip().lower():
             idx_id = int(t["id"])
@@ -571,15 +749,27 @@ async def generate_index(request: Request, body: GenerateReq):
         if idx_id is None:
             idx_id = await svc.create_forum_topic(str(body.channel_id), idx_name)
             idx_id = int(idx_id) if idx_id else None
+            created = True
     except Exception as e:
         raise HTTPException(502, f"No se pudo crear el topic índice: {e}")
     if not idx_id:
         raise HTTPException(502, "Sin topic índice (¿permisos?)")
-    # Vaciar (DeleteTopicHistory raw; telethon/peers según cliente).
-    try:
-        await _clear_topic(svc, str(body.channel_id), int(idx_id))
-    except Exception as e:
-        raise HTTPException(502, f"No se pudo vaciar el índice (¿permiso de borrado?): {e}")
+    # Vaciar solo si el topic ya existía: recién creado está vacío y el
+    # servicio no confirma el vaciado sobre un topic sin historial.
+    if not created:
+        try:
+            await _clear_topic(svc, str(body.channel_id), int(idx_id))
+        except Exception as e:
+            # DeleteTopicHistory falla también sobre topics VACÍOS (Telegram
+            # devuelve error y el worker resuelve None). Verificar contenido
+            # antes de abortar: vacío -> seguir; con mensajes -> error real.
+            try:
+                _has = await _topic_has_messages(str(body.channel_id), int(idx_id))
+            except Exception:
+                _has = True
+            if _has:
+                raise HTTPException(502, f"No se pudo vaciar el índice (¿permiso de borrado?): {e}")
+            print(f"[Indexator] topic {idx_id} vacío: se omite el vaciado", flush=True)
     # Postear partes.
     posted = []
     try:
@@ -593,39 +783,41 @@ async def generate_index(request: Request, body: GenerateReq):
 
 
 async def _clear_topic(svc, channel_id: str, topic_id: int):
-    """Vacía un topic (DeleteTopicHistory). Nunca toca otros topics."""
-    # Vía pool central con el cliente preferido: intentamos pyro raw y
-    # telethon request; el servicio expone _get_temp_or_pool_client.
-    chan = int(channel_id)
-    # 1) pyro raw
+    """Vacía un topic vía servicio central (con throttle y cliente único).
+    Nunca toca otros topics; el contenedor lo preserva la API."""
     try:
-        from services.userbot_service import get_active_client
-        wrapper = await get_active_client("pyrogram")
-        raw = getattr(wrapper, "_client", None)
-        if raw is not None:
-            from pyrogram.raw import functions as _rf
+        from tvcat.services.userbot_service import get_preferred_client_type
+        ctype = get_preferred_client_type() or "telethon"
+    except Exception:
+        ctype = "telethon"
+    ok = await svc.delete_topic_history(str(channel_id), int(topic_id),
+                                        client_type=ctype)
+    if not ok:
+        raise RuntimeError("El servicio no confirmó el vaciado")
+
+
+async def _topic_has_messages(channel_id: str, topic_id: int) -> bool:
+    """Sonda: ¿el topic tiene mensajes de contenido? Lee como máximo 2
+    mensajes del topic vía el pool (sin desconectar, es compartido).
+    Fail-safe: ante cualquier duda devuelve True (se asume con contenido)."""
+    try:
+        from tvcat.services.userbot_service import get_active_client
+        wrapper = await get_active_client("telethon")
+        client = getattr(wrapper, "_client", wrapper)
+        if not client:
+            return True
+        entity = await client.get_entity(int(channel_id))
+        async for m in client.iter_messages(entity, reply_to=int(topic_id), limit=2):
             try:
-                peer = await raw.resolve_peer(chan)
+                if getattr(m, "action", None) is not None:
+                    continue
+                return True
             except Exception:
-                peer = chan
-            await raw.invoke(_rf.channels.DeleteTopicHistory(
-                channel=peer, top_msg_id=int(topic_id)))
-            return
+                continue
+        return False
     except Exception as e:
-        print(f"[Indexator] DeleteTopicHistory pyro: {e}", flush=True)
-    # 2) telethon request
-    try:
-        from services.userbot_service import get_active_client as _gac2
-        wrapper = await _gac2("telethon")
-        raw = getattr(wrapper, "_client", None)
-        if raw is not None:
-            from telethon.tl.functions.channels import DeleteTopicHistoryRequest
-            await raw(DeleteTopicHistoryRequest(
-                channel=chan, top_msg_id=int(topic_id)))
-            return
-    except Exception as e:
-        print(f"[Indexator] DeleteTopicHistory telethon: {e}", flush=True)
-        raise RuntimeError(f"Sin método de vaciado disponible: {e}")
+        print(f"[Indexator] sonda topic {topic_id}: {e} -> se asume con contenido", flush=True)
+        return True
 
 
 async def _post_part(svc, channel_id: str, topic_id: int, part: dict):
@@ -634,7 +826,8 @@ async def _post_part(svc, channel_id: str, topic_id: int, part: dict):
     images = part.get("images") or []
     entities = part.get("entities") or []
     # El servicio send_* no acepta entidades custom: enviamos markdown
-    # equivalente reconstruido (solo bold/italic/code/link que generamos).
+    # equivalente reconstruido (solo bold/italic/code/link que generamos)
+    # con parse_mode para que Telegram lo renderice (sin él salía literal).
     md = _entities_to_markdown(text, entities)
     if images:
         with open(images[0], "rb") as f:
@@ -642,10 +835,12 @@ async def _post_part(svc, channel_id: str, topic_id: int, part: dict):
         # caption 1024: ya presupuestado en build_parts.
         return await svc.send_photo(str(channel_id), photo_bytes=blob,
                                     caption=md[:CAPTION_LIMIT],
-                                    reply_to_msg_id=int(topic_id))
+                                    reply_to_msg_id=int(topic_id),
+                                    parse_mode="md")
     # En topic: reply al id del topic (los topics direccionan por reply).
     return await svc.send_text(str(channel_id), text=md[:TEXT_LIMIT],
-                               reply_to_msg_id=int(topic_id))
+                               reply_to_msg_id=int(topic_id),
+                               parse_mode="md")
 
 
 def _entities_to_markdown(text: str, entities: list) -> str:
@@ -736,64 +931,164 @@ async def ping():
     }}
 
 
-@router.get("/api/indexator/channels")
-async def list_channels(request: Request):
-    _require_user(request)
-    out = []
-    # Fuentes tgindex (canales con acceso).
-    if _plugin_enabled("tvcat_tgindex"):
-        try:
-            tdir = _plugin_dir("tvcat_tgindex")
-            db = os.path.join(tdir, "data", "tvcat.db")
-            if os.path.isfile(db):
-                conn = sqlite3.connect(db, timeout=10)
-                conn.row_factory = sqlite3.Row
-                cols = [r[1] for r in conn.execute("PRAGMA table_info(tvcat_scanned_channels)").fetchall()]
-                if cols:
-                    sel = []
-                    for want in ("id", "channel_id", "display_name", "title", "name", "topology_type"):
-                        if want in cols:
-                            sel.append(want)
-                    rows = conn.execute(
-                        f"SELECT {', '.join(sel)} FROM tvcat_scanned_channels").fetchall()
-                    for r in rows:
-                        d = dict(r)
-                        out.append({
-                            "kind": "fuente",
-                            "id": f"tgindex:{d.get('id')}",
-                            "name": d.get("display_name") or d.get("title") or d.get("name") or d.get("channel_id"),
-                            "channel_id": str(d.get("channel_id") or ""),
-                            "topology": d.get("topology_type"),
-                        })
-                conn.close()
-        except Exception as e:
-            print(f"[Indexator] canales tgindex: {e}", flush=True)
-    # Destinos TGHirayi_v2.
-    if _plugin_enabled("tvcat_TGHirayi_v2"):
-        try:
-            hdir = _plugin_dir("tvcat_TGHirayi_v2")
-            jf = os.path.join(hdir, "data", "TGHirayi_v2.json")
+def _fallback_channels(name: str) -> list:
+    """Lectura directa conocida (tgindex DB / TGHirayi JSON)."""
+    got = []
+    try:
+        if name == "tvcat_tgindex":
+            # Canales en la DB central (igual que /api/user/channels).
+            from services.catalog_service import get_conn
+            conn = get_conn()
+            conn.row_factory = sqlite3.Row
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(tvcat_scanned_channels)").fetchall()]
+            if cols:
+                sel = []
+                for want in ("id", "channel_id", "display_name", "title", "name", "topology_type"):
+                    if want in cols:
+                        sel.append(want)
+                rows = conn.execute(
+                    f"SELECT {', '.join(sel)} FROM tvcat_scanned_channels").fetchall()
+                for r in rows:
+                    d = dict(r)
+                    got.append({
+                        "name": d.get("display_name") or d.get("title") or d.get("name") or d.get("channel_id"),
+                        "channel_id": str(d.get("channel_id") or ""),
+                        "topology": d.get("topology_type"),
+                    })
+            conn.close()
+        elif name in ("tvcat_TGHirayi_v2", "tvcat_TGHirayi"):
+            jf = os.path.join(_plugins_root(), name, "data",
+                              "TGHirayi_v2.json" if name.endswith("v2") else "TGHirayi.json")
             if os.path.isfile(jf):
                 with open(jf, "r", encoding="utf-8") as f:
                     jd = _json.load(f) or {}
                 for did, d in ((jd.get("destinations") or {}).items()):
                     if not isinstance(d, dict):
                         continue
-                    out.append({
-                        "kind": "destino",
-                        "id": f"tghirayi:{did}",
+                    got.append({
                         "name": d.get("name") or did,
                         "channel_id": str(d.get("channel_id") or ""),
                         "topology": d.get("topology"),
                     })
-        except Exception as e:
-            print(f"[Indexator] destinos tghirayi: {e}", flush=True)
-    missing = []
-    if not _plugin_enabled("tvcat_tgindex"):
-        missing.append("tvcat_tgindex")
-    if not _plugin_enabled("tvcat_TGHirayi_v2"):
-        missing.append("tvcat_TGHirayi_v2")
-    return {"channels": out, "missing": missing}
+    except Exception as e:
+        print(f"[Indexator] fallback {name}: {e}", flush=True)
+    return got
+
+
+@router.get("/api/indexator/channels")
+async def list_channels(request: Request, refresh: int = 0):
+    """Un grupo por channel_id: [channelid] - nombre. Nombres por caché
+    con TTL (se resuelven en segundo plano). refresh=1 fuerza el refresco."""
+    _require_user(request)
+    cfg = {}
+    try:
+        cfg = _load_cfg()
+    except Exception:
+        cfg = {}
+    sel = cfg.get("sources")
+    groups = {}
+    order = []
+
+    def _add(kind, pid, pname, d):
+        cid = str(d.get("channel_id") or "")
+        if not cid:
+            return
+        g = groups.get(cid)
+        if g is None:
+            g = {"channel_id": cid, "kinds": [], "plugins": [],
+                 "topologies": [], "id": f"ch:{cid}"}
+            groups[cid] = g
+            order.append(cid)
+        if kind not in g["kinds"]:
+            g["kinds"].append(kind)
+        if pname not in g["plugins"]:
+            g["plugins"].append(pname)
+        t = d.get("topology")
+        if t is not None and t not in g["topologies"]:
+            g["topologies"].append(t)
+
+    # Fuentes tgindex (canales con acceso).
+    if _plugin_enabled("tvcat_tgindex") and (not sel or "tvcat_tgindex" in sel):
+        got = _channels_via_convention("tvcat_tgindex")
+        if got is None:
+            got = _fallback_channels("tvcat_tgindex")
+        for d in got:
+            _add("fuente", "tgindex", "tvcat_tgindex", d)
+    # Destinos TGHirayi (v2 y v1).
+    for _pname, _pid in (("tvcat_TGHirayi_v2", "tghirayi"),
+                         ("tvcat_TGHirayi", "tghirayi1")):
+        if not _plugin_enabled(_pname):
+            continue
+        if sel and _pname not in sel:
+            continue
+        got = _channels_via_convention(_pname)
+        if got is None:
+            got = _fallback_channels(_pname)
+        for d in got:
+            _add("destino", _pid, _pname, d)
+    try:
+        ttl = float(cfg.get("names_ttl_h") or 1)
+    except Exception:
+        ttl = 1
+    names = _channel_names([c for c in order], ttl_h=ttl, force=bool(refresh))
+    out = []
+    pending = 0
+    for cid in order:
+        g = groups[cid]
+        nm = (names.get(cid) or {}).get("name") or ""
+        stale = bool((names.get(cid) or {}).get("stale"))
+        if stale:
+            pending += 1
+        label = f"[{cid}] - {nm}" if nm else f"[{cid}]"
+        out.append({
+            "id": g["id"],
+            "channel_id": cid,
+            "name": nm or cid,
+            "label": label,
+            "stale": stale,
+            "plugins": g["plugins"],
+            "can_post": (names.get(cid) or {}).get("can_post"),
+        })
+    return {"channels": out, "sources": _sources_state(), "names_pending": pending}
+
+
+@router.get("/api/indexator/sources")
+async def list_sources(request: Request):
+    """Plugins habilitados que aportan canales (fuentes seleccionables)."""
+    _require_user(request)
+    return {"sources": _sources_state()}
+
+
+def _sources_state() -> list:
+    """[{name, display, enabled, channels}] solo aportadores con canales."""
+    cfg = {}
+    try:
+        cfg = _load_cfg()
+    except Exception:
+        cfg = {}
+    sel = cfg.get("sources")
+    out = []
+    for p in _provider_plugins():
+        if not p.get("enabled"):
+            continue
+        ch = _channels_of(p["name"])
+        if not ch:
+            continue
+        out.append({"name": p["name"], "display": p.get("display") or p["name"],
+                    "channels": len(ch),
+                    "selected": True if not sel else (p["name"] in sel)})
+    return out
+
+
+def _channels_of(name: str) -> list:
+    """Canales de un plugin: convención y fallback conocido. Sin excepciones."""
+    try:
+        got = _channels_via_convention(name)
+        if got is None:
+            got = _fallback_channels(name)
+        return [c for c in (got or []) if c.get("channel_id")]
+    except Exception:
+        return []
 
 
 @router.get("/api/indexator/topics")
