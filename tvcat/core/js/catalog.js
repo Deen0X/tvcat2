@@ -6,6 +6,28 @@
     var currentVariantId = null;
     var currentEpisodes = {};
     var currentMediaId = null;
+
+    // Icono del boton de episodios segun cantidad: 1 -> single, N -> list.
+    function epBtnIcon(count) {
+        var single = (count === 1);
+        var file = single ? 'episode_single.png' : 'episode_list.png';
+        var fb = single ? '\uD83C\uDFAA' : '\uD83D\uDCCB';
+        return '<span class="btn-emoji"><img src="/static/' + file + '" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'' + fb + '\'"></span>';
+    }
+    function epBtnCount() {
+        try {
+            if (typeof window._epBtnCount === 'number') return window._epBtnCount;
+            var ce = currentEpisodes[currentMediaId];
+            if (ce && ce.seasons) {
+                var n = 0;
+                for (var s in ce.seasons) {
+                    if (ce.seasons.hasOwnProperty(s)) n += (ce.seasons[s] || []).length;
+                }
+                return n;
+            }
+        } catch (e) {}
+        return 2;
+    }
     var episodesModalWasOpen = false;
     var lastFocusedDetailsAction = null;
 
@@ -1081,7 +1103,8 @@
                     var epBtn = document.createElement('button');
                     epBtn.id = 'btn-episodes';
                     epBtn.className = 'btn-stacked';
-                    epBtn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'\uD83D\uDCCB\'"></span>';
+                    try { window._epBtnCount = (item.episodes || []).length; } catch (e) { window._epBtnCount = 2; }
+                    epBtn.innerHTML = epBtnIcon(window._epBtnCount);
                     epBtn.title = 'Lista de Episodios';
                     epBtn.setAttribute('aria-label', 'Lista de Episodios');
                     epBtn.onclick = function() { Catalog.openEpisodesModal(itemId); };
@@ -2006,7 +2029,7 @@
         var _resetEpBtn = function() {
             if (!btn) return;
             btn.disabled = false;
-            btn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'📋\'"></span>';
+            btn.innerHTML = epBtnIcon(epBtnCount());
             btn.title = 'Lista de Episodios';
             btn.setAttribute('aria-label', 'Lista de Episodios');
         };
@@ -2021,11 +2044,11 @@
         window.API.ajax({
             url: '/api/media/' + id + '/episodes',
             success: function(seasons) {
-                if (btn) { btn.disabled = false; btn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'📋\'"></span>'; btn.title='Lista de Episodios'; btn.setAttribute('aria-label','Lista de Episodios'); }
+                if (btn) { btn.disabled = false; btn.innerHTML = epBtnIcon(epBtnCount()); btn.title='Lista de Episodios'; btn.setAttribute('aria-label','Lista de Episodios'); }
                 _gotSeasons(seasons);
             },
             error: function() {
-                if (btn) { btn.disabled = false; btn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'📋\'"></span>'; btn.title='Lista de Episodios'; btn.setAttribute('aria-label','Lista de Episodios'); }
+                if (btn) { btn.disabled = false; btn.innerHTML = epBtnIcon(epBtnCount()); btn.title='Lista de Episodios'; btn.setAttribute('aria-label','Lista de Episodios'); }
                 grid.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);">Error al cargar episodios</div>';
             }
         });
@@ -2039,7 +2062,7 @@
             var ebtn = document.getElementById('btn-episodes');
             if (ebtn) {
                 ebtn.disabled = false;
-                ebtn.innerHTML = '<span class="btn-emoji"><img src="/static/episode_list.png" style="width:100%;height:100%;object-fit:contain;" onerror="this.outerHTML=\'📋\'"></span>';
+                ebtn.innerHTML = epBtnIcon(epBtnCount());
                 ebtn.title = 'Lista de Episodios';
                 ebtn.setAttribute('aria-label', 'Lista de Episodios');
             }
