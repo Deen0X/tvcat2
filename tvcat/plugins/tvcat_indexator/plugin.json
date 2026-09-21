@@ -1,0 +1,25 @@
+{
+    "name": "tvcat_indexator",
+    "displayName": "Indexator",
+    "description": "Genera índices de topics por canal (topología 3) con plantillas.",
+    "type": "general",
+    "group": "destinos",
+    "version": "0.1.0",
+    "defaultEnabled": true,
+    "icon": "static/plugin_icon.png",
+    "iconEmoji": "🗂️",
+    "js": ["indexator.js?v=20260921a"],
+    "css": [],
+    "tray": [
+        {
+            "id": "open",
+            "label": "Generar índice (Indexator)",
+            "icon": "static/plugin_button.png",
+            "iconEmoji": "🗂️",
+            "color": "#22c55e",
+            "action": "config"
+        }
+    ],
+    "has_interface": false,
+    "access": { "admin": true, "user": true, "child": false }
+}

@@ -186,6 +186,7 @@ class PluginLoader:
                 "settings_ui": data.get("settings_ui", ""),
                 "has_interface": data.get("has_interface", False),
                 "interface_icon": data.get("interface_icon", ""),
+                "group": data.get("group", ""),
                 "tray": data.get("tray", []),
                 "access": data.get("access", {"admin": True, "user": True, "child": False}),
                 "load_error": data.get("load_error"),

@@ -2061,9 +2061,10 @@ function loadSettings() {
 var _pluginListCache = [];
 
 var PLUGIN_SECTIONS = {
-    'source': 'Or\u00EDgenes',
-    'grid-decorator': 'Cat\u00E1logo',
-    'item-decorator': 'Cat\u00E1logo',
+    'source': 'Orígenes',
+    'destinos': 'Destinos',
+    'grid-decorator': 'Catálogo',
+    'item-decorator': 'Catálogo',
     'player': 'Hero Page',
     'heropage-action': 'Hero Page'
 };
@@ -2119,7 +2120,7 @@ function renderPluginList(container, plugins) {
     var sections = {};
     for (var i = 0; i < plugins.length; i++) {
         var p = plugins[i];
-        var section = PLUGIN_SECTIONS[p.type] || p.type;
+        var section = p.group || PLUGIN_SECTIONS[p.type] || p.type;
         if (!sections[section]) sections[section] = [];
         sections[section].push(p);
     }
