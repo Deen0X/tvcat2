@@ -8948,6 +8948,8 @@ async def test_userbot_session(session_id: int, request: Request):
             try:
                 import asyncio as _aio
                 me = await _aio.wait_for(_wraw.get_me(), timeout=20)
+                if me is None:
+                    return {"success": False, "error": "Sesión no autorizada (get_me vacío): el string no es válido o caducó"}
                 return {"success": True, "message": f"Conectado como @{getattr(me, 'username', None) or getattr(me, 'first_name', '')} (pool compartido)"}
             except Exception as e:
                 return {"success": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
@@ -8958,7 +8960,9 @@ async def test_userbot_session(session_id: int, request: Request):
         await client.connect()
         me = await client.get_me()
         await client.disconnect()
-        return {"success": True, "message": f"Conectado como @{me.username or me.first_name}"}
+        if me is None:
+            return {"success": False, "error": "Sesión no autorizada (get_me vacío): el string no es válido o caducó"}
+        return {"success": True, "message": f"Conectado como @{getattr(me, 'username', None) or getattr(me, 'first_name', '')}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -9125,7 +9129,8 @@ async def userbot_strings_save(request: Request):
     if not s or s.get("role") != "admin": raise HTTPException(403)
     from services.userbot_service import (
         build_session_name, save_session, save_telegram_user,
-        get_telegram_user, get_default_telegram_user, test_session_string)
+        get_telegram_user, get_default_telegram_user, test_session_string,
+        parse_session_string)
     body = await request.json()
     try:
         api_id = int(str(body.get("api_id") or "0").strip() or 0)
@@ -9141,9 +9146,19 @@ async def userbot_strings_save(request: Request):
         return {"success": False, "error": "Pega al menos un session string"}
     # Identidad best-effort (no bloquea): si el test en vivo da id, se usa
     # para asociar/crear el usuario; si no, usuario indicado o default.
+    # Además, chequeo offline de formato (no bloquea): detecta cajas
+    # cruzadas o pegados truncados antes de que reclame el cliente.
     warnings = []
     ids = {}
     for k, v in items:
+        p = parse_session_string(v)
+        if p["kind"] == "invalid":
+            warnings.append(f"{k}: formato no reconocido ({p.get('detail', '?')}): "
+                            f"revisa el pegado")
+        elif k == "telethon" and p["kind"] != "telethon":
+            warnings.append(f"{k}: parece {p['kind']}, no telethon (¿cajas cruzadas?)")
+        elif k == "pyrogram" and p["kind"] not in ("pyrogram", "pyrogram-old"):
+            warnings.append(f"{k}: parece {p['kind']}, no pyrogram (¿cajas cruzadas?)")
         try:
             t = await test_session_string(k, v, api_id, api_hash)
         except Exception as e:
