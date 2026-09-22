@@ -128,15 +128,17 @@ class TMDBProvider:
             api_data["api_season_poster"] = _url
             try:
                 import json as _js
-                _all = _js.loads(api_data.get("api_covers_all") or "[]") or []
-                _urls = [_u for _u in [_url] + [c.get("url") for c in _all if isinstance(c, dict)] if _u]
-                seen, _ded = set(), []
-                for _u in _urls:
-                    if _u not in seen:
-                        seen.add(_u)
-                        _ded.append(_u)
-                api_data["api_covers_all"] = _js.dumps(
-                    [{"url": _u, "lang": ""} for _u in _ded[:12]])
+                # El póster de la temporada queda PRIMERO (preview + Obtenida 1),
+                # conservando el idioma de cada carátula para el filtro.
+                _merged = [{"url": _url, "lang": ""}]
+                for _c in (_js.loads(api_data.get("api_covers_all") or "[]") or []):
+                    if isinstance(_c, dict):
+                        _u, _l = _c.get("url"), _c.get("lang") or ""
+                    else:
+                        _u, _l = _c, ""
+                    if _u and _u != _url and all(x["url"] != _u for x in _merged):
+                        _merged.append({"url": _u, "lang": _l})
+                api_data["api_covers_all"] = _js.dumps(_merged[:12])
                 _cov = _js.loads(api_data.get("api_cover") or "[]") or []
                 api_data["api_cover"] = _js.dumps([_url] + [c for c in _cov if c != _url])
             except Exception:

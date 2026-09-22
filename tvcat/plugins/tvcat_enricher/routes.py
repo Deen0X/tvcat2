@@ -306,115 +306,121 @@ async def get_providers(request: Request):
     return {"providers": out}
 
 
-class FtagReq(BaseModel):
-    tag: str
-    template: str
+class CustomTagReq(BaseModel):
+    name: str = ""
+    template: str = ""
+    old_name: str = ""
+    force: bool = False
 
 
-@router.get("/api/enricher/ftags")
-async def get_ftags(request: Request):
-    try:
-        import os, json
-        from pathlib import Path
-        p = Path(__file__).resolve().parents[1] / "tvcat_TGHirayi" / "data" / "cover_tags.json"
-        ftags = {}
-        if p.is_file():
-            try:
-                ftags = json.loads(p.read_text(encoding="utf-8")).get("ftags") or {}
-            except Exception:
-                ftags = {}
-        if not ftags:
-            ftags = {
-                "tagtitle": "{value}",
-                "title": "Title: {value}",
-                "title_en": "Title EN: {value}",
-                "year": "Year: {value}",
-                "release_year": "Year: {value}",
-                "season": "Season: {value}",
-                "temporada": "Season: {value}",
-                "season_episodes": "Season episodes: {value}",
-                "season": "Season: {value}",
-                "temporada": "Season: {value}",
-                "season_episodes": "Season episodes: {value}",
-                "rating": "Rating: {value}",
-                "rating_count": "Rating count: {value}",
-                "genres": "Genres: {value}",
-                "generos": "Genres: {value}",
-                "themes": "Themes: {value}",
-                "temas": "Themes: {value}",
-                "author": "Author: {value}",
-                "autor": "Author: {value}",
-                "director": "Director: {value}",
-                "directores": "Director: {value}",
-                "release_date": "Release date: {value}",
-                "fecha": "Release date: {value}",
-                "category": "Category: {value}",
-                "categoria": "Category: {value}",
-                "id": "ID: {value}",
-                "cover": "Cover: {value}",
-                "episodes": "Episodes: {value}",
-                "ext": "Ext: {value}",
-                "extension": "Ext: {value}",
-                "description": "Description:\n{value}",
-                "sinopsis": "Sinopsis:\n{value}",
-                "overview": "Overview:\n{value}",
-                "originalmsg": "{value}",
-                "original_title": "Original title: {value}",
-                "titulo_original": "Original title: {value}",
-                "title_es": "Title ES: {value}",
-                "titulo_espana": "Title ES: {value}",
-                "title_latam": "Title Latam: {value}",
-                "title_mx": "Title Latam: {value}",
-                "titulo_latino": "Title Latam: {value}",
-                "alt_titles": "Alt titles: {value}",
-                "titulos_alt": "Alt titles: {value}",
-                "cast": "Cast: {value}",
-                "reparto": "Cast: {value}",
-                "actores": "Cast: {value}",
-                "actors": "Cast: {value}",
-            }
-        return {"ftags": ftags}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/api/enricher/ftags")
-async def save_ftag(req: FtagReq, request: Request):
+def _require_admin(request: Request):
     try:
         from services.auth_service import get_session
         sess = get_session(request.cookies.get("tvcat_session", ""))
-        if not sess or sess.get("role") != "admin":
-            if not sess or (sess.get("username","").lower() != "admin" and not sess.get("is_admin")):
-                raise HTTPException(status_code=403, detail="Solo admin")
-    except HTTPException:
-        raise
+        if sess and (sess.get("role") == "admin" or (sess.get("username", "") or "").lower() == "admin" or sess.get("is_admin")):
+            return
     except Exception:
         pass
-    tag = (req.tag or "").strip()
-    if not tag:
-        raise HTTPException(status_code=400, detail="Tag requerido")
-    tag = tag.strip("{} ").lstrip("f").strip()
-    if not tag:
-        raise HTTPException(status_code=400, detail="Tag inválido")
-    import os, json
-    from pathlib import Path
-    p = Path(__file__).resolve().parents[1] / "tvcat_TGHirayi" / "data" / "cover_tags.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    data = {"ftags": {}}
-    if p.is_file():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if "ftags" not in data:
-                data["ftags"] = {}
-        except Exception:
-            data = {"ftags": {}}
-    if req.template is not None:
-        if req.template.strip() == "":
-            data["ftags"].pop(tag, None)
-        else:
-            data["ftags"][tag] = req.template
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True, "tag": tag, "template": req.template}
+    raise HTTPException(status_code=403, detail="Solo admin")
+
+
+def _cover_templates_for_usages():
+    """Plantillas de cover guardadas (para detectar usos en renombres)."""
+    try:
+        import services.enrich_service as _es
+        tpls = _es._load_templates() or {}
+        return tpls.get("templates") or []
+    except Exception:
+        return []
+
+
+@router.get("/api/enricher/custom-tags")
+async def get_custom_tags(request: Request):
+    try:
+        import services.enrich_tags as _et
+    except Exception:
+        import tvcat.services.enrich_tags as _et
+    return {"custom": _et.load_customs()}
+
+
+@router.get("/api/enricher/base-tags")
+async def get_base_tags(request: Request):
+    try:
+        import services.enrich_tags as _et
+    except Exception:
+        import tvcat.services.enrich_tags as _et
+    return {"base": _et.base_tag_names()}
+
+
+@router.put("/api/enricher/custom-tags")
+async def save_custom_tag(req: CustomTagReq, request: Request):
+    """Crea/actualiza un custom. Con old_name distinto => renombre: sin force
+    y con usos devuelve 409 {usages}; con force actualiza referencias."""
+    _require_admin(request)
+    try:
+        import services.enrich_tags as _et
+    except Exception:
+        import tvcat.services.enrich_tags as _et
+    name = (req.name or "").strip()
+    body = req.template or ""
+    old = (req.old_name or "").strip() or name
+    customs = _et.load_customs()
+    if old and old != name and old in customs:
+        # Renombre: comprobar usos antes de tocar nada.
+        usages = _et.find_usages(old, customs, _cover_templates_for_usages())
+        if (usages.get("customs") or usages.get("templates")) and not req.force:
+            raise HTTPException(status_code=409, detail={"usages": usages})
+        ok, err = _et.validate_custom(name, body, {k: v for k, v in customs.items() if k != old})
+        if not ok:
+            raise HTTPException(status_code=400, detail=err)
+        # Actualizar referencias {old} => {name} en customs y plantillas.
+        if req.force:
+            pat = re.compile(r"\{" + re.escape(old) + r"\}")
+            for cn, cb in list(customs.items()):
+                if cn == old:
+                    continue
+                customs[cn] = pat.sub("{" + name + "}", cb or "")
+            try:
+                import services.enrich_service as _es
+                tpls = _es._load_templates() or {}
+                lst = tpls.get("templates") or []
+                touched = False
+                for t in lst:
+                    if isinstance(t, dict) and pat.search(t.get("content") or ""):
+                        t["content"] = pat.sub("{" + name + "}", t.get("content") or "")
+                        touched = True
+                if touched:
+                    _es._save_templates(tpls)
+            except Exception:
+                pass
+        customs.pop(old, None)
+        customs[name] = body
+        _et.save_customs(customs)
+        return {"ok": True, "name": name, "renamed_from": old}
+    ok, err = _et.validate_custom(name, body, customs)
+    if not ok:
+        raise HTTPException(status_code=400, detail=err)
+    customs[name] = body
+    _et.save_customs(customs)
+    return {"ok": True, "name": name}
+
+
+@router.delete("/api/enricher/custom-tags/{name}")
+async def delete_custom_tag(name: str, request: Request, force: bool = False):
+    _require_admin(request)
+    try:
+        import services.enrich_tags as _et
+    except Exception:
+        import tvcat.services.enrich_tags as _et
+    customs = _et.load_customs()
+    if name not in customs:
+        raise HTTPException(status_code=404, detail="No existe")
+    usages = _et.find_usages(name, customs, _cover_templates_for_usages())
+    if (usages.get("customs") or usages.get("templates")) and not force:
+        raise HTTPException(status_code=409, detail={"usages": usages})
+    customs.pop(name, None)
+    _et.save_customs(customs)
+    return {"ok": True, "deleted": name}
 
 
 @router.get("/api/enricher/item/{item_id}")
@@ -709,7 +715,17 @@ async def delete_enriched(item_id: str, request: Request):
     conn.commit()
     deleted = conn.total_changes
     conn.close()
-    return {"ok": True, "deleted": bool(deleted), "channelid_msgid": key}
+    # Volver a cover original: revertir también el título propagado.
+    _rev = {}
+    if deleted:
+        try:
+            from services.enrich_apply import revert_enriched_title as _revt
+            _rev = _revt(item_id) or {}
+        except Exception:
+            pass
+    return {"ok": True, "deleted": bool(deleted), "channelid_msgid": key,
+            "title_reverted": bool((_rev or {}).get("reverted")),
+            "catalog_title": (_rev or {}).get("catalog_title") or ""}
 
 
 # ─── Ediciones locales: listado + bulk (LocalEdits_Implementation_Plan.md) ───
@@ -799,10 +815,12 @@ async def list_local_covers(request: Request):
     _local_session_user(request)
     conn = _conn()
     try:
+        # Orden ALEATORIO como el catálogo (el tope lo aplica el grid con el
+        # máximo configurado; para verificar algo está el buscador).
         rows = [dict(r) for r in conn.execute(
             "SELECT channelid_msgid, item_id, telegram_msg_id, telegram_link,"
             " cover_text, updated_at, author_user_id FROM enriched_covers"
-            " ORDER BY updated_at DESC").fetchall()]
+            " ORDER BY RANDOM()").fetchall()]
     finally:
         try:
             conn.close()
@@ -858,18 +876,38 @@ async def bulk_delete_covers(body: BulkReq, request: Request):
         return {"ok": True, "deleted": 0, "missing": 0}
     conn = _conn()
     deleted = 0
+    done_ids = []
     try:
         for k in keys:
+            r = conn.execute(
+                "SELECT item_id FROM enriched_covers WHERE channelid_msgid=?", (k,)).fetchone()
             cur = conn.execute(
                 "DELETE FROM enriched_covers WHERE channelid_msgid=?", (k,))
-            deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            if cur.rowcount and cur.rowcount > 0:
+                deleted += 1
+                if r and r["item_id"]:
+                    done_ids.append(str(r["item_id"]))
         conn.commit()
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    return {"ok": True, "deleted": deleted, "missing": len(keys) - deleted}
+    # Revertir títulos propagados de las filas eliminadas.
+    reverted = 0
+    try:
+        from services.enrich_apply import revert_enriched_title as _revt
+        for _iid in done_ids:
+            try:
+                _rr2 = _revt(_iid) or {}
+                if _rr2.get("reverted"):
+                    reverted += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {"ok": True, "deleted": deleted, "missing": len(keys) - deleted,
+            "titles_reverted": reverted}
 
 
 @router.post("/api/enricher/bulk_apply")

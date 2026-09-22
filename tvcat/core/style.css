@@ -835,6 +835,7 @@ body.avatar-right .side-menu { transition: right 0.4s cubic-bezier(0.16, 1, 0.3,
 .results-badge {
     font-size: 0.85rem;
     color: var(--text-secondary);
+    margin-left: 12px;
 }
 
 .catalog-grid {

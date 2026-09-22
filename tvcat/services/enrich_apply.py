@@ -221,6 +221,55 @@ def apply_enriched_title(item_id: str, cover_text: str) -> dict:
             "alts_applied": _alts_applied}
 
 
+def revert_enriched_title(item_id: str) -> dict:
+    """Revierte el título/descripción central (y réplica en plugins) a los
+    snapshots orig_* fijados antes del primer enriquecimiento. Para llamar al
+    eliminar la copia local ("Volver a cover original"). Si no hay snapshot
+    útil, no toca nada. Retorna {reverted, catalog_title, reason}."""
+    from services.catalog_service import get_conn as _cc, BASE_DIR as _bd
+    try:
+        _c = _cc()
+        _row = _c.execute(
+            "SELECT title, description, group_title, group_title_flat,"
+            " orig_title, orig_description FROM unified_catalog WHERE item_id=?",
+            (item_id,)).fetchone()
+        if not _row:
+            _c.close()
+            return {"reverted": False, "reason": "sin fila en catálogo"}
+        _ot = (_row["orig_title"] or "").strip()
+        _od = (_row["orig_description"] or "").strip()
+        if not _ot or _ot == (_row["title"] or "").strip():
+            _c.close()
+            return {"reverted": False, "reason": "sin snapshot previo útil"}
+        _flat = _re.sub(r"[^a-zA-Z0-9]", "", _ot).lower()
+        _c.execute("UPDATE unified_catalog SET title=?, description=?,"
+                   " group_title=?, group_title_flat=? WHERE item_id=?",
+                   (_ot, _od, _ot, _flat, item_id))
+        _c.commit()
+        _c.close()
+        print(f" [Enricher] título revertido a '{_ot}' ({item_id})", flush=True)
+    except Exception as _e:
+        print(f" [Enricher] revert error (central): {_e}")
+        return {"reverted": False, "reason": str(_e)[:120]}
+    try:
+        for _pdb in _g.glob(_os.path.join(_bd, "plugins", "*", "data", "tvcat.db")):
+            try:
+                _pc = _sq.connect(_pdb, timeout=10)
+                _pr = _pc.execute("SELECT title FROM unified_catalog WHERE item_id=?",
+                                  (item_id,)).fetchone()
+                if _pr:
+                    _pc.execute("UPDATE unified_catalog SET title=?, description=?,"
+                                " group_title=?, group_title_flat=? WHERE item_id=?",
+                                (_ot, _od, _ot, _flat, item_id))
+                    _pc.commit()
+                _pc.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {"reverted": True, "catalog_title": _ot}
+
+
 def reapply_all_enriched() -> dict:
     """Repasa la base con TODOS los covers guardados localmente (título +
     variantes). Para llamar al final de rebuild_cache(). Idempotente:

@@ -931,65 +931,199 @@ function loadUserbotConfig() {
         });
     };
 
-    window.loadFtags = function() {
-        var sel = document.getElementById('ftag-tag-select');
-        var input = document.getElementById('ftag-template');
-        if (!sel || !input) return;
+    window._ctCache = { custom: {}, base: [] };
+    window.loadCustomTags = function() {
+        var sel = document.getElementById('ctag-select');
+        if (!sel) return;
+        var status = document.getElementById('ctag-status');
+        var gotCustom = null, gotBase = null;
+        var done = function() {
+            if (!gotCustom || !gotBase) return;
+            window._ctCache = { custom: gotCustom, base: gotBase };
+            var keys = Object.keys(gotCustom).sort();
+            sel.innerHTML = '';
+            for (var k = 0; k < keys.length; k++) {
+                var o = document.createElement('option');
+                o.value = keys[k]; o.textContent = '{' + keys[k] + '}';
+                sel.appendChild(o);
+            }
+            var n = document.createElement('option');
+            n.value = '__new__'; n.textContent = '+ Nuevo custom…';
+            sel.appendChild(n);
+            if (keys.length) { sel.value = keys[0]; }
+            else { sel.value = '__new__'; }
+            window.onCustomTagSelect();
+            window.renderCustomTagPicker();
+        };
         window.API.ajax({
-            url: '/api/enricher/ftags',
-            success: function(data) {
-                var ftags = data.ftags || data || {};
-                var keys = Object.keys(ftags).sort();
-                var defaults = ["tagtitle","title","title_en","year","release_year","season","temporada","season_episodes","rating","rating_count","genres","generos","themes","temas","author","autor","director","release_date","fecha","category","categoria","id","cover","episodes","ext","extension","description","sinopsis","overview","originalmsg"];
-                for (var i=0;i<defaults.length;i++) if (keys.indexOf(defaults[i])===-1) keys.push(defaults[i]);
-                keys.sort();
-                sel.innerHTML = '';
-                for (var k=0;k<keys.length;k++){
-                    var o=document.createElement('option'); o.value=keys[k]; o.textContent='{' + keys[k] + '} → {f' + keys[k] + '}';
-                    sel.appendChild(o);
+            url: '/api/enricher/custom-tags',
+            success: function(data) { gotCustom = (data && data.custom) || {}; done(); },
+            error: function() { gotCustom = {}; if (status) status.textContent = 'Error cargando customs'; done(); }
+        });
+        window.API.ajax({
+            url: '/api/enricher/base-tags',
+            success: function(data) { gotBase = (data && data.base) || []; done(); },
+            error: function() { gotBase = []; done(); }
+        });
+    };
+    window.loadFtags = window.loadCustomTags;
+    window.onCustomTagSelect = function() {
+        var sel = document.getElementById('ctag-select');
+        var nameEl = document.getElementById('ctag-name');
+        var tplEl = document.getElementById('ctag-template');
+        if (!sel || !nameEl || !tplEl) return;
+        if (sel.value === '__new__') {
+            nameEl.value = ''; tplEl.value = '';
+            try { nameEl.focus(); } catch (e) {}
+        } else {
+            nameEl.value = sel.value;
+            tplEl.value = (window._ctCache.custom || {})[sel.value] || '';
+        }
+        sel.setAttribute('data-old', sel.value === '__new__' ? '' : sel.value);
+        window.renderCustomTagPicker();
+    };
+    window.onFtagSelect = window.onCustomTagSelect;
+    window.newCustomTag = function() {
+        var sel = document.getElementById('ctag-select');
+        if (sel) { sel.value = '__new__'; window.onCustomTagSelect(); }
+    };
+    // Nombres que alcanzarían al custom editado (él mismo + los que lo
+    // referencian transitivamente): se deshabilitan en el picker.
+    window._ctBlockedFor = function(editName) {
+        var blocked = {}, customs = window._ctCache.custom || {};
+        var refs = function(body) {
+            var out = [], m, re = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+            try { while ((m = re.exec(body || ''))) out.push(m[1]); } catch (e) {}
+            return out;
+        };
+        if (editName) blocked[editName] = true;
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (var cn in customs) {
+                if (blocked[cn]) continue;
+                var rs = refs(customs[cn]);
+                for (var i = 0; i < rs.length; i++) {
+                    if (blocked[rs[i]]) { blocked[cn] = true; changed = true; break; }
                 }
-                if (keys.length) { sel.value=keys[0]; window.onFtagSelect(); }
+            }
+        }
+        return blocked;
+    };
+    window.renderCustomTagPicker = function() {
+        var box = document.getElementById('ctag-picker');
+        var nameEl = document.getElementById('ctag-name');
+        if (!box) return;
+        var editName = nameEl ? (nameEl.value || '').trim() : '';
+        var blocked = window._ctBlockedFor(editName);
+        var customs = window._ctCache.custom || {};
+        var base = window._ctCache.base || [];
+        var html = '';
+        var ckeys = Object.keys(customs).sort();
+        for (var i = 0; i < ckeys.length; i++) {
+            var cn = ckeys[i];
+            var dis = blocked[cn] ? 'disabled style="opacity:0.35;cursor:not-allowed;" title="Generaría referencia cíclica"' : 'title="Custom: {' + cn + '}"';
+            html += '<button ' + dis + ' data-tag="' + cn + '" style="font-size:0.7rem;padding:2px 8px;border-radius:10px;border:1px solid var(--accent);background:rgba(225,29,72,0.12);color:var(--text);cursor:pointer;">{' + cn + '}</button>';
+        }
+        for (var b = 0; b < base.length; b++) {
+            html += '<button data-tag="' + base[b] + '" title="Tag base: {' + base[b] + '}" style="font-size:0.7rem;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">{' + base[b] + '}</button>';
+        }
+        box.innerHTML = html || '<span style="font-size:0.7rem;">Sin tags</span>';
+        var btns = box.querySelectorAll('button[data-tag]');
+        for (var q = 0; q < btns.length; q++) {
+            if (btns[q].disabled) continue;
+            btns[q].onclick = function() {
+                var tag = this.getAttribute('data-tag');
+                var tplEl = document.getElementById('ctag-template');
+                if (!tplEl || !tag) return;
+                var s = tplEl.selectionStart || tplEl.value.length, e = tplEl.selectionEnd || s;
+                tplEl.value = tplEl.value.substring(0, s) + '{' + tag + '}' + tplEl.value.substring(e);
+                tplEl.focus();
+            };
+        }
+    };
+    window.toggleCustomTagPicker = function() {
+        var box = document.getElementById('ctag-picker');
+        if (!box) return;
+        if (box.style.display === 'none' || !box.style.display) {
+            window.renderCustomTagPicker();
+            box.style.display = 'flex';
+        } else {
+            box.style.display = 'none';
+        }
+    };
+    window.saveCustomTag = function(force) {
+        var sel = document.getElementById('ctag-select');
+        var nameEl = document.getElementById('ctag-name');
+        var tplEl = document.getElementById('ctag-template');
+        var status = document.getElementById('ctag-status');
+        if (!sel || !nameEl || !tplEl) return;
+        var name = (nameEl.value || '').trim();
+        var old = sel.getAttribute('data-old') || '';
+        if (!name) { if (status) status.textContent = 'Pon un nombre'; return; }
+        if (status) status.textContent = 'Guardando...';
+        window.API.ajax({
+            method: 'PUT',
+            url: '/api/enricher/custom-tags',
+            data: { name: name, template: tplEl.value || '', old_name: old, force: !!force },
+            success: function() {
+                if (status) { status.textContent = 'Guardado ✓'; setTimeout(function() { if (status) status.textContent = ''; }, 2000); }
+                window.loadCustomTags();
             },
-            error: function(){
-                var defaults = ["tagtitle","title","year","rating","genres","author","description","originalmsg"];
-                sel.innerHTML = '';
-                for (var k=0;k<defaults.length;k++){
-                    var o=document.createElement('option'); o.value=defaults[k]; o.textContent='{' + defaults[k] + '} → {f' + defaults[k] + '}';
-                    sel.appendChild(o);
-                }
+            error: function(status, resp) {
+                var msg = 'Error al guardar';
+                try {
+                    var b = JSON.parse(resp || '{}');
+                    var d = b.detail || {};
+                    if (status === 409 && d.usages) {
+                        var u = d.usages, parts = [];
+                        if (u.customs && u.customs.length) parts.push('customs: ' + u.customs.join(', '));
+                        if (u.templates && u.templates.length) parts.push('plantillas: ' + u.templates.join(', '));
+                        if (confirm('"' + old + '" se usa en ' + parts.join(' + ') + '. ¿Actualizar referencias a "' + name + '"?')) {
+                            window.saveCustomTag(true);
+                            return;
+                        }
+                        msg = 'Cancelado (usa "Guardar como nuevo" cambiando el nombre)';
+                    } else if (typeof d === 'string' && d) {
+                        msg = d;
+                    } else if (b.detail && typeof b.detail === 'string') {
+                        msg = b.detail;
+                    }
+                } catch (e) {}
+                if (status) status.textContent = msg;
             }
         });
     };
-    window.onFtagSelect = function() {
-        var sel = document.getElementById('ftag-tag-select');
-        var input = document.getElementById('ftag-template');
-        var status = document.getElementById('ftag-status');
-        if (!sel || !input) return;
-        var tag = sel.value;
+    window.saveFtag = window.saveCustomTag;
+    window.deleteCustomTag = function(force) {
+        var sel = document.getElementById('ctag-select');
+        var status = document.getElementById('ctag-status');
+        if (!sel || sel.value === '__new__') return;
+        var name = sel.value;
+        if (!force && !confirm('¿Eliminar el custom "{' + name + '}"?')) return;
         window.API.ajax({
-            url: '/api/enricher/ftags',
-            success: function(data){
-                var ftags = data.ftags || data || {};
-                input.value = ftags[tag] || '';
-                if (status) status.textContent='';
+            method: 'DELETE',
+            url: '/api/enricher/custom-tags/' + encodeURIComponent(name) + (force ? '?force=true' : ''),
+            success: function() {
+                if (status) status.textContent = 'Eliminado ✓';
+                window.loadCustomTags();
+            },
+            error: function(status, resp) {
+                try {
+                    var b = JSON.parse(resp || '{}');
+                    var d = b.detail || {};
+                    if (status === 409 && d.usages) {
+                        var u = d.usages, parts = [];
+                        if (u.customs && u.customs.length) parts.push('customs: ' + u.customs.join(', '));
+                        if (u.templates && u.templates.length) parts.push('plantillas: ' + u.templates.join(', '));
+                        if (confirm('"' + name + '" se usa en ' + parts.join(' + ') + '. ¿Eliminar igualmente?')) {
+                            window.deleteCustomTag(true);
+                            return;
+                        }
+                    }
+                } catch (e) {}
+                if (status) status.textContent = 'No eliminado';
             }
-        });
-    };
-    window.saveFtag = function() {
-        var sel = document.getElementById('ftag-tag-select');
-        var input = document.getElementById('ftag-template');
-        var status = document.getElementById('ftag-status');
-        if (!sel || !input) return;
-        var tag = sel.value;
-        var tpl = input.value;
-        if (!tag) return;
-        if (status) status.textContent='Guardando...';
-        window.API.ajax({
-            method: 'POST',
-            url: '/api/enricher/ftags',
-            data: { tag: tag, template: tpl },
-            success: function(){ if(status) status.textContent='Guardado ✓'; setTimeout(function(){ if(status) status.textContent=''; },2000); },
-            error: function(){ if(status) status.textContent='Error al guardar'; }
         });
     };
 
@@ -6026,6 +6160,11 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         console.log('[TVCAT2] App lista');
+
+        // Visibilidad de secciones condicionales del sidebar (ruta de
+        // arranque garantizada; loadSettings puede no correr aquí).
+        try { if (window.refreshHiddenNav) window.refreshHiddenNav(); } catch (eHN) {}
+        try { if (window.refreshLocalEditsNav) window.refreshLocalEditsNav(); } catch (eLN) {}
 
         // Polling del estado de reconstrucción de la caché central (arranque asíncrono).
         // Si la reconstrucción aún está en curso cuando la web ya cargó, se refresca el catálogo al terminar.

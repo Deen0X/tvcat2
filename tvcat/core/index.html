@@ -649,20 +649,33 @@
                             <span id="enrich-behavior-status" style="font-size:0.7rem;color:var(--text-secondary);"></span>
                         </div>
                     </div>
-                    <!-- Editor de f-tags -->
+                    <!-- Editor de custom tags -->
                     <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden;">
                         <div style="padding:10px 12px;background:var(--bg-card);display:flex;align-items:center;justify-content:space-between;">
-                            <h4 style="margin:0;font-size:0.85rem;">Formato de f-tags</h4>
-                            <span style="font-size:0.7rem;color:var(--text-secondary);">{value} es el dato crudo</span>
+                            <h4 style="margin:0;font-size:0.85rem;">Custom tags</h4>
+                            <span style="font-size:0.7rem;color:var(--text-secondary);">sin {value}: referencia explícita {tag}</span>
                         </div>
                         <div style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
-                            <div style="font-size:0.7rem;color:var(--text-secondary);">Tag crudo <code>{title}</code> → ftag formateado <code>{ftitle}</code> (ej: <code>Title: {value}</code>). Vacío no genera línea.</div>
+                            <div style="font-size:0.7rem;color:var(--text-secondary);">Custom <code>{specialseason}</code> = plantilla con otros tags (ej: <code> - Season {temporada}</code>). Si algún tag referenciado está vacío, el custom entero da vacío. <code>\n</code> para saltos (sin salto automático). Nombres únicos (no igual a tags base ni a otros customs).</div>
                             <div style="display:flex;gap:6px;align-items:center;">
-                                <select id="ftag-tag-select" class="variant-select" style="flex:0 0 160px;padding:6px 8px;font-size:0.8rem;" onchange="onFtagSelect()"></select>
-                                <input type="text" id="ftag-template" placeholder="Ej: Title: {value}" class="settings-input" style="flex:1;padding:6px 8px;font-size:0.8rem;">
-                                <button class="btn-secondary" onclick="saveFtag()" style="padding:6px 12px;font-size:0.8rem;">Guardar</button>
+                                <select id="ctag-select" class="variant-select" style="flex:1;padding:6px 8px;font-size:0.8rem;min-width:0;" onchange="onCustomTagSelect()"></select>
+                                <button class="btn-secondary" onclick="newCustomTag()" style="padding:6px 12px;font-size:0.8rem;white-space:nowrap;">+ Nuevo</button>
+                                <button class="btn-secondary" onclick="deleteCustomTag()" style="padding:6px 12px;font-size:0.8rem;white-space:nowrap;">Eliminar</button>
                             </div>
-                            <span id="ftag-status" style="font-size:0.7rem;color:var(--text-secondary);"></span>
+                            <div style="display:flex;gap:6px;align-items:center;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:52px;">Nombre:</label>
+                                <input type="text" id="ctag-name" placeholder="specialseason" class="settings-input" style="flex:1;padding:6px 8px;font-size:0.8rem;min-width:0;">
+                            </div>
+                            <div style="display:flex;gap:6px;align-items:flex-start;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:52px;padding-top:6px;">Formato:</label>
+                                <textarea id="ctag-template" rows="3" placeholder="Ej:  - Season {temporada}" class="settings-input" style="flex:1;padding:6px 8px;font-size:0.8rem;min-width:0;resize:vertical;"></textarea>
+                                <button class="btn-secondary" onclick="toggleCustomTagPicker()" title="Insertar tag en el cursor" style="padding:6px 12px;font-size:0.8rem;white-space:nowrap;">＋ tag</button>
+                            </div>
+                            <div id="ctag-picker" style="display:none;flex-wrap:wrap;gap:4px;max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:6px;"></div>
+                            <div style="display:flex;gap:6px;align-items:center;">
+                                <button class="btn-secondary" onclick="saveCustomTag()" style="padding:6px 12px;font-size:0.8rem;">Guardar</button>
+                                <span id="ctag-status" style="font-size:0.7rem;color:var(--text-secondary);"></span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -942,9 +955,9 @@
     <script src="js/assistants.js?v=20260910a"></script>    <script src="js/navEngine.js?v=20260801"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
     <script src="js/inputHelper.js?v=20260903q"></script>
-    <script src="js/catalog.js?v=20260922a"></script>
+    <script src="js/catalog.js?v=20260922e"></script>
     <script src="js/player.js?v=20260801"></script>
     <script src="js/ui2.js?v=20260910b"></script>
-    <script src="js/app.js?v=20260922e"></script>
+    <script src="js/app.js?v=20260922f"></script>
 </body>
 </html>

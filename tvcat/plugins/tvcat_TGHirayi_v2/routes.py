@@ -6315,206 +6315,20 @@ def _sanitize_file_title(file_name: str) -> tuple:
     return (name, ext)
 
 
-def _load_cover_tags() -> dict:
-    """Carga el fichero editable de plantillas de f-tags (data/cover_tags.json).
-    Cada f-tag define una plantilla con {value} como marcador del dato."""
-    _DEFAULT_FTAGS = {
-        "tagtitle": "{value}",
-        "title": "Title: {value}",
-        "original_title": "Original title: {value}",
-        "titulo_original": "Original title: {value}",
-        "title_es": "Title ES: {value}",
-        "titulo_espana": "Title ES: {value}",
-        "title_latam": "Title Latam: {value}",
-        "title_mx": "Title Latam: {value}",
-        "titulo_latino": "Title Latam: {value}",
-        "alt_titles": "Alt titles: {value}",
-        "titulos_alt": "Alt titles: {value}",
-        "cast": "Cast: {value}",
-        "reparto": "Cast: {value}",
-        "actores": "Cast: {value}",
-        "actors": "Cast: {value}",
-        "year": "Year: {value}",
-        "release_year": "Year: {value}",
-        "rating": "Rating: {value}",
-        "rating_count": "Rating count: {value}",
-        "genres": "Genres: {value}",
-        "generos": "Genres: {value}",
-        "themes": "Themes: {value}",
-        "temas": "Themes: {value}",
-        "author": "Author: {value}",
-        "autor": "Author: {value}",
-        "director": "Director: {value}",
-        "directores": "Director: {value}",
-        "release_date": "Release date: {value}",
-        "fecha": "Release date: {value}",
-        "category": "Category: {value}",
-        "categoria": "Category: {value}",
-        "id": "ID: {value}",
-        "cover": "Cover: {value}",
-        "episodes": "Episodes: {value}",
-        "season": "Season: {value}",
-        "temporada": "Season: {value}",
-        "season_episodes": "Season episodes: {value}",
-        "ext": "Ext: {value}",
-        "extension": "Ext: {value}",
-        "description": "Description:\n{value}",
-        "sinopsis": "Sinopsis:\n{value}",
-        "overview": "Overview:\n{value}",
-    }
-    try:
-        cfg_path = os.path.join(_DATA_DIR, "cover_tags.json")
-        if os.path.isfile(cfg_path):
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            ftags = cfg.get("ftags") or {}
-        else:
-            ftags = {}
-    except Exception as e:
-        print(f"[TGHirayi_v2] Error leyendo cover_tags.json: {e}", flush=True)
-        ftags = {}
-    merged = dict(_DEFAULT_FTAGS)
-    for k, v in ftags.items():
-        if isinstance(v, str):
-            merged[k] = v
-    return merged
-
-
-def _cover_tag_values(title: str, total_episodes: int, details: dict) -> dict:
-    """Construye el mapa de valores de los tags del cover a partir del job y del detalle del enriquecedor."""
-    details = details or {}
-
-    def _num(v):
-        if v is None:
-            return ""
-        try:
-            return str(round(float(v), 1))
-        except Exception:
-            return ""
-
-    def _json_list(v):
-        if not v:
-            return ""
-        if isinstance(v, str):
-            try:
-                v = json.loads(v)
-            except Exception:
-                return ""
-        if isinstance(v, list):
-            return ", ".join(str(x) for x in v)
-        return ""
-
-    year = str(details.get("api_year") or details.get("api_release_date") or "")
-    rating = _num(details.get("api_rating"))
-    rating_line = ("★ " + rating) if rating else ""
-    genres = _json_list(details.get("api_genres"))
-    themes = _json_list(details.get("api_themes"))
-    author = str(details.get("api_author") or "")
-    director = str(details.get("api_director") or author)
-    release_date = str(details.get("api_release_date") or "")
-    description = str(details.get("api_description") or "")
-    cover = _json_list(details.get("api_cover"))
-    episodes = str(int(total_episodes or 0)) if (total_episodes or 0) > 0 else ""
-    season = str(details.get("api_season_number") if details.get("api_season_number") is not None else (details.get("api_seasons") or ""))
-    season_episodes = str(details.get("api_season_episodes") or "")
-    original_title = str(details.get("api_original_title") or "")
-    title_es = str(details.get("api_title_es") or "")
-    title_latam = str(details.get("api_title_latam") or "")
-    alt_titles = _json_list(details.get("api_alt_titles"))
-    cast = _json_list(details.get("api_cast"))
-
-    tagtitle = _sanitize_title_tag(details.get("api_title") or title)
-
-    return {
-        "tagtitle": tagtitle,
-        "title": str(details.get("api_title") or title or ""),
-        "original_title": original_title,
-        "titulo_original": original_title,
-        "title_es": title_es,
-        "titulo_espana": title_es,
-        "title_latam": title_latam,
-        "title_mx": title_latam,
-        "titulo_latino": title_latam,
-        "alt_titles": alt_titles,
-        "titulos_alt": alt_titles,
-        "cast": cast,
-        "reparto": cast,
-        "actores": cast,
-        "actors": cast,
-        "year": year,
-        "release_year": year,
-        "rating": rating_line,
-        "rating_count": str(details.get("api_rating_count") or ""),
-        "genres": genres,
-        "generos": genres,
-        "themes": themes,
-        "temas": themes,
-        "author": author,
-        "autor": author,
-        "director": director,
-        "directores": director,
-        "release_date": release_date,
-        "fecha": release_date,
-        "category": str(details.get("api_category") or ""),
-        "categoria": str(details.get("api_category") or ""),
-        "id": str(details.get("api_id") or ""),
-        "cover": cover,
-        "description": description,
-        "sinopsis": description,
-        "overview": description,
-        "episodes": episodes,
-        "season": season,
-        "temporada": season,
-        "season_episodes": season_episodes,
-        "ext": "",
-        "extension": "",
-    }
-
-
 def _resolve_cover_tags(text: str, title: str, total_episodes: int, details: dict = None) -> str:
     """Resuelve los tags del texto del cover.
 
-    Todos los tags ({title}, {ftitle}, {themes}, {fthemes}, ...) usan el formato
-    definido en el fichero editable data/cover_tags.json usando {value} como
-    marcador del dato. El prefijo 'f' es opcional: {key} y {fkey} son equivalentes.
-    Si un tag no tiene dato, no se emite (se elimina su línea).
-    {tagtitle} / {ftagtitle} solo se emiten si existe {title} o {ftitle} en el texto.
+    Motor unificado CORE (services/enrich_tags): customs + base con
+    resolución recursiva, vacío contagioso y ciclos por visited-set.
+    Se mantiene la firma por compatibilidad.
     """
     if not text:
         return text
-    # El título se considera presente si existe {title} o {ftitle} en el texto
-    has_title = ("{title}" in text) or ("{ftitle}" in text)
-    values = _cover_tag_values(title, total_episodes, details)
-    ftags = _load_cover_tags()
-    out = text
-
-    # Resolver todos los tags: {k} -> valor crudo, {fk} -> valor formateado (cover_tags.json)
-    for k, tpl in ftags.items():
-        val = values.get(k, "")
-        raw_val = val
-        rendered = tpl.replace("{value}", val) if val else ""
-        if k == "tagtitle":
-            # tagtitle solo si el título está presente en el texto
-            if not has_title:
-                raw_val = ""
-                rendered = ""
-        # Forma cruda {k} -> valor sin formato
-        raw_form = "{" + k + "}"
-        if raw_form in out:
-            if raw_val:
-                out = out.replace(raw_form, raw_val + "\n")
-            else:
-                out = out.replace(raw_form, "")
-        # Forma formateada {fk} -> con plantilla de cover_tags.json
-        f_form = "{f" + k + "}"
-        if f_form in out:
-            if rendered:
-                out = out.replace(f_form, rendered + "\n")
-            else:
-                out = out.replace(f_form, "")
-
-    out = re.sub(r'\n{3,}', '\n\n', out)
-    return out.strip()
+    try:
+        from services.enrich_tags import resolve_cover as _rc
+    except Exception:
+        from tvcat.services.enrich_tags import resolve_cover as _rc
+    return _rc(text, title or "", total_episodes or 0, details or {})
 
 
 _SIMPLE_TAG_NAMES = (
@@ -6532,8 +6346,12 @@ _SIMPLE_TAG_NAMES = (
 def _debug_cover_tags(text: str, title: str, total_episodes: int, details: dict = None) -> list:
     """Diagnóstico por tag: nº, nombre, valor resuelto (o 'vacío') y si tiene dato.
     Sirve para ver en el editor qué tags resuelven y cuáles quedan vacíos."""
-    values = _cover_tag_values(title, total_episodes, details)
-    ftags = _load_cover_tags()
+    try:
+        from services.enrich_tags import get_base_tags as _gbt, load_customs as _lc
+    except Exception:
+        from tvcat.services.enrich_tags import get_base_tags as _gbt, load_customs as _lc
+    values = _gbt(title, total_episodes, details or {})
+    customs = _lc()
     has_title = ("{title}" in text) or ("{ftitle}" in text)
     tag = _sanitize_title_tag(title)
 
@@ -6558,13 +6376,19 @@ def _debug_cover_tags(text: str, title: str, total_episodes: int, details: dict 
         if "{" + k + "}" in text:
             _add(k, values.get(k, ""))
 
-    # Tags con 'f' presentes
-    for k, tpl in ftags.items():
-        ftag = "{f" + k + "}"
+    # Customs presentes (resueltos)
+    try:
+        from services.enrich_tags import resolve as _rs
+    except Exception:
+        from tvcat.services.enrich_tags import resolve as _rs
+    for k in customs:
+        ftag = "{" + k + "}"
         if ftag not in text:
             continue
-        val = values.get(k, "")
-        _add(k, val)
+        try:
+            _add(k, _rs(ftag, values, customs))
+        except Exception:
+            _add(k, "")
 
     return lines
 

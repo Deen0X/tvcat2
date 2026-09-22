@@ -188,7 +188,8 @@
         html += '<label style="font-size:0.75rem;color:#a1a1aa;display:block;">Caption (editable, con tags del enriquecedor)</label>';
         html += '<span style="display:flex;gap:4px;align-items:center;">';
         html += '<button id="enricher-copy-title" title="Copiar topic formateado (Title🗓Year)" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Title</button>';
-        html += '<button id="enricher-copy-image" title="Copiar la imagen actual al portapapeles" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Image</button>';
+        html += '<button id="enricher-copy-title-season" title="Copiar topic con temporada (Título - Season X🗓AAAA)" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">TitleSeason</button>';
+        html += '<button id="enricher-copy-image" title="Copiar la URL de la imagen actual" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Image</button>';
         html += '<button id="enricher-copy-desc" title="Copiar la descripción actual al portapapeles" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Desc</button>';
         html += '<button id="enricher-tags-btn" style="padding:4px 8px;font-size:0.7rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;white-space:nowrap;">Tags ▾</button>';
         html += '</span></div>';
@@ -238,68 +239,33 @@
             if (!t) { setStatus('Sin topic todavía (aplica la plantilla primero)', true); return; }
             copyText(t, 'Topic copiado: ' + t);
         };
-        // Image: la imagen actual al portapapeles COMO IMAGEN (binario PNG).
+        // TitleSeason: igual + " - Season X" si hay temporada (Título - Season X🗓AAAA).
+        var _cpTitleS = document.getElementById('enricher-copy-title-season');
+        if (_cpTitleS) _cpTitleS.onclick = function() {
+            var t = currentTopicSeasonName();
+            if (!t) { setStatus('Sin topic todavía (aplica la plantilla primero)', true); return; }
+            copyText(t, 'Topic copiado: ' + t);
+        };
+        // Image: la URL de la imagen actual como texto (el blob binario no se
+        // puede copiar al portapapeles en HTTP/CORS).
         var _cpImg = document.getElementById('enricher-copy-image');
         if (_cpImg) _cpImg.onclick = function() {
-            var img = document.getElementById('enricher-img');
-            var src = (img && img.src) || '';
-            if (!src) { setStatus('Sin imagen actual', true); return; }
-            if (!navigator.clipboard || !navigator.clipboard.write) {
-                setStatus('Portapapeles de imágenes no disponible (usa localhost/HTTPS)', true);
-                return;
+            var url = selectedPosterUrl || '';
+            if (!url || url.indexOf('http') !== 0) {
+                try {
+                    var det = selectedDetails || {};
+                    var cl = det.api_cover;
+                    if (typeof cl === 'string') { try { cl = JSON.parse(cl); } catch (e) { cl = [cl]; } }
+                    if (cl && cl.length) url = cl[0] || '';
+                } catch (e) {}
             }
-            if (typeof ClipboardItem === 'undefined') {
-                setStatus('ClipboardItem no soportado por este navegador', true);
-                return;
+            if (!url || url.indexOf('http') !== 0) {
+                var img = document.getElementById('enricher-img');
+                var src = (img && img.src) || '';
+                if (src && src.indexOf('http') === 0) url = src;
             }
-            setStatus('Copiando imagen…');
-            fetch(src, { mode: 'cors', credentials: 'same-origin' }).then(function(r) {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                return r.blob();
-            }).then(function(blob) {
-                function toPng(b, cb) {
-                    try {
-                        var url = URL.createObjectURL(b);
-                        var loader = new Image();
-                        loader.onload = function() {
-                            try {
-                                var cv = document.createElement('canvas');
-                                cv.width = loader.naturalWidth || 1;
-                                cv.height = loader.naturalHeight || 1;
-                                cv.getContext('2d').drawImage(loader, 0, 0);
-                                URL.revokeObjectURL(url);
-                                cv.toBlob(cb, 'image/png');
-                            } catch (e) { cb(null); }
-                        };
-                        loader.onerror = function() { URL.revokeObjectURL(url); cb(null); };
-                        loader.src = url;
-                    } catch (e) { cb(null); }
-                }
-                // createImageBitmap es más directo; canvas como respaldo.
-                if (typeof createImageBitmap === 'function') {
-                    createImageBitmap(blob).then(function(bmp) {
-                        try {
-                            var cv = document.createElement('canvas');
-                            cv.width = bmp.width; cv.height = bmp.height;
-                            cv.getContext('2d').drawImage(bmp, 0, 0);
-                            if (bmp.close) bmp.close();
-                            cv.toBlob(function(pb) { writePng(pb); }, 'image/png');
-                        } catch (e) { toPng(blob, writePng); }
-                    }, function() { toPng(blob, writePng); });
-                } else {
-                    toPng(blob, writePng);
-                }
-                function writePng(pb) {
-                    if (!pb) { setStatus('No se pudo convertir la imagen (CORS del origen)', true); return; }
-                    try {
-                        navigator.clipboard.write([new ClipboardItem({ 'image/png': pb })]).then(
-                            function() { setStatus('Imagen copiada'); },
-                            function(e) { setStatus('Portapapeles rechazó la imagen: ' + e, true); });
-                    } catch (e) { setStatus('Error al copiar imagen: ' + e, true); }
-                }
-            }).catch(function(e) {
-                setStatus('No se pudo descargar la imagen: ' + e, true);
-            });
+            if (!url) { setStatus('Sin URL de imagen (elige candidato)', true); return; }
+            copyText(url, 'URL copiada');
         };
         // Desc: copia literal del contenido actual de la caja de caption.
         var _cpDesc = document.getElementById('enricher-copy-desc');
@@ -555,6 +521,54 @@
             }).catch(function(){});
         })();
 
+        // Customs del servidor (motor unificado CORE): espejo JS de
+        // services/enrich_tags.resolve. visited-set anticiclos, vacío
+        // contagioso, \n explícitos, tagtitle solo con título.
+        window._customTagsCache = window._customTagsCache || null;
+        window.fetchCustomTags = function(cb) {
+            if (window._customTagsCache) { if (cb) cb(window._customTagsCache); return; }
+            fetch('/api/enricher/custom-tags').then(function(r){ return r.json(); }).then(function(d){
+                window._customTagsCache = (d && d.custom) || {};
+                if (cb) cb(window._customTagsCache);
+            }).catch(function(){ if (cb) cb({}); });
+        };
+        window.resolveCustomText = function(text, base) {
+            var customs = window._customTagsCache || {};
+            base = base || {};
+            var hasTitle = (String(text || '').indexOf('{title}') !== -1) || (String(text || '').indexOf('{ftitle}') !== -1);
+            function tokenVal(token, visited) {
+                if (visited.indexOf(token) !== -1) return '';
+                if (token === 'tagtitle' && !hasTitle) return '';
+                if (customs.hasOwnProperty(token)) {
+                    var r = expandBody(customs[token] || '', visited.concat([token]));
+                    return r.ok ? r.text : '';
+                }
+                if (base.hasOwnProperty(token)) return base[token] || '';
+                return '{' + token + '}';
+            }
+            function expandBody(body, visited) {
+                var ok = true;
+                var out = String(body || '').replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, function(m0, token) {
+                    if (customs.hasOwnProperty(token) || base.hasOwnProperty(token) || token === 'tagtitle') {
+                        var r = tokenVal(token, visited);
+                        if (r === '') ok = false;
+                        return r;
+                    }
+                    return m0;
+                });
+                return { text: out, ok: ok };
+            }
+            var result = String(text || '').replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, function(m0, token) {
+                if (customs.hasOwnProperty(token)) {
+                    var r = expandBody(customs[token] || '', [token]);
+                    return r.ok ? r.text : '';
+                }
+                if (base.hasOwnProperty(token) || token === 'tagtitle') return tokenVal(token, []);
+                return m0;
+            });
+            return result.replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '').replace(/\s+$/, '');
+        };
+        window.fetchCustomTags(function(){});
         // Tags picker + auto-expansión al cerrar }
         (function(){
             function jv(v){ if(!v) return ''; if(Array.isArray(v)) return v.join(', '); if(typeof v==='string'){ try{ var a=JSON.parse(v); if(Array.isArray(a)) return a.join(', '); }catch(e){} } return String(v); }
@@ -613,49 +627,23 @@
                     'rorder': rorderVal,
                     'roder': rorderVal
                 };
-                var FTAG_FORMATS = {
-                    // ftagtitle no existe, solo ftitle
-                    "title": "Title: {value}",
-                    "title_en": "Title EN: {value}",
-                    "original_title": "Original title: {value}",
-                    "titulo_original": "Original title: {value}",
-                    "title_es": "Title ES: {value}",
-                    "titulo_espana": "Title ES: {value}",
-                    "title_latam": "Title Latam: {value}",
-                    "title_mx": "Title Latam: {value}",
-                    "titulo_latino": "Title Latam: {value}",
-                    "alt_titles": "Alt titles: {value}",
-                    "titulos_alt": "Alt titles: {value}",
-                    "cast": "Cast: {value}",
-                    "reparto": "Cast: {value}",
-                    "actores": "Cast: {value}",
-                    "actors": "Cast: {value}",
-                    "year": "Year: {value}",
-                    "release_year": "Year: {value}",
-                    "season": "Season: {value}",
-                    "temporada": "Season: {value}",
-                    "season_episodes": "Season episodes: {value}",
-                    "description": "Description:\n{value}",
-                    "sinopsis": "Sinopsis:\n{value}",
-                    "overview": "Overview:\n{value}",
-                    "rating": "Rating: {value}",
-                    "rating_count": "Rating count: {value}",
-                    "genres": "Genres: {value}",
-                    "author": "Author: {value}",
-                    "originalmsg": "{value}",
-                    "rorder": "ROrder: {value}",
-                    "roder": "ROrder: {value}"
-                };
                 var fm = {};
-                for (var k in m) {
-                    if (k === 'tagtitle') continue; // ftagtitle no existe, solo ftitle
-                    var fmt = FTAG_FORMATS[k];
-                    if (fmt) fm['f' + k] = m[k] ? fmt.replace("{value}", m[k]) : "";
-                    else fm['f' + k] = m[k];
-                }
+                (function(){
+                    var cc = _customTagsCache || {};
+                    for (var cname in cc) {
+                        if (!cc.hasOwnProperty(cname)) continue;
+                        fm[cname] = resolveCustomText('{' + cname + '}', m);
+                    }
+                })();
                 for (var kk in fm) m[kk] = fm[kk];
                 // foreignname: especial, sin ftag (después del merge fm).
                 m['foreignname'] = foreignNameValue(d.api_title, d.api_original_title, d);
+                m['foreignnameseason'] = (function(){
+                    var n = d.api_season_number;
+                    if (n === undefined || n === null || String(n) === '') n = d.api_seasons;
+                    n = String(n === undefined || n === null ? '' : n).trim();
+                    return foreignNameValue(d.api_title, d.api_original_title, d, n ? (' - Season ' + n) : '');
+                })();
                 return m;
             }
             var captionEl = document.getElementById('enricher-text');
@@ -665,6 +653,7 @@
             var tagsClose = document.getElementById('enricher-tags-close');
             if (tagsBtn && tagsModal && tagsTable) {
                 tagsBtn.onclick = function(){
+                    window.fetchCustomTags(function(){
                     var map = getTagMap();
                     var rows = '';
                     var keys = Object.keys(map).sort();
@@ -694,6 +683,7 @@
                         };
                     })(rowEls[r]);
                     tagsModal.style.display='flex';
+                    });
                 };
                 if (tagsClose) tagsClose.onclick = function(){ tagsModal.style.display='none'; };
                 tagsModal.onclick = function(e){ if(e.target===tagsModal) tagsModal.style.display='none'; };
@@ -895,6 +885,12 @@
                 '{title}': details.api_title || '',
                 '{title_en}': details.api_title_en || '',
                 '{foreignname}': foreignNameValue(details.api_title, details.api_original_title, details),
+                '{foreignnameseason}': (function(){
+                    var n = details.api_season_number;
+                    if (n === undefined || n === null || String(n) === '') n = details.api_seasons;
+                    n = String(n === undefined || n === null ? '' : n).trim();
+                    return foreignNameValue(details.api_title, details.api_original_title, details, n ? (' - Season ' + n) : '');
+                })(),
                 '{original_title}': details.api_original_title || '',
                 '{titulo_original}': details.api_original_title || '',
                 '{title_es}': details.api_title_es || '',
@@ -935,72 +931,14 @@
                 '{season_episodes}': (details.api_season_episodes !== undefined && details.api_season_episodes !== null && String(details.api_season_episodes) !== '') ? String(details.api_season_episodes) : '',
                 '{originalmsg}': originalMsg || '',
             };
-            var FTAGS = {
-                "title": "Title: {value}",
-                "title_en": "Title EN: {value}",
-                "original_title": "Original title: {value}",
-                "titulo_original": "Original title: {value}",
-                "title_es": "Title ES: {value}",
-                "titulo_espana": "Title ES: {value}",
-                "title_latam": "Title Latam: {value}",
-                "title_mx": "Title Latam: {value}",
-                "titulo_latino": "Title Latam: {value}",
-                "alt_titles": "Alt titles: {value}",
-                "titulos_alt": "Alt titles: {value}",
-                "cast": "Cast: {value}",
-                "reparto": "Cast: {value}",
-                "actores": "Cast: {value}",
-                "actors": "Cast: {value}",
-                "year": "Year: {value}",
-                "release_year": "Year: {value}",
-                "rating": "Rating: {value}",
-                "rating_count": "Rating count: {value}",
-                "genres": "Genres: {value}",
-                "generos": "Genres: {value}",
-                "themes": "Themes: {value}",
-                "temas": "Themes: {value}",
-                "author": "Author: {value}",
-                "autor": "Author: {value}",
-                "director": "Director: {value}",
-                "directores": "Director: {value}",
-                "release_date": "Release date: {value}",
-                "fecha": "Release date: {value}",
-                "category": "Category: {value}",
-                "categoria": "Category: {value}",
-                "id": "ID: {value}",
-                "cover": "Cover: {value}",
-                "episodes": "Episodes: {value}",
-                "season": "Season: {value}",
-                "temporada": "Season: {value}",
-                "season_episodes": "Season episodes: {value}",
-                "ext": "Ext: {value}",
-                "extension": "Ext: {value}",
-                "description": "Description:\n{value}",
-                "sinopsis": "Sinopsis:\n{value}",
-                "overview": "Overview:\n{value}",
-                "originalmsg": "{value}"
-            };
-            var out = tpl;
-            // Raw tags {title} -> valor crudo (sin formato)
-            Object.keys(map).forEach(function (k) {
-                var v = map[k];
-                if (k === '{tagtitle}') {
-                    var has_title = (tpl.indexOf('{title}') !== -1) || (tpl.indexOf('{ftitle}') !== -1);
-                    if (!has_title) v = '';
-                }
-                out = out.split(k).join(v);
+            // Customs del servidor (window.resolveCustomText); sin FTAGS locales.
+            var plainBase = {};
+            Object.keys(map).forEach(function(k){
+                var nk = k.replace(/^\{|\}$/g, '');
+                plainBase[nk] = map[k];
             });
-            // Formateados {ftitle} -> con plantilla FTAGS (con salto y omisión si vacío)
-            for (var fk in FTAGS) {
-                var rawKey = '{' + fk + '}';
-                var rawVal = map[rawKey] || '';
-                var fForm = '{f' + fk + '}';
-                if (out.indexOf(fForm) !== -1) {
-                    var rendered = rawVal ? FTAGS[fk].replace('{value}', rawVal) : '';
-                    out = out.split(fForm).join(rendered ? (rendered + '\n') : '');
-                }
-            }
-            return out.replace(/\n{3,}/g, '\n\n').trim();
+            plainBase['tagtitle'] = (details.api_title || '').toString().trim().replace(/\s+/g, ' ');
+            return window.resolveCustomText(tpl, plainBase);
         }
 
         function fetchPosterAsB64(posterUrl, cb) {
@@ -1111,6 +1049,22 @@
             } catch (e) { return ''; }
         }
         function updateTopicName() { /* display eliminado: el badge Title copia directo */ }
+        // Nombre del topic con temporada: "Título - Season X🗓AAAA" (o como Title si no hay).
+        function currentTopicSeasonName() {
+            try {
+                var base = currentTopicName();
+                if (!base) return '';
+                var n = null;
+                try {
+                    var d = selectedDetails || {};
+                    if (d.api_season_number !== undefined && d.api_season_number !== null && String(d.api_season_number) !== '') n = String(d.api_season_number);
+                } catch (e) {}
+                if (n === null) return base;
+                var cal = base.indexOf('🗓');
+                if (cal !== -1) return base.substring(0, cal) + ' - Season ' + n + base.substring(cal);
+                return base + ' - Season ' + n;
+            } catch (e) { return ''; }
+        }
         // Sugerencia de título del job (solo localOnly): Original + año desde los datos.
         var jobTitleDirty = false;
         function suggestedJobTitle(det) {
@@ -1130,9 +1084,10 @@
         function hasSpecialChars(s) {
             return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af\u0400-\u04ff\u0900-\u097f\u0e00-\u0e7f\u0600-\u06ff]/.test(String(s || ''));
         }
-        function foreignNameValue(apiTitle, apiOriginal, det) {
-            det = det || {};
-            function latin(s) {
+            function foreignNameValue(apiTitle, apiOriginal, det, seasonSuffix) {
+                det = det || {};
+                seasonSuffix = seasonSuffix || '';
+                function latin(s) {
                 s = (s || '').toString();
                 return (s && !hasSpecialChars(s)) ? s : '';
             }
@@ -1156,10 +1111,10 @@
                     var v = latin(cands[j]);
                     if (v) { t = v; break; }
                 }
-                return 'Title: ' + (t || special) + '\nOriginal Title: ' + special + '\n';
-            }
-            var o = orig || disp;
-            return o ? ('Original Title: ' + o + '\n') : '';
+                    return 'Title: ' + (t ? (t + seasonSuffix) : special) + '\nOriginal Title: ' + special + '\n';
+                }
+                var o = orig || disp;
+                return o ? ('Original Title: ' + o + seasonSuffix + '\n') : '';
         }
         // Nombre desde el caption guardado: Title primero, luego Original title
         // (misma prioridad que el servidor), + año de Year/Año. Sin tags crudos.
@@ -1262,8 +1217,18 @@
                             if (!det || det.error) { setStatus((det && det.error) || 'Sin detalle', true); return; }
                             selectedDetails = det;
                             renderPosterStrip();
-                            // Preview inmediato con la URL directa (sin esperar base64, evita CORS del fetch)
-                            if (posterUrl) {
+                            // Preview inmediato: manda la primera carátula del detalle
+                            // (el servidor pone la de la temporada primero); si no hay,
+                            // la del candidato. Antes el candidato pisaba a la temporada.
+                            var firstCover = null;
+                            try {
+                                var cl = det.api_cover;
+                                if (typeof cl === 'string') { try { cl = JSON.parse(cl); } catch (e) { cl = [cl]; } }
+                                if (cl && cl.length) firstCover = cl[0];
+                            } catch (e) {}
+                            if (firstCover) {
+                                usePosterUrl(firstCover);
+                            } else if (posterUrl) {
                                 usePosterUrl(posterUrl);
                             }
                             updateTitleSuggestion();

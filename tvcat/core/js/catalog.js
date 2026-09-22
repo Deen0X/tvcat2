@@ -681,9 +681,19 @@
                         return t.indexOf(q) !== -1;
                     });
                 }
-                renderItems(currentItems);
-                updateBadge(currentItems.length);
-                _renderLocalEditsToolbar();
+                // Si el filtro de huérfanos se quedó sin resultados (p. ej.
+                // tras eliminarlos), volver a la vista completa en vez de
+                // dejar la sección vacía.
+                try {
+                    if (window._localEditsView === 'orphans') {
+                        var anyOrph = false;
+                        for (var oi = 0; oi < currentItems.length; oi++) {
+                            if (currentItems[oi] && currentItems[oi]._local && currentItems[oi]._local.orphan) { anyOrph = true; break; }
+                        }
+                        if (!anyOrph) window._localEditsView = null;
+                    }
+                } catch (e) {}
+                _renderLocalEditsView();
                 showLoading(false);
             },
             error: function() {
@@ -695,9 +705,25 @@
     function _renderLocalEditsToolbar() {
         var bar = document.getElementById('section-actions');
         if (!bar) return;
-        if (currentCategory !== 'local_edits') { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+        if (currentCategory !== 'local_edits') {
+            bar.style.display = 'none'; bar.innerHTML = '';
+            try { window._localEditsView = null; } catch (e) {}
+            return;
+        }
         bar.style.display = '';
         bar.innerHTML = '';
+        var orphans = (currentItems || []).filter(function(it) { return it && it._local && it._local.orphan; });
+        var view = null;
+        try { view = window._localEditsView || null; } catch (e) {}
+        var bf = document.createElement('button');
+        bf.textContent = view === 'orphans' ? 'Ver todos (' + currentItems.length + ')' : 'Solo huérfanos (' + orphans.length + ')';
+        bf.title = 'Filtrar la vista: solo copias sin título en catálogo';
+        bf.style.cssText = 'margin-left:8px;padding:5px 12px;font-size:0.75rem;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;cursor:pointer;';
+        bf.onclick = function() {
+            try { window._localEditsView = (window._localEditsView === 'orphans') ? null : 'orphans'; } catch (e2) {}
+            _renderLocalEditsView();
+        };
+        bar.appendChild(bf);
         var b1 = document.createElement('button');
         b1.textContent = 'Actualizar en Telegram';
         b1.title = 'Aplica en Telegram las copias de mensajes propios y las elimina en local';
@@ -748,12 +774,61 @@
             onConfirm(keys, rep, close);
         };
     }
+    // Vista visible de la sección (filtro Solo huérfanos). Los bulk operan
+    // sobre lo visible.
+    function _visibleLocalEdits() {
+        var view = null;
+        try { view = window._localEditsView || null; } catch (e) {}
+        if (view === 'orphans') {
+            return (currentItems || []).filter(function(it) { return it && it._local && it._local.orphan; });
+        }
+        return currentItems || [];
+    }
+    function _renderLocalEditsView() {
+        var vis = _visibleLocalEdits();
+        renderItems(vis);
+        updateBadge(vis.length);
+        _renderLocalEditsToolbar();
+        _markLocalEditsOrphans();
+    }
     function _localEditsReload() {
         try { if (window.refreshLocalEditsNav) window.refreshLocalEditsNav(); } catch (e) {}
-        if (currentCategory === 'local_edits') _doLocalEditsLoad();
+        if (currentCategory !== 'local_edits') return;
+        // Respetar el filtro actual del buscador (como el resto de secciones).
+        var q = '';
+        try {
+            var si = document.getElementById('global-search');
+            q = window.sanitizeSearchText(si ? si.value : '').trim();
+        } catch (e2) {}
+        _doLocalEditsLoad(q.length >= 2 ? q : '');
+    }
+    // Cinta "huérfano" sobre tarjetas sin fila en catálogo (solo abren a
+    // error; su salida es Eliminar locales). Se aplica tras cada render.
+    function _markLocalEditsOrphans() {
+        try {
+            if (currentCategory !== 'local_edits') return;
+            var orph = {};
+            (currentItems || []).forEach(function(it) {
+                if (it && it._local && it._local.orphan && it.item_id) orph[String(it.item_id)] = true;
+            });
+            var cards = document.querySelectorAll('#catalog-grid .grid-item[data-id]');
+            for (var i = 0; i < cards.length; i++) {
+                var id = cards[i].getAttribute('data-id');
+                if (!orph[id] || cards[i].querySelector('[data-orphan-ribbon]')) continue;
+                var cov = cards[i].querySelector('.grid-item-cover');
+                if (!cov) continue;
+                var st = window.getComputedStyle ? window.getComputedStyle(cov).position : '';
+                if (st === 'static') cov.style.position = 'relative';
+                var r = document.createElement('div');
+                r.setAttribute('data-orphan-ribbon', '1');
+                r.textContent = 'huérfano';
+                r.style.cssText = 'position:absolute;top:6px;left:6px;background:#7f1d1d;color:#fecaca;font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:999px;border:1px solid #ef4444;z-index:5;';
+                cov.appendChild(r);
+            }
+        } catch (e) {}
     }
     function _openBulkDeleteModal() {
-        var rows = (currentItems || []).map(function(it) {
+        var rows = _visibleLocalEdits().map(function(it) {
             var loc = it._local || {};
             var sub = loc.is_cut ? 'corte' : (loc.orphan ? 'huérfano' : (loc.is_mine ? 'propio' : 'ajeno'));
             return { key: loc.channelid_msgid, title: it.title, sub: sub };
@@ -764,7 +839,7 @@
                 method: 'POST', url: '/api/enricher/bulk_delete', data: { keys: keys },
                 success: function(res) {
                     rep.innerHTML = res && res.ok
-                        ? '✅ Eliminadas: ' + res.deleted + ' (no encontradas: ' + (res.missing || 0) + ')'
+                        ? '✅ Eliminadas: ' + res.deleted + ' (no encontradas: ' + (res.missing || 0) + ', títulos revertidos: ' + (res.titles_reverted || 0) + ')'
                         : '❌ ' + ((res && res.error) || 'Error');
                     setTimeout(function() { close(); _localEditsReload(); }, 1200);
                 },
@@ -773,7 +848,7 @@
         });
     }
     function _openBulkApplyModal() {
-        var rows = (currentItems || []).map(function(it) {
+        var rows = _visibleLocalEdits().map(function(it) {
             var loc = it._local || {};
             if (!loc.is_mine) return null;
             return { key: loc.channelid_msgid, title: it.title, sub: loc.is_cut ? 'corte' : 'propio' };

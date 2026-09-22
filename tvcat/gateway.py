@@ -5557,6 +5557,17 @@ def _thumb_exists(telegram_msg_id, telegram_link=None):
 
 
 # === Helper: buscar episodios en BDs de plugins (fallback cuando main DB no tiene datos) ===
+def _plugin_has_table(pconn, name: str) -> bool:
+    """¿Existe la tabla? Evita el spam 'no such table' en plugins que no son
+    fuente de catálogo (dduskychan, enricher, item_frames...)."""
+    try:
+        return bool(pconn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (name,)).fetchone())
+    except Exception:
+        return False
+
+
 def _find_episodes_in_plugin_dbs(item_id):
     """Busca episodios en TODAS las BDs de plugins habilitadas. Devuelve lista de dicts."""
     from services.catalog_service import get_conn, _derive_episode_key
@@ -5567,6 +5578,9 @@ def _find_episodes_in_plugin_dbs(item_id):
         try:
             pconn = sqlite3.connect(db_path)
             pconn.row_factory = sqlite3.Row
+            if not _plugin_has_table(pconn, "unified_catalog"):
+                pconn.close()
+                continue
             prow = pconn.execute("SELECT id FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
             if prow:
                 plugin_int = str(prow["id"])
@@ -5595,6 +5609,9 @@ def _find_episode_by_id_in_plugin_dbs(episode_id):
         try:
             pconn = sqlite3.connect(db_path)
             pconn.row_factory = sqlite3.Row
+            if not _plugin_has_table(pconn, "unified_catalog"):
+                pconn.close()
+                continue
             ep = pconn.execute(
                 "SELECT ie.*, i.telegram_link as item_link, i.item_id "
                 "FROM item_episodes ie "

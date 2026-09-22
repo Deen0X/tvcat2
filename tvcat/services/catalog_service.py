@@ -347,6 +347,32 @@ def init_db():
             c.execute(f"ALTER TABLE unified_catalog ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
+    # Generación de sync (2026-09-22): upsert + sello + purga de rancias en
+    # vez de DELETE+INSERT (ventana sin títulos durante el refresco).
+    for tbl in ("unified_catalog", "item_episodes"):
+        try:
+            c.execute(f"ALTER TABLE {tbl} ADD COLUMN sync_gen INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+    # UNIQUE real para que INSERT OR REPLACE de episodios reemplace (antes
+    # imposible: cada sync duplicaba [1,1,2...] y se purgaba a mano).
+    try:
+        c.execute("UPDATE item_episodes SET episode_key=('msg_' || telegram_msg_id)"
+                  " WHERE (episode_key IS NULL OR episode_key='')"
+                  " AND telegram_msg_id IS NOT NULL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("DELETE FROM item_episodes WHERE id NOT IN ("
+                  "SELECT MIN(id) FROM item_episodes "
+                  "GROUP BY item_id, COALESCE(episode_key,''))")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_item_episodes_key"
+                  " ON item_episodes(item_id, episode_key)")
+    except sqlite3.OperationalError:
+        pass
     # Tabla de metadata de pistas de audio/subtítulos por episodio (HLS multitrack).
     c.execute("""
         CREATE TABLE IF NOT EXISTS episode_tracks (
@@ -1285,18 +1311,15 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
         def resolve_item_id(raw):
             return id_to_item.get(str(raw), raw)
 
-        # Eliminar datos antiguos del plugin en la caché central
-        # Primero episodios, luego catálogo (por FK). Borra por item_id del catálogo (USER-...)
-        # Preservar snapshot Original (se pierde con el DELETE; el sync lo restaura).
+        # 2026-09-22: sin ventana de borrado. Se hace UPSERT sellado con la
+        # generación de ESTA pasada y al final se purgan las rancias
+        # (gen anterior): los lectores siempre ven títulos.
+        import time as _time
+        _gen = int(_time.time() * 1000)
+        # Preservar snapshot Original (el upsert lo conserva vía _orig_for).
         orig_map = _load_orig_map(conn, plugin_name)
-        c.execute("""
-            DELETE FROM item_episodes WHERE item_id IN (
-                SELECT item_id FROM unified_catalog WHERE source = ?
-            )
-        """, (plugin_name,))
-        c.execute("DELETE FROM unified_catalog WHERE source = ?", (plugin_name,))
 
-        # Insertar ítems activos
+        # Insertar/upsert ítems activos
         items_inserted = 0
         active_item_ids = set()
         for row in pc.execute("SELECT * FROM plugin_catalog_export WHERE sync_status = 'active'"):
@@ -1315,8 +1338,8 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                  telegram_msg_id, group_title, group_title_flat, telegram_link,
                  season_display, info_messages, genres, is_collection, collection_raw,
                  collection_name, collection_serial, collection_msg_date,
-                 orig_title, orig_description)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 orig_title, orig_description, sync_gen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 item_id,
                 d.get("title"),
@@ -1342,17 +1365,12 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 d.get("collection_name", ""),
                 d.get("collection_serial", ""),
                 int(d.get("collection_msg_date", 0) or 0),
-                ot, od
+                ot, od, _gen
             ))
             items_inserted += 1
 
-        # Insertar episodios de items activos (mapeando item_id interno -> catálogo y derivando episode_key).
-        # Sin UNIQUE en (item_id, episode_key), el INSERT OR REPLACE de abajo
-        # nunca reemplaza: cada sync duplicaba todos los episodios ([1,1,2,2...]).
-        # Se borran primero los del conjunto activo (sync idempotente).
-        if active_item_ids:
-            _ph = ",".join("?" * len(active_item_ids))
-            c.execute(f"DELETE FROM item_episodes WHERE item_id IN ({_ph})", list(active_item_ids))
+        # Insertar/upsert episodios de items activos (UNIQUE(item_id,
+        # episode_key) hace que REPLACE reemplace de verdad; sin borrado).
         eps_inserted = 0
         for row in pc.execute("SELECT * FROM plugin_episodes_export"):
             ed = dict(row)
@@ -1362,11 +1380,13 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
             if resolved_item not in active_item_ids:
                 continue
             ep_key = ed.get("episode_key") or _derive_episode_key(ed.get("telegram_link"))
+            if not ep_key:
+                ep_key = "msg_%s" % (ed.get("telegram_msg_id") or "0")
             c.execute("""
                 INSERT OR REPLACE INTO item_episodes
                 (item_id, episode_key, episode_number, season_number, title, duration,
-                 telegram_msg_id, telegram_link, file_size, file_name, is_mkv)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 telegram_msg_id, telegram_link, file_size, file_name, is_mkv, sync_gen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 resolved_item,
                 ep_key,
@@ -1378,11 +1398,21 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 ed.get("telegram_link"),
                 ed.get("file_size"),
                 ed.get("file_name"),
-                1 if (ed.get("file_name") or "").lower().endswith(".mkv") else 0
+                1 if (ed.get("file_name") or "").lower().endswith(".mkv") else 0,
+                _gen
             ))
             eps_inserted += 1
 
-        # Marcar has_mkv en unified_catalog si alguno de sus episodios es MKV.
+        # Purgar rancias de este plugin (las que esta pasada no ha sellado).
+        # Con gen<hace-tiempo en vez de !=gen: dos pasadas solapadas no se
+        # borran entre sí (gana la última en commitear).
+        c.execute("""
+            DELETE FROM item_episodes WHERE item_id IN (
+                SELECT item_id FROM unified_catalog WHERE source = ?
+            ) AND (sync_gen IS NULL OR sync_gen < ?)
+        """, (plugin_name, _gen))
+        c.execute("DELETE FROM unified_catalog WHERE source = ? AND (sync_gen IS NULL OR sync_gen < ?)",
+                  (plugin_name, _gen))
         if active_item_ids:
             placeholders = ",".join("?" * len(active_item_ids))
             c.execute(f"""
@@ -1436,6 +1466,33 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
         return {"success": False, "error": str(e)}
 
 
+def purge_stale_central(plugin_name: str, gen: int) -> dict:
+    """Borra de central las filas del plugin no selladas por la generación
+    `gen` (no vistas en esta pasada). Gana la última pasada en commitear."""
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        c.execute("""
+            DELETE FROM item_episodes WHERE item_id IN (
+                SELECT item_id FROM unified_catalog WHERE source = ?
+            ) AND (sync_gen IS NULL OR sync_gen < ?)
+        """, (plugin_name, gen))
+        eps = c.rowcount
+        c.execute("DELETE FROM unified_catalog WHERE source = ? AND (sync_gen IS NULL OR sync_gen < ?)",
+                  (plugin_name, gen))
+        items = c.rowcount
+        conn.commit()
+        return {"success": True, "items": items, "episodes": eps}
+    except Exception as e:
+        print(f" [CATALOG] Error purge stale {plugin_name}: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def wipe_plugin_central(plugin_name: str):
     """2026-09-04: borra TODOS los items/episodios de un plugin en central.
     Assets (covers) intactos: se reutilizan al re-habilitar."""
@@ -1476,12 +1533,13 @@ def sync_plugin_source_items(plugin_loader, plugin_name: str, item_ids, active: 
                                plugin_name, item_ids, active)
 
 
-def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool):
+def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool, gen: int = None):
     """2026-09-04: alta/baja incremental en central desde la DB del plugin POR RUTA,
     sin registry (los paths del scan/sync del plugin no dependen del loader).
     - disable: DELETE episodios + catálogo de esos items.
     - enable: copia esas filas desde plugin_catalog_export (+ episodios, géneros y
-      has_mkv igual que el sync completo). Assets intactos (se reutilizan)."""
+      has_mkv igual que el sync completo). Assets intactos (se reutilizan).
+    2026-09-22: sella sync_gen (si no, el próximo full las purgaría por rancias)."""
     item_ids = [i for i in (item_ids or []) if i]
     if not item_ids:
         return {"success": True, "items": 0, "episodes": 0}
@@ -1491,6 +1549,9 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
     conn = get_conn()
     c = conn.cursor()
     try:
+        import time as _time
+        if gen is None:
+            gen = int(_time.time() * 1000)
         ph = ",".join("?" * len(item_ids))
         if not active:
             c.execute(f"DELETE FROM item_episodes WHERE item_id IN ({ph})", list(item_ids))
@@ -1534,8 +1595,8 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
                  telegram_msg_id, group_title, group_title_flat, telegram_link,
                  season_display, info_messages, genres, is_collection, collection_raw,
                  collection_name, collection_serial, collection_msg_date,
-                 orig_title, orig_description)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 orig_title, orig_description, sync_gen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 item_id, d.get("title"), d.get("category", ""), d.get("subcategory", ""),
                 plugin_name, 0, d.get("description", ""), d.get("year", ""), d.get("rating", 0),
@@ -1545,7 +1606,7 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
                 int(d.get("is_collection", 0) or 0), d.get("collection_raw", ""),
                 d.get("collection_name", ""), d.get("collection_serial", ""),
                 int(d.get("collection_msg_date", 0) or 0),
-                ot, od
+                ot, od, gen
             ))
             items_inserted += 1
 
@@ -1562,16 +1623,19 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
             if not resolved_item or resolved_item not in active_set:
                 continue
             ep_key = ed.get("episode_key") or _derive_episode_key(ed.get("telegram_link"))
+            if not ep_key:
+                ep_key = "msg_%s" % (ed.get("telegram_msg_id") or "0")
             c.execute("""
                 INSERT OR REPLACE INTO item_episodes
                 (item_id, episode_key, episode_number, season_number, title, duration,
-                 telegram_msg_id, telegram_link, file_size, file_name, is_mkv)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 telegram_msg_id, telegram_link, file_size, file_name, is_mkv, sync_gen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 resolved_item, ep_key, ed.get("episode_number"), ed.get("season_number", 1),
                 ed.get("title"), ed.get("duration"), ed.get("telegram_msg_id"), ed.get("telegram_link"),
                 ed.get("file_size"), ed.get("file_name"),
-                1 if (ed.get("file_name") or "").lower().endswith(".mkv") else 0
+                1 if (ed.get("file_name") or "").lower().endswith(".mkv") else 0,
+                gen
             ))
             eps_inserted += 1
 

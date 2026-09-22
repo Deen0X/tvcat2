@@ -48,8 +48,19 @@
   function toast(msg) {
     try {
       if (window._tgcopyToast) { window._tgcopyToast(msg); return; }
-      alert(msg);
-    } catch (e) { alert(msg); }
+      // Nunca alert(): toasts propios no bloqueantes.
+      var t = document.getElementById('slicer-toast');
+      if (!t) {
+        t = document.createElement('div');
+        t.id = 'slicer-toast';
+        t.style.cssText = 'position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#27272a;border:1px solid #52525b;color:#f4f4f5;font-size:0.8rem;padding:8px 16px;border-radius:8px;z-index:1000000;max-width:90vw;';
+        document.body.appendChild(t);
+      }
+      t.textContent = msg;
+      t.style.display = 'block';
+      if (t._to) clearTimeout(t._to);
+      t._to = setTimeout(function() { try { t.style.display = 'none'; } catch (e) {} }, 3500);
+    } catch (e) {}
   }
 
   function openModal(title, bodyHtml, onMount) {
@@ -83,6 +94,35 @@
     }
     out.sort(function(a, b) { return (a.episode_number || 0) - (b.episode_number || 0); });
     return out;
+  }
+
+  // Detección temporada/episodio sobre file_name||title. Cascada:
+  // SxxEyy, TxxExx/TxxCxx, NxN con fronteras. Devuelve {s,e} o null.
+  function detectSeasonEp(name) {
+    var s = String(name || '').replace(/[._\- ]+/g, ' ');
+    var m = s.match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
+    if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10), fam: 'S' };
+    m = s.match(/[Tt](\d{1,2})[EeCc](\d{1,3})/);
+    if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10), fam: 'T' };
+    m = s.match(/[Tt](\d{1,2})\s+[CcEe](\d{1,3})/);
+    if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10), fam: 'T' };
+    m = s.match(/(^|[^0-9])(\d{1,2})[x×](\d{1,3})([^0-9]|$)/);
+    if (m) return { s: parseInt(m[2], 10), e: parseInt(m[3], 10), fam: 'X' };
+    return null;
+  }
+
+  // Consenso: la familia con más matches manda para todo el título.
+  function detectFamily(eps) {
+    var counts = { S: 0, T: 0, X: 0 };
+    for (var i = 0; i < eps.length; i++) {
+      var d = detectSeasonEp(eps[i].file_name || eps[i].title || '');
+      if (d) counts[d.fam]++;
+    }
+    var best = null, bestN = 0;
+    for (var f in counts) {
+      if (counts[f] > bestN) { bestN = counts[f]; best = f; }
+    }
+    return bestN > 0 ? best : null;
   }
 
   function refreshAfterSplit(origItemId, newItemId) {
@@ -131,6 +171,16 @@
     });
     function buildList(eps, cut) {
       var html = '';
+      // Offset auto = siguiente a la temporada del propio título (la del
+      // primer fichero + 1; 1 si no hay patrón). La numeración es secuencial
+      // desde el offset; el Auto omite la temporada del título (titleSeason).
+      var fam = detectFamily(eps);
+      var titleSeason = null;
+      var firstSeason = 1;
+      try {
+        var d0 = detectSeasonEp(eps[0].file_name || eps[0].title || '');
+        if (d0 && (!fam || d0.fam === fam)) { titleSeason = d0.s; firstSeason = d0.s + 1; }
+      } catch (eFS) {}
       if (cut) {
         var origTitle = esc(cut.orig_title || cut.orig_item_id || 'original');
         var origCover = '/api/cover/' + encodeURIComponent(cut.orig_item_id || '');
@@ -143,7 +193,19 @@
           + '<button class="slicer-unsplit" style="background:#a855f7;border:none;border-radius:6px;padding:8px 12px;color:#fff;font-weight:700;font-size:0.8rem;cursor:pointer;white-space:nowrap;">Unir con original</button>'
           + '</div>';
       }
-      html += '<p>Episodios: ' + eps.length + '. Toca ✂️ para cortar desde ese episodio:</p>'
+      html += '<label style="display:flex;gap:8px;align-items:center;font-size:0.8rem;color:#f4f4f5;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.4);border-radius:8px;padding:8px 10px;margin-bottom:10px;cursor:pointer;">'
+        + '<input type="checkbox" class="slicer-use-orig" style="accent-color:#a855f7;">'
+        + '<span>Utilizar el nombre del título original para el nuevo título<br><span style="color:#a1a1aa;font-size:0.72rem;">Marcado: «título original_nombre del fichero». Desmarcado: nombre del fichero.</span></span></label>';
+      html += '<p>Episodios: ' + eps.length + '. Marca checks y usa Slice / Season Slicer, o Auto para marcar inicios de temporada:</p>'
+        + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.4);border-radius:8px;padding:8px 10px;margin-bottom:10px;">'
+        + '<label style="font-size:0.75rem;color:#a1a1aa;">Inicio secuencia:</label>'
+        + '<input type="number" class="slicer-offset" value="' + firstSeason + '" min="1" style="width:64px;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:4px 6px;color:#f4f4f5;font-size:0.8rem;">'
+        + '<button class="slicer-master" data-on="1" style="background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.75rem;cursor:pointer;">Todos</button>'
+        + '<button class="slicer-master" data-on="0" style="background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.75rem;cursor:pointer;">Ninguno</button>'
+        + '<button class="slicer-auto" style="background:#0e7490;border:none;border-radius:6px;padding:6px 10px;color:#fff;font-size:0.75rem;cursor:pointer;">Auto</button>'
+        + '<button class="slicer-goslice" style="background:#22c55e;border:none;border-radius:6px;padding:6px 10px;color:#fff;font-weight:700;font-size:0.75rem;cursor:pointer;">Slice</button>'
+        + '<button class="slicer-goseason" style="background:#a855f7;border:none;border-radius:6px;padding:6px 10px;color:#fff;font-weight:700;font-size:0.75rem;cursor:pointer;">Season Slicer</button>'
+        + '</div>'
         + '<div style="display:flex;flex-direction:column;gap:8px;">';
       for (var i = 0; i < eps.length; i++) {
         var ep = eps[i];
@@ -154,18 +216,229 @@
         var coverUrl = '/api/cover/' + encodeURIComponent(itemId);
         var src = (thumbUrl && ep.has_thumb) ? thumbUrl : coverUrl;
         var cap = ep.caption ? '<p class="episode-overview" title="' + esc(ep.caption) + '">' + esc(ep.caption) + '</p>' : '';
-        var btn = (i === 0)
-          ? '<div class="watched-toggle" title="El original siempre conserva el primero" style="opacity:0.3;cursor:default;color:rgba(255,255,255,0.3);">✂️</div>'
-          : '<div class="watched-toggle slicer-cut" data-cut="' + ep.telegram_msg_id + '" data-item="' + esc(ep.item_id || itemId) + '" title="Cortar desde aquí" '
-          + 'style="color:#22c55e;border-color:#22c55e;background:rgba(34,197,94,0.1);font-size:18px;cursor:pointer;">✂️</div>';
-        html += '<div class="episode-card" style="cursor:default;">'
-          + '<div class="episode-thumb-container"><img src="' + src + '" class="episode-thumb" alt="" loading="lazy" '
-          + 'onerror="this.onerror=null;this.src=\'' + coverUrl + '\';" /></div>'
-          + '<div class="episode-info"><h3 class="episode-title">' + esc(title) + '</h3>' + cap + '</div>'
-          + btn + '</div>';
+        var ctrls;
+        if (i === 0) {
+          ctrls = '<div title="El original siempre conserva el primero" style="opacity:0.3;color:rgba(255,255,255,0.3);">✂️</div>';
+        } else {
+          ctrls = '<input type="number" class="slicer-season" data-msg="' + ep.telegram_msg_id + '" value="" placeholder="—" title="Temporada de este corte (vacío = sin temporada)" style="width:56px;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:4px 6px;color:#f4f4f5;font-size:0.8rem;flex-shrink:0;">'
+            + '<input type="checkbox" class="slicer-check" data-msg="' + ep.telegram_msg_id + '" style="accent-color:#a855f7;width:18px;height:18px;cursor:pointer;flex-shrink:0;">';
+        }
+        html += '<div class="episode-card" style="cursor:default;flex-wrap:wrap;row-gap:8px;">'
+        + '<div style="flex-basis:100%;display:flex;justify-content:flex-end;align-items:center;gap:8px;min-width:0;">' + ctrls + '</div>'
+        + '<div class="episode-thumb-container"><img src="' + src + '" class="episode-thumb" alt="" loading="lazy" '
+        + 'onerror="this.onerror=null;this.src=\'' + coverUrl + '\';" /></div>'
+        + '<div class="episode-info" style="padding-right:0;min-width:0;flex:1;">'
+        + '<h3 class="episode-title" style="font-size:0.9rem;overflow-wrap:anywhere;word-break:break-word;">' + esc(title) + '</h3>' + cap + '</div>'
+        + '</div>';
       }
       html += '</div>';
       openModal('Episode Slicer · ' + (itemData.title || itemId), html, function(body, close) {
+        // Estado "trabajando": línea con puntos animados (sin CSS keyframes,
+        // TV-safe) + botones desactivados. Las operaciones (preview/split/
+        // unsplit/resync) tardan segundos por el sync a central.
+        var busyTimer = null;
+        function setBusy(msg) {
+          var st = body.querySelector('[data-slicer-status]');
+          if (!st) {
+            st = document.createElement('div');
+            st.setAttribute('data-slicer-status', '1');
+            st.style.cssText = 'display:none;margin-bottom:10px;background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.5);border-radius:8px;padding:8px 10px;font-size:0.8rem;color:#e9d5ff;';
+            body.insertBefore(st, body.firstChild);
+          }
+          if (busyTimer) { clearInterval(busyTimer); busyTimer = null; }
+          var btns = body.querySelectorAll('.slicer-cut, .slicer-unsplit');
+          if (!msg) {
+            st.style.display = 'none';
+            for (var k = 0; k < btns.length; k++) btns[k].style.opacity = '';
+            body.style.pointerEvents = '';
+            return;
+          }
+          st.style.display = 'block';
+          body.style.pointerEvents = 'none';
+          var dots = 0;
+          var base = '⏳ ' + msg;
+          st.textContent = base;
+          busyTimer = setInterval(function() {
+            dots = (dots + 1) % 4;
+            var d = '';
+            for (var i = 0; i < dots; i++) d += '.';
+            st.textContent = base + d;
+          }, 400);
+        }
+        var useOrigBox = body.querySelector('.slicer-use-orig');
+        try {
+          var saved = null;
+          try { saved = localStorage.getItem('tvcat_slicer_use_orig_title'); } catch (eLS) {}
+          if (useOrigBox) useOrigBox.checked = (saved === null) ? true : (saved === '1');
+          if (useOrigBox) useOrigBox.onchange = function() {
+            try { localStorage.setItem('tvcat_slicer_use_orig_title', useOrigBox.checked ? '1' : '0'); } catch (eLS2) {}
+          };
+        } catch (e) {}
+        var useOrigTitle = function() {
+          try { return !!(useOrigBox && useOrigBox.checked); } catch (e3) { return true; }
+        };
+        // ---- Multi-corte por temporadas ----
+        var getOffset = function() {
+          try {
+            var v = parseInt(body.querySelector('.slicer-offset').value, 10);
+            return (isNaN(v) || v < 1) ? 1 : v;
+          } catch (eO) { return 1; }
+        };
+        var rowState = function() {
+          // [{msg, checked, season|null}] en orden de lista (sin la fila 1).
+          var out = [];
+          var checks = body.querySelectorAll('.slicer-check');
+          for (var ri = 0; ri < checks.length; ri++) {
+            var c = checks[ri];
+            var inp = body.querySelector('.slicer-season[data-msg="' + c.getAttribute('data-msg') + '"]');
+            var sv = inp ? parseInt(inp.value, 10) : NaN;
+            out.push({ msg: parseInt(c.getAttribute('data-msg'), 10),
+              checked: !!c.checked, season: (isNaN(sv) ? null : sv) });
+          }
+          return out;
+        };
+        var renumber = function() {
+          // Secuencial desde el offset: off+k por check marcado (sin edición
+          // manual). El offset ya apunta a la siguiente temporada del título.
+          var off = getOffset(), k = 0;
+          var checks = body.querySelectorAll('.slicer-check');
+          for (var ni = 0; ni < checks.length; ni++) {
+            var inp = body.querySelector('.slicer-season[data-msg="' + checks[ni].getAttribute('data-msg') + '"]');
+            if (!inp) continue;
+            if (checks[ni].checked && inp.getAttribute('data-manual') !== '1') {
+              inp.value = off + k;
+              k++;
+            }
+          }
+        };
+        var markManual = function() {
+          var inps = body.querySelectorAll('.slicer-season');
+          for (var mi = 0; mi < inps.length; mi++) {
+            (function(inp) {
+              inp.onchange = function() { inp.setAttribute('data-manual', '1'); };
+            })(inps[mi]);
+          }
+        };
+        markManual();
+        // Marcar/desmarcar a mano asigna/limpia número (sin tocar al resto).
+        try {
+          var checksAll = body.querySelectorAll('.slicer-check');
+          for (var ha = 0; ha < checksAll.length; ha++) {
+            (function(c) {
+              c.onchange = function() {
+                var inp = body.querySelector('.slicer-season[data-msg="' + c.getAttribute('data-msg') + '"]');
+                if (!inp) return;
+                if (c.checked) {
+                  if (!inp.value) renumber();
+                } else {
+                  inp.value = '';
+                  inp.removeAttribute('data-manual');
+                }
+              };
+            })(checksAll[ha]);
+          }
+        } catch (eHa) {}
+        try {
+          body.querySelector('.slicer-offset').onchange = function() {
+            // Al cambiar el offset se recalcula todo (pierde ediciones manuales).
+            var inps = body.querySelectorAll('.slicer-season');
+            for (var ci = 0; ci < inps.length; ci++) inps[ci].removeAttribute('data-manual');
+            renumber();
+          };
+        } catch (eOff) {}
+        var masters = body.querySelectorAll('.slicer-master');
+        for (var mi2 = 0; mi2 < masters.length; mi2++) {
+          (function(btn) {
+            btn.onclick = function() {
+              var on = btn.getAttribute('data-on') === '1';
+              var checks = body.querySelectorAll('.slicer-check');
+              for (var ci = 0; ci < checks.length; ci++) checks[ci].checked = on;
+              renumber();
+            };
+          })(masters[mi2]);
+        }
+        try {
+          body.querySelector('.slicer-auto').onclick = function() {
+            // Solo marca inicios de temporada (familia consenso); no corta.
+            var off = getOffset(), marked = 0, prevS = null, first = true;
+            var checks = body.querySelectorAll('.slicer-check');
+            // Mapa msg -> episodio para detectar.
+            var byMsg = {};
+            for (var bi = 0; bi < eps.length; bi++) byMsg[String(eps[bi].telegram_msg_id)] = eps[bi];
+            for (var ci = 0; ci < checks.length; ci++) {
+              var c = checks[ci];
+              var ep = byMsg[c.getAttribute('data-msg')] || {};
+              var d = detectSeasonEp(ep.file_name || ep.title || '');
+              if (d && (!fam || d.fam === fam)) {
+                // La temporada del propio título no se marca: el corte
+                // empezaría dentro de ella. Solo cambios posteriores.
+                if ((first || d.s !== prevS) && (titleSeason === null || d.s !== titleSeason)) {
+                  c.checked = true;
+                  marked++;
+                } else {
+                  c.checked = false;
+                }
+                prevS = d.s;
+                first = false;
+              } else {
+                c.checked = false;
+              }
+            }
+            void off;
+            renumber();
+            toast(marked ? ('Auto: ' + marked + ' inicios marcados') : 'Auto: sin patrón de temporada');
+          };
+        } catch (eAuto) {}
+        var runBatch = function(mode) {
+          var rows = rowState();
+          var cuts = [];
+          for (var ci = 0; ci < rows.length; ci++) {
+            if (rows[ci].checked && rows[ci].msg > 0) {
+              cuts.push({ from_msg_id: rows[ci].msg, season: rows[ci].season });
+            }
+          }
+          if (!cuts.length) { toast('Marca al menos un corte'); return; }
+          cuts.sort(function(a, b) { return a.from_msg_id - b.from_msg_id; });
+          // Preview local: título + nº eps por trozo.
+          var byMsg2 = {};
+          for (var bi = 0; bi < eps.length; bi++) byMsg2[String(eps[bi].telegram_msg_id)] = eps[bi];
+          var lines = [], startIdx = 0;
+          var msgOrder = [];
+          for (var oi = 0; oi < eps.length; oi++) msgOrder.push(parseInt(eps[oi].telegram_msg_id, 10));
+          for (var pi = 0; pi < cuts.length; pi++) {
+            var fromIdx = msgOrder.indexOf(cuts[pi].from_msg_id);
+            if (fromIdx < 0) continue;
+            var nextFrom = (pi + 1 < cuts.length) ? msgOrder.indexOf(cuts[pi + 1].from_msg_id) : eps.length;
+            if (nextFrom < 0) nextFrom = eps.length;
+            var cnt = nextFrom - fromIdx;
+            var nm;
+            if (mode === 'season' && cuts[pi].season !== null) {
+              nm = (itemData.title || itemId) + ' - Season ' + cuts[pi].season;
+            } else {
+              var f0 = byMsg2[String(cuts[pi].from_msg_id)] || {};
+              var stem = String(f0.file_name || f0.title || 'Corte').replace(/\.[^.]+$/, '');
+              nm = stem.slice(0, 80);
+            }
+            lines.push('· "' + nm + '" (' + cnt + ' eps)');
+          }
+          if (!lines.length) { toast('Cortes inválidos'); return; }
+          var ok = confirm('Crear ' + lines.length + ' título(s) [modo ' + mode + ']:\n' + lines.join('\n'));
+          if (!ok) return;
+          setBusy('Cortando ' + lines.length + ' parte(s) y sincronizando');
+          ajax(API + '/batch', { method: 'POST', data: { item_id: itemId, cuts: cuts, mode: mode, use_orig_title: useOrigTitle() } }, function(eB, res) {
+            setBusy(null);
+            if (eB) { toast('Batch falló: ' + (eB.message || eB)); return; }
+            var parts = (res && res.parts) || [];
+            close();
+            refreshAfterSplit(itemId, parts.length ? parts[parts.length - 1].new_item_id : null);
+            var msg = 'Creados ' + parts.length + ' título(s)' + (((res && res.central_refreshed) === false) ? ' (central pendiente: usa Re-sincronizar)' : '');
+            toast(msg);
+          });
+        };
+        try {
+          body.querySelector('.slicer-goslice').onclick = function() { runBatch('slice'); };
+          body.querySelector('.slicer-goseason').onclick = function() { runBatch('season'); };
+        } catch (eGo) {}
         var btns = body.querySelectorAll('.slicer-cut[data-cut]');
         for (var k = 0; k < btns.length; k++) {
           (function(btn) {
@@ -175,27 +448,59 @@
               // La lista fusiona variantes: cortar sobre el título REAL del episodio,
               // no sobre el mostrado (si no, el msg no existe ahí → 400).
               var realItem = btn.getAttribute('data-item') || itemId;
-              ajax(API + '/preview', { method: 'POST', data: { item_id: realItem, from_msg_id: fromMsg } }, function(e2, prev) {
+              setBusy('Generando vista previa');
+              ajax(API + '/preview', { method: 'POST', data: { item_id: realItem, from_msg_id: fromMsg, use_orig_title: useOrigTitle() } }, function(e2, prev) {
+                setBusy(null);
                 if (e2) { toast('Preview falló: ' + (e2.message || e2)); return; }
-                var ok = confirm('Crear "' + prev.new.title + '" con ' + prev.new.count + ' episodios?\nOriginal queda con ' + prev.orig.keep + '.');
-                if (!ok) return;
-                ajax(API + '/split', { method: 'POST', data: { item_id: realItem, from_msg_id: fromMsg } }, function(e3, res) {
-                  if (e3) { toast('Split falló: ' + (e3.message || e3)); return; }
-                  if (res && res.central_refreshed === false) {
-                    var go = confirm('Corte guardado (' + res.new_item_id + ') pero la central no se actualizó.\n'
-                      + (res.warn || '') + '\n\n¿Reintentar sincronización ahora?');
-                    if (go) {
-                      ajax(API + '/resync', { method: 'POST', data: {} }, function(e4, rr) {
-                        toast((rr && rr.ok) ? 'Central sincronizada. Busca el nuevo título.' : 'Resync falló: ' + ((rr && (rr.detail || rr.hint)) || (e4 && e4.message) || 'ver log gateway'));
-                        close();
-                        refreshAfterSplit(itemId, res.new_item_id);
-                      });
+                var warnTxt = '';
+                try {
+                  var _wl = (prev && prev.local_edit_warnings) || [];
+                  if (_wl.length) {
+                    warnTxt = '\n\n⚠️ Estos episodios tienen ediciones locales:';
+                    for (var _wi = 0; _wi < _wl.length; _wi++) {
+                      warnTxt += '\n· msg ' + _wl[_wi].msg_id + ' (' + (_wl[_wi].title || _wl[_wi].item_id || '?') + ')';
                     }
-                    return;
+                    warnTxt += '\nSi cortas, esas copias quedarán huérfanas (límpialas en Ediciones locales).';
                   }
-                  toast('Corte creado: ' + res.new_item_id + ' (' + res.moved + ' eps)');
-                  close();
-                  refreshAfterSplit(realItem, res.new_item_id);
+                } catch (eW) {}
+                var ok = confirm('Crear "' + prev.new.title + '" con ' + prev.new.count + ' episodios?\nOriginal queda con ' + prev.orig.keep + '.' + warnTxt);
+                if (!ok) return;
+                setBusy('Cortando y sincronizando (puede tardar unos segundos)');
+                ajax(API + '/split', { method: 'POST', data: { item_id: realItem, from_msg_id: fromMsg, use_orig_title: useOrigTitle() } }, function(e3, res) {
+                  if (e3) { toast('Split falló: ' + (e3.message || e3)); return; }
+                  var nid = (res && res.new_item_id) || null;
+                  var newName = (prev && prev.new && prev.new.title) || nid || 'nuevo título';
+                  var finish = function(centralOk) {
+                    if (!centralOk) {
+                      // Sin pregunta inútil: el item no cargaría en el editor.
+                      toast('Corte guardado pero la central no se actualizó (ver log gateway). Reintenta desde Unir/Re-sincronizar más tarde.');
+                      close();
+                      refreshAfterSplit(realItem, nid);
+                      return;
+                    }
+                    // Única pregunta: ¿editar el título recién generado?
+                    var edit = confirm('Corte creado: "' + newName + '"\n¿Editar el nuevo título ahora?');
+                    close();
+                    refreshAfterSplit(realItem, nid);
+                    if (edit) {
+                      setTimeout(function() {
+                        try {
+                          if (window.Enricher && window.Enricher.open) window.Enricher.open({ item_id: nid, title: newName });
+                          else toast('Editor no disponible');
+                        } catch (eE) { toast('No se pudo abrir el editor'); }
+                      }, 300);
+                    } else {
+                      toast('Corte creado: ' + nid + ' (' + ((prev && prev.new && prev.new.count) || '?') + ' eps)');
+                    }
+                  };
+                  if (res && res.central_refreshed === false) {
+                    // Sin mensaje intermedio: reintento directo y se sigue.
+                    ajax(API + '/resync', { method: 'POST', data: {} }, function(e4, rr) {
+                      finish(!!(rr && rr.ok));
+                    });
+                  } else {
+                    finish(true);
+                  }
                 });
               });
             };
@@ -203,20 +508,35 @@
         }
         var un = body.querySelector('.slicer-unsplit');
         if (un) un.onclick = function() {
+          var origId = (cut && cut.orig_item_id) || null;
           var origName = (cut && (cut.orig_title || cut.orig_item_id)) || 'el original';
           if (!confirm('Unir esta parte con "' + origName + '"?\nLos episodios vuelven al título original.')) return;
-          un.disabled = true;
+          setBusy('Uniendo y sincronizando (puede tardar unos segundos)');
           ajax(API + '/unsplit', { method: 'POST', data: { new_item_id: itemId } }, function(eU, res) {
-            un.disabled = false;
+            setBusy(null);
             if (eU) { toast('Unir falló: ' + (eU.message || eU)); return; }
-            toast('Unido: ' + (res.restored || 0) + ' episodios devueltos'
-              + (res.central_refreshed === false ? ' (central pendiente: ' + (res.warn || '') + ')' : ''));
             close();
-            try {
-              if (window.Catalog && window.Catalog.currentCategory === 'local_edits'
-                && typeof selectSection === 'function') selectSection('local_edits', document.querySelector('[data-category="local_edits"]'));
-              else if (window.Catalog && typeof window.Catalog.refreshGridCover === 'function' && cut && cut.orig_item_id) window.Catalog.refreshGridCover(cut.orig_item_id);
-            } catch (eR) {}
+            // Recarga completa como tras el split (si no, la parte unida sigue visible).
+            refreshAfterSplit(origId || itemId, itemId);
+            // Ir al hero del título destino: la parte ya no existe.
+            setTimeout(function() {
+              try { if (origId && window.openDetails) window.openDetails(origId); } catch (eO) {}
+            }, 400);
+            if (res.central_refreshed === false) {
+              toast('Unido pero la central no se actualizó (ver log gateway).');
+              return;
+            }
+            var edit = confirm('Unido con "' + origName + '" (' + (res.restored || 0) + ' episodios).\n¿Editar el título unido ahora?');
+            if (edit) {
+              setTimeout(function() {
+                try {
+                  if (window.Enricher && window.Enricher.open) window.Enricher.open({ item_id: origId, title: origName });
+                  else toast('Editor no disponible');
+                } catch (eE) { toast('No se pudo abrir el editor'); }
+              }, 600);
+            } else {
+              toast('Unido con ' + origName);
+            }
           });
         };
       });

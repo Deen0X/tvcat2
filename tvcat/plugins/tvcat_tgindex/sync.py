@@ -38,8 +38,12 @@ def _ensure_plugin_db_copy():
 def _get_plugin_conn():
     _ensure_plugin_db_copy()
     os.makedirs(os.path.dirname(PLUGIN_DB), exist_ok=True)
-    conn = sqlite3.connect(PLUGIN_DB)
+    conn = sqlite3.connect(PLUGIN_DB, timeout=30)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
     return conn
 
 
@@ -211,11 +215,18 @@ def sync():
 
     enabled_channels = _get_enabled_channels()
 
-    # Limpiar export tables para refresco completo
-    c.execute("DELETE FROM plugin_catalog_export")
-    c.execute("DELETE FROM plugin_episodes_export")
+    # Export en tablas _new + swap atómico (2026-09-22): los lectores
+    # (incrementales) nunca ven el export a medio construir.
+    for _t in ("plugin_catalog_export", "plugin_episodes_export"):
+        try:
+            c.execute(f"DROP TABLE IF EXISTS {_t}_new")
+            _ddl = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                             (_t,)).fetchone()[0]
+            c.execute(_ddl.replace(_t, _t + "_new", 1))
+        except Exception as _e:
+            print(f" [TGINDEX] swap-export setup {_t}: {_e}")
 
-    # Copiar unified_catalog → plugin_catalog_export
+    # Copiar unified_catalog → plugin_catalog_export_new
     items_copied = 0
     catalog_rows = c.execute("SELECT * FROM unified_catalog").fetchall()
     for row in catalog_rows:
@@ -225,7 +236,7 @@ def sync():
         sync_status = "active" if source_tag in enabled_channels else "deleted"
 
         c.execute("""
-            INSERT INTO plugin_catalog_export
+            INSERT INTO plugin_catalog_export_new
             (item_id, title, category, subcategory, description, year, rating,
              alt_titles, cover_url, telegram_link, telegram_msg_id,
              group_title, group_title_flat, season_display,
@@ -283,7 +294,7 @@ def sync():
         ).fetchone()
 
         insert_cursor.execute("""
-            INSERT INTO plugin_episodes_export
+            INSERT INTO plugin_episodes_export_new
             (id, item_id, episode_number, season_number, title, duration,
              telegram_msg_id, telegram_link, file_size, file_name, caption,
              tg_user_id, client_type, sync_status, sync_timestamp)
@@ -307,6 +318,13 @@ def sync():
         ))
         eps_copied += 1
 
+    # Swap atómico: lo nuevo sustituye a lo viejo de una vez.
+    for _t in ("plugin_catalog_export", "plugin_episodes_export"):
+        c.execute(f"DROP TABLE IF EXISTS {_t}_old")
+        c.execute(f"ALTER TABLE {_t} RENAME TO {_t}_old")
+        c.execute(f"ALTER TABLE {_t}_new RENAME TO {_t}")
+        c.execute(f"DROP TABLE IF EXISTS {_t}_old")
+
     conn.commit()
     conn.close()
     print(f" [TGINDEX SYNC] Exportación: {items_copied} items, {eps_copied} episodios "
@@ -316,12 +334,12 @@ def sync():
 
 def reconcile_availability(ordered_tags):
     """2026-09-04: orquestación en el PLUGIN (el core solo pone primitivas):
-    wipe total de tgindex en central y copia solo de los tags habilitados, en orden.
-    Sin diffs parciales: imposible dejar restos. Sin registry (ruta directa)."""
-    from services.catalog_service import wipe_plugin_central, sync_plugin_db_copy
-    w = wipe_plugin_central("tvcat_tgindex")
-    if not w.get("success"):
-        return w
+    copia solo de los tags habilitados, en orden. Sin wipe total: cada copia
+    sella su generación y al final se purgan las rancias (sin ventana sin
+    títulos). Sin registry (ruta directa)."""
+    import time as _time
+    from services.catalog_service import purge_stale_central, sync_plugin_db_copy
+    _gen = int(_time.time() * 1000)
     total_items, total_eps = 0, 0
     for tag in (ordered_tags or []):
         refresh_export_source(tag)
@@ -334,9 +352,13 @@ def reconcile_availability(ordered_tags):
         ids = [r["item_id"] for r in rows if r["item_id"]]
         if not ids:
             continue
-        res = sync_plugin_db_copy(PLUGIN_DB, "tvcat_tgindex", ids, True)
+        res = sync_plugin_db_copy(PLUGIN_DB, "tvcat_tgindex", ids, True, gen=_gen)
         total_items += res.get("items", 0)
         total_eps += res.get("episodes", 0)
+    try:
+        purge_stale_central("tvcat_tgindex", _gen)
+    except Exception as e:
+        print(f" [TGIndex] reconcile purge: {e}")
     print(f" [TGIndex] Reconcile: {total_items} items, {total_eps} episodios ({len(ordered_tags or [])} sources)")
     return {"success": True, "items": total_items, "episodes": total_eps}
 
