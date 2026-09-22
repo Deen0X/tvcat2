@@ -207,7 +207,7 @@
         html += '</div>';
         // hasEnriched es falso en localOnly (enriched=null): el Revertir (borra lo
         // COMPARTIDO) nunca se pinta en la cola.
-        if (hasEnriched) html += '<button id="enricher-revert" style="width:100%;margin-top:8px;padding:6px;background:transparent;border:1px solid #ef4444;color:#f87171;border-radius:6px;cursor:pointer;font-size:0.8rem;">Revertir enriquecimiento</button>';
+        if (hasEnriched) html += '<button id="enricher-revert" style="width:100%;margin-top:8px;padding:6px;background:transparent;border:1px solid #ef4444;color:#f87171;border-radius:6px;cursor:pointer;font-size:0.8rem;">Volver a cover original</button>';
         html += '<div id="enricher-status" style="margin-top:8px;font-size:0.75rem;color:#a1a1aa;min-height:1.2em;"></div>';
         panel.innerHTML = html;
         overlay.appendChild(panel);
@@ -1446,6 +1446,7 @@
                     if (_rj2.title_applied && _rj2.catalog_title) _msg += ' · Título catálogo: ' + _rj2.catalog_title;
                 } catch (_e2) {}
                 setStatus(_msg);
+                try { if (window.Enricher && window.Enricher.refreshLocalEdits) window.Enricher.refreshLocalEdits(); } catch (_eR) {}
                 // Llamada externa (p.ej. cola TGHirayi): devolver el resultado al
                 // callback en vez de reabrir la hero. El guardado en el registry
                 // compartido ya se ha hecho (propaga a catálogo).
@@ -1478,7 +1479,7 @@
             if (!confirm('Eliminar el enriquecimiento local de este titulo?')) return;
             fetch('/api/enricher/item/' + encodeURIComponent(itemId), { method: 'DELETE' })
                 .then(function (r) { return r.json(); })
-                .then(function () { setStatus('Revertido'); setTimeout(backToHero, 600); })
+                .then(function () { setStatus('Revertido'); try { if (window.Enricher && window.Enricher.refreshLocalEdits) window.Enricher.refreshLocalEdits(); } catch (_eR2) {} setTimeout(backToHero, 600); })
                 .catch(function () { setStatus('Error al revertir', true); });
         }
     }
@@ -1488,6 +1489,18 @@
     // title_applied}) se llama tras guardar, en vez de reabrir la hero.
     window.Enricher = window.Enricher || {};
     window.Enricher.open = openEnricher;
+    // Tras guardar/aplicar/revertir: la sección Ediciones locales puede
+    // aparecer, desaparecer o cambiar (el apply borra la fila local).
+    window.Enricher.refreshLocalEdits = function () {
+        try { if (window.refreshLocalEditsNav) window.refreshLocalEditsNav(); } catch (e) {}
+        try {
+            if (window.Catalog && window.Catalog.currentCategory === 'local_edits'
+                && typeof selectSection === 'function') {
+                var cur = document.querySelector('[data-category="local_edits"]');
+                setTimeout(function () { selectSection('local_edits', cur); }, 400);
+            }
+        } catch (e2) {}
+    };
 
     window.pluginSystem.registerPlugin({
         name: 'tvcat_enricher',

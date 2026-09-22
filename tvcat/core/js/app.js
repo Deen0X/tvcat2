@@ -53,6 +53,28 @@ window.refreshHiddenNav = function() {
     } catch (e) {}
 };
 
+// Visibilidad de Ediciones locales: solo si hay copias (global).
+window.refreshLocalEditsNav = function() {
+    try {
+        var el = document.getElementById('nav-local-edits');
+        if (!el) return;
+        window.API.ajax({
+            url: '/api/enricher/has_local',
+            success: function(res) {
+                try {
+                    var n = (res && res.count) || 0;
+                    el.style.display = n > 0 ? '' : 'none';
+                    if (!(n > 0) && window.Catalog && window.Catalog.currentCategory === 'local_edits'
+                        && typeof selectSection === 'function') {
+                        selectSection('home', document.querySelector('[data-category="home"]'));
+                    }
+                } catch (e) {}
+            },
+            error: function() {}
+        });
+    } catch (e) {}
+};
+
 // --- Search with wildcards ---
 function parseWildcardSearch(query) {
     var normalized = query.toLowerCase().trim().replace(/\s+/g, ' ');
@@ -2230,6 +2252,7 @@ function loadSettings() {
                         is_admin: !!(session && session.role === 'admin')
                     };
                     if (window.refreshHiddenNav) window.refreshHiddenNav();
+                    if (window.refreshLocalEditsNav) window.refreshLocalEditsNav();
                 } catch (eU) {}
             },
             error: function() {}
@@ -2263,6 +2286,7 @@ function loadSettings() {
                         category_preferences: config.category_preferences || {}
                     };
                     try { if (window.refreshHiddenNav) window.refreshHiddenNav(); } catch (eH) {}
+                    try { if (window.refreshLocalEditsNav) window.refreshLocalEditsNav(); } catch (eH2) {}
                     // Re-renderizar formulario de perfil si el modal est\u00E1 visible
                     if (!document.getElementById('settings-modal').classList.contains('hidden')) {
                         if (window.UI) window.UI.initSettingsModalContent();

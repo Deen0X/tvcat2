@@ -123,7 +123,27 @@
       if (err) { toast('No se pudo cargar episodios'); return; }
       var eps = flattenSeasons(seasons);
       if (!eps.length) { toast('Sin episodios'); return; }
-      var html = '<p>Episodios: ' + eps.length + '. Toca ✂️ para cortar desde ese episodio:</p>'
+      // ¿Es parte de un corte? Línea "Unir con original" sobre el listado.
+      ajax(API + '/cut_of?item_id=' + encodeURIComponent(itemId), { method: 'GET' }, function(eCut, cutRes) {
+        var cut = (!eCut && cutRes && cutRes.cut) ? cutRes.cut : null;
+        buildList(eps, cut);
+      });
+    });
+    function buildList(eps, cut) {
+      var html = '';
+      if (cut) {
+        var origTitle = esc(cut.orig_title || cut.orig_item_id || 'original');
+        var origCover = '/api/cover/' + encodeURIComponent(cut.orig_item_id || '');
+        var origLink = cut.orig_link
+          ? '<a href="' + esc(cut.orig_link) + '" target="_blank" style="color:#a855f7;">' + origTitle + '</a>'
+          : origTitle;
+        html += '<div style="display:flex;align-items:center;gap:10px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.4);border-radius:8px;padding:8px 10px;margin-bottom:10px;">'
+          + '<img src="' + origCover + '" style="width:48px;height:72px;object-fit:cover;border-radius:4px;" onerror="this.style.display=\'none\'">'
+          + '<div style="flex:1;font-size:0.8rem;color:#f4f4f5;">Parte de<br><b>' + origLink + '</b></div>'
+          + '<button class="slicer-unsplit" style="background:#a855f7;border:none;border-radius:6px;padding:8px 12px;color:#fff;font-weight:700;font-size:0.8rem;cursor:pointer;white-space:nowrap;">Unir con original</button>'
+          + '</div>';
+      }
+      html += '<p>Episodios: ' + eps.length + '. Toca ✂️ para cortar desde ese episodio:</p>'
         + '<div style="display:flex;flex-direction:column;gap:8px;">';
       for (var i = 0; i < eps.length; i++) {
         var ep = eps[i];
@@ -181,8 +201,26 @@
             };
           })(btns[k]);
         }
+        var un = body.querySelector('.slicer-unsplit');
+        if (un) un.onclick = function() {
+          var origName = (cut && (cut.orig_title || cut.orig_item_id)) || 'el original';
+          if (!confirm('Unir esta parte con "' + origName + '"?\nLos episodios vuelven al título original.')) return;
+          un.disabled = true;
+          ajax(API + '/unsplit', { method: 'POST', data: { new_item_id: itemId } }, function(eU, res) {
+            un.disabled = false;
+            if (eU) { toast('Unir falló: ' + (eU.message || eU)); return; }
+            toast('Unido: ' + (res.restored || 0) + ' episodios devueltos'
+              + (res.central_refreshed === false ? ' (central pendiente: ' + (res.warn || '') + ')' : ''));
+            close();
+            try {
+              if (window.Catalog && window.Catalog.currentCategory === 'local_edits'
+                && typeof selectSection === 'function') selectSection('local_edits', document.querySelector('[data-category="local_edits"]'));
+              else if (window.Catalog && typeof window.Catalog.refreshGridCover === 'function' && cut && cut.orig_item_id) window.Catalog.refreshGridCover(cut.orig_item_id);
+            } catch (eR) {}
+          });
+        };
       });
-    });
+    }
   }
 
   if (window.pluginSystem) {

@@ -7,5 +7,5 @@
     "defaultEnabled": true,
     "icon": "static/plugin_icon.png",
     "iconEmoji": "✂️",
-    "js": ["slicer.js?v=20260915h"]
+    "js": ["slicer.js?v=20260922a"]
 }

@@ -679,7 +679,18 @@ async def apply_enriched(item_id: str, body: SaveReq, request: Request):
         )
         if not res.get("ok"):
             raise HTTPException(status_code=502, detail=res.get("error") or "edit_message falló")
+        # Editado en Telegram: la copia local deja de ser necesaria
+        # ("pendiente de sincronizar"; el título ya se propagó al guardar y
+        # los rescans leerán el mensaje editado). Best-effort.
+        try:
+            _dc = _conn()
+            _dc.execute("DELETE FROM enriched_covers WHERE channelid_msgid=?", (key,))
+            _dc.commit()
+            _dc.close()
+        except Exception:
+            pass
         return {"ok": True, "channelid_msgid": key, "edited": True, "author_user_id": author_tid,
+                "local_kept": False,
                 "title_applied": bool((saved or {}).get("title_applied")),
                 "catalog_title": (saved or {}).get("catalog_title") or ""}
     except HTTPException:
@@ -699,3 +710,242 @@ async def delete_enriched(item_id: str, request: Request):
     deleted = conn.total_changes
     conn.close()
     return {"ok": True, "deleted": bool(deleted), "channelid_msgid": key}
+
+
+# ─── Ediciones locales: listado + bulk (LocalEdits_Implementation_Plan.md) ───
+class BulkReq(BaseModel):
+    keys: List[str] = []
+
+
+def _local_session_user(request: Request) -> dict:
+    from services.auth_service import get_session
+    s = get_session(request.cookies.get("tvcat_session", ""))
+    if not s:
+        raise HTTPException(status_code=401, detail="Inicia sesión")
+    return s
+
+
+def _local_my_ids() -> set:
+    try:
+        return {int(x["tg_user_id"]) for x in _get_my_userbots() if x.get("tg_user_id")}
+    except Exception:
+        return set()
+
+
+def _local_slicer_new_ids() -> set:
+    """new_item_id de slicer_cuts (lectura cruzada best-effort, como unsplit)."""
+    try:
+        _p = os.path.normpath(os.path.join(
+            _PLUGIN_DIR, "..", "tvcat_episode_slicer", "data", "tvcat.db"))
+        if not os.path.isfile(_p):
+            return set()
+        _c = sqlite3.connect(f"file:{_p}?mode=ro", uri=True, timeout=10)
+        rows = _c.execute("SELECT new_item_id FROM slicer_cuts").fetchall()
+        _c.close()
+        return {str(r[0]) for r in rows if r and r[0]}
+    except Exception:
+        return set()
+
+
+async def _row_is_mine(row: dict, my_ids: set, request: Request) -> tuple:
+    """(is_mine, author_user_id). Autor cacheado si existe; si no, resolución
+    en vivo (solo caché central, sin red). Huérfanos (sin item) → no."""
+    try:
+        if row.get("author_user_id") and int(row["author_user_id"]) in my_ids:
+            return True, int(row["author_user_id"])
+    except Exception:
+        pass
+    try:
+        if row.get("author_user_id"):
+            return False, int(row["author_user_id"])
+    except Exception:
+        pass
+    iid = (row.get("item_id") or "").strip()
+    if not iid:
+        return False, None
+    try:
+        auth = await get_authorship(iid, request)
+        return bool(auth.get("is_mine")), auth.get("author_user_id")
+    except Exception:
+        return False, None
+
+
+def _central_by_ids(item_ids: list) -> dict:
+    if not item_ids:
+        return {}
+    try:
+        from services.catalog_service import get_conn
+        conn = get_conn()
+        out = {}
+        for _i in range(0, len(item_ids), 500):
+            _ch = item_ids[_i:_i + 500]
+            _q = ("SELECT * FROM unified_catalog WHERE item_id IN (%s)" %
+                  ",".join("?" * len(_ch)))
+            for _r in conn.execute(_q, _ch).fetchall():
+                try:
+                    out[str(_r["item_id"])] = dict(_r)
+                except Exception:
+                    continue
+        conn.close()
+        return out
+    except Exception:
+        return {}
+
+
+@router.get("/api/enricher/covers")
+async def list_local_covers(request: Request):
+    """Todas las copias locales con shape de catálogo (como /api/hidden)
+    + `_local={is_mine,is_cut,orphan}`. Para la sección Ediciones locales."""
+    _local_session_user(request)
+    conn = _conn()
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT channelid_msgid, item_id, telegram_msg_id, telegram_link,"
+            " cover_text, updated_at, author_user_id FROM enriched_covers"
+            " ORDER BY updated_at DESC").fetchall()]
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    my_ids = _local_my_ids()
+    cut_ids = _local_slicer_new_ids()
+    central = _central_by_ids([r["item_id"] for r in rows if r.get("item_id")])
+    items = []
+    for r in rows:
+        iid = str(r.get("item_id") or "")
+        base = central.get(iid)
+        is_mine, author = await _row_is_mine(r, my_ids, request)
+        loc = {"is_mine": is_mine, "author_user_id": author,
+               "is_cut": iid in cut_ids,
+               "channelid_msgid": r.get("channelid_msgid"),
+               "orphan": base is None}
+        if base is not None:
+            it = dict(base)
+        else:
+            # Huérfana (título borrado del catálogo): título del cover para
+            # poder limpiarla desde la sección.
+            _t = (r.get("cover_text") or "").strip().split("\n")[0][:80]
+            it = {"item_id": iid, "title": _t or "(sin título)",
+                  "category": "", "subcategory": "", "year": "",
+                  "description": "", "telegram_link": r.get("telegram_link") or ""}
+        it["_local"] = loc
+        items.append(it)
+    return {"items": items, "count": len(items)}
+
+
+@router.get("/api/enricher/has_local")
+async def has_local_covers(request: Request):
+    _local_session_user(request)
+    conn = _conn()
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM enriched_covers").fetchone()[0]
+    except Exception:
+        n = 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return {"count": int(n or 0)}
+
+
+@router.post("/api/enricher/bulk_delete")
+async def bulk_delete_covers(body: BulkReq, request: Request):
+    _local_session_user(request)
+    keys = [str(k or "").strip() for k in (body.keys or []) if str(k or "").strip()]
+    if not keys:
+        return {"ok": True, "deleted": 0, "missing": 0}
+    conn = _conn()
+    deleted = 0
+    try:
+        for k in keys:
+            cur = conn.execute(
+                "DELETE FROM enriched_covers WHERE channelid_msgid=?", (k,))
+            deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return {"ok": True, "deleted": deleted, "missing": len(keys) - deleted}
+
+
+@router.post("/api/enricher/bulk_apply")
+async def bulk_apply_covers(body: BulkReq, request: Request):
+    """Aplica en Telegram las copias indicadas (solo mensajes propios) con
+    los datos guardados y BORRA la fila local tras edit OK. Reporte por fila."""
+    _local_session_user(request)
+    keys = [str(k or "").strip() for k in (body.keys or []) if str(k or "").strip()]
+    if not keys:
+        return {"ok": True, "report": []}
+    conn = _conn()
+    try:
+        rows = {}
+        for k in keys:
+            r = conn.execute(
+                "SELECT * FROM enriched_covers WHERE channelid_msgid=?", (k,)).fetchone()
+            if r:
+                rows[k] = dict(r)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    my_ids = _local_my_ids()
+    report = []
+    for k in keys:
+        r = rows.get(k)
+        if not r:
+            report.append({"key": k, "ok": False, "skipped": True,
+                           "reason": "ya no existe"})
+            continue
+        try:
+            mid = int(r.get("telegram_msg_id") or 0)
+        except Exception:
+            mid = 0
+        if mid in (-999, -1000):
+            report.append({"key": k, "item_id": r.get("item_id"), "ok": False,
+                           "skipped": True, "reason": "cover ficticio: solo local"})
+            continue
+        is_mine, author = await _row_is_mine(r, my_ids, request)
+        if not is_mine or not author:
+            report.append({"key": k, "item_id": r.get("item_id"), "ok": False,
+                           "skipped": True, "reason": "mensaje ajeno"})
+            continue
+        link = r.get("telegram_link") or ""
+        m = re.search(r"/c/(\d+)/", link)
+        if not m:
+            report.append({"key": k, "item_id": r.get("item_id"), "ok": False,
+                           "error": "sin channel_id en el link"})
+            continue
+        try:
+            from services.telegram_service import get_telegram_service
+            svc = get_telegram_service()
+            res = await svc.edit_message(
+                channel_id="-100" + m.group(1), msg_id=mid,
+                text=r.get("cover_text") or "",
+                file_bytes=(bytes(r["poster_blob"]) if r.get("poster_blob") else None),
+                file_name="cover.jpg", tg_user_id=int(author))
+            if not (res or {}).get("ok"):
+                raise RuntimeError((res or {}).get("error") or "edit_message falló")
+        except Exception as e:
+            report.append({"key": k, "item_id": r.get("item_id"), "ok": False,
+                           "error": f"{type(e).__name__}: {str(e)[:150]}"})
+            continue
+        try:
+            c2 = _conn()
+            c2.execute("DELETE FROM enriched_covers WHERE channelid_msgid=?", (k,))
+            c2.commit()
+            c2.close()
+        except Exception:
+            pass
+        _t = ""
+        try:
+            _t = (r.get("cover_text") or "").strip().split("\n")[0][:80]
+        except Exception:
+            pass
+        report.append({"key": k, "item_id": r.get("item_id"), "title": _t,
+                       "ok": True, "local_kept": False})
+    return {"ok": True, "report": report}

@@ -514,6 +514,30 @@ async def list_cuts(request: Request, source: Optional[str] = None):
             pass
 
 
+@router.get("/api/slicer/cut_of")
+async def cut_of(request: Request, item_id: str):
+    """Corte del que proviene un título partido (para la línea Unir)."""
+    _require_user(request)
+    conn = _connect_plugin_db()
+    try:
+        _ensure_slicer_table(conn)
+        row = conn.execute("SELECT * FROM slicer_cuts WHERE new_item_id=?",
+                           (str(item_id or ""),)).fetchone()
+        if not row:
+            raise HTTPException(404, "no es parte de un corte")
+        cut = dict(row)
+        orig = _load_title(conn, cut.get("orig_item_id"))
+        if orig:
+            cut["orig_title"] = orig.get("title") or cut.get("orig_item_id")
+            cut["orig_link"] = orig.get("telegram_link") or ""
+        return {"cut": cut}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def reapply_slicer_cuts(source_tag: str) -> int:
     """F2: re-aplica cortes guardados tras regenerar el original en un rescan.
 

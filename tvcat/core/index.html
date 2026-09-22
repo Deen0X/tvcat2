@@ -96,6 +96,9 @@
             <a href="#" data-category="collections" onclick="selectSection('collections', this)">
                 <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM9 4h2v6l-1-.75L9 10V4zm9 16H6V4h1v9l3-2.25L13 13V4h5v16z"/></svg> Colecciones
             </a>
+            <a href="#" data-category="local_edits" id="nav-local-edits" style="display:none;" onclick="selectSection('local_edits', this)">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg> Ediciones locales
+            </a>
             <a href="#" data-category="hidden" onclick="selectSection('hidden', this)">
                 <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:currentColor;"><path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2.71 3.16L1.39 4.48l4.02 4.02C3.66 9.6 2.06 11.19 1 13c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l4.02 4.02 1.32-1.32L2.71 3.16zM12 17c-2.76 0-5-2.24-5-5 0-.77.18-1.5.49-2.14l1.57 1.57A3.01 3.01 0 0 0 9 12c0 1.66 1.34 3 3 3l4.14 4.14c-.59.32-1.26.51-1.99.59L12 17zm2.5-4.31l-4.19-4.19 4.19 4.19z"/></svg> Ocultos
             </a>
@@ -123,6 +126,7 @@
         <div class="section-header">
             <h1 id="category-title" class="section-title">Catálogo</h1>
             <span id="results-count" class="results-badge">0 ítems</span>
+            <span id="section-actions" style="display:none;margin-left:auto;"></span>
         </div>
         <div id="catalog-grid" class="catalog-grid">
             <!-- Poblado dinámicamente -->
@@ -938,9 +942,9 @@
     <script src="js/assistants.js?v=20260910a"></script>    <script src="js/navEngine.js?v=20260801"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
     <script src="js/inputHelper.js?v=20260903q"></script>
-    <script src="js/catalog.js?v=20260910k"></script>
+    <script src="js/catalog.js?v=20260922a"></script>
     <script src="js/player.js?v=20260801"></script>
     <script src="js/ui2.js?v=20260910b"></script>
-    <script src="js/app.js?v=20260922d"></script>
+    <script src="js/app.js?v=20260922e"></script>
 </body>
 </html>

@@ -125,6 +125,11 @@
             _doHiddenLoad();
             return;
         }
+        // Sección ediciones locales: vive en el endpoint del enriquecedor
+        if (currentCategory === 'local_edits') {
+            _doLocalEditsLoad();
+            return;
+        }
         var url = '/api/catalog/' + currentCategory;
         var fp = buildFilterParams();
         if (fp.length) url += '?' + fp.join('&');
@@ -165,6 +170,12 @@
         if (currentCategory === 'hidden' || currentCategory === 'hidden_blocked') {
             window._activeCollection = null;
             _doHiddenLoad(query);
+            return;
+        }
+        // Dentro de ediciones locales, la búsqueda filtra la propia sección.
+        if (currentCategory === 'local_edits') {
+            window._activeCollection = null;
+            _doLocalEditsLoad(query);
             return;
         }
         window._activeCollection = null;
@@ -223,7 +234,7 @@
         try {
             var el = document.getElementById('category-title');
             if (!el) return;
-            var map = { home: 'Catálogo', favorites: 'Favoritos', continue: 'Seguir Viendo', completed: 'Vistos', collections: 'Colecciones', hidden: 'Ocultos', hidden_blocked: 'Ocultos Parental' };
+            var map = { home: 'Catálogo', favorites: 'Favoritos', continue: 'Seguir Viendo', completed: 'Vistos', collections: 'Colecciones', hidden: 'Ocultos', hidden_blocked: 'Ocultos Parental', local_edits: 'Ediciones locales' };
             var label = map[currentCategory];
             if (!label) {
                 label = String(currentCategory || 'home');
@@ -237,6 +248,7 @@
         var grid = document.getElementById('catalog-grid');
         if (!grid) return;
         updateSectionTitle();
+        try { _renderLocalEditsToolbar(); } catch (e) {}
         // La cabecera de colección solo vive en modo colección.
         if (!window._activeCollection) _hideCollectionHeader();
 
@@ -650,6 +662,139 @@
                 if (mySeq !== _loadSeq) return;
                 showLoading(false);
             }
+        });
+    }
+    // Sección Ediciones locales: copias en enriched_covers con shape de
+    // catálogo (como ocultos). Toolbar con bulk delete/apply.
+    function _doLocalEditsLoad(query) {
+        var q = window.sanitizeSearchText(query || '').trim().toLowerCase();
+        var mySeq = ++_loadSeq;
+        showLoading(true);
+        window.API.ajax({
+            url: '/api/enricher/covers',
+            success: function(data) {
+                if (mySeq !== _loadSeq) return;
+                currentItems = data.items || [];
+                if (q.length >= 2) {
+                    currentItems = currentItems.filter(function(it) {
+                        var t = String((it && it.title) || '').toLowerCase();
+                        return t.indexOf(q) !== -1;
+                    });
+                }
+                renderItems(currentItems);
+                updateBadge(currentItems.length);
+                _renderLocalEditsToolbar();
+                showLoading(false);
+            },
+            error: function() {
+                if (mySeq !== _loadSeq) return;
+                showLoading(false);
+            }
+        });
+    }
+    function _renderLocalEditsToolbar() {
+        var bar = document.getElementById('section-actions');
+        if (!bar) return;
+        if (currentCategory !== 'local_edits') { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+        bar.style.display = '';
+        bar.innerHTML = '';
+        var b1 = document.createElement('button');
+        b1.textContent = 'Actualizar en Telegram';
+        b1.title = 'Aplica en Telegram las copias de mensajes propios y las elimina en local';
+        b1.style.cssText = 'margin-left:8px;padding:5px 12px;font-size:0.75rem;background:#22c55e;border:none;border-radius:6px;color:#fff;font-weight:700;cursor:pointer;';
+        b1.onclick = function() { _openBulkApplyModal(); };
+        var b2 = document.createElement('button');
+        b2.textContent = 'Eliminar locales';
+        b2.title = 'Elimina las copias locales filtradas (vuelven al cover original)';
+        b2.style.cssText = 'margin-left:8px;padding:5px 12px;font-size:0.75rem;background:transparent;border:1px solid #ef4444;border-radius:6px;color:#f87171;cursor:pointer;';
+        b2.onclick = function() { _openBulkDeleteModal(); };
+        bar.appendChild(b1);
+        bar.appendChild(b2);
+    }
+    function _localEditsModal(title, rows, okLabel, onConfirm) {
+        var ov = document.createElement('div');
+        ov.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(9,9,11,0.9);z-index:999999;display:flex;align-items:center;justify-content:center;';
+        var box = document.createElement('div');
+        box.style.cssText = 'background:rgba(24,24,27,0.98);border:1px solid rgba(168,85,247,0.4);border-radius:12px;width:92%;max-width:520px;max-height:84vh;overflow-y:auto;padding:18px;';
+        var h = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+            + '<h3 style="margin:0;font-size:1rem;color:#f4f4f5;">' + title + '</h3>'
+            + '<button data-x style="background:none;border:none;color:#a1a1aa;font-size:1.2rem;cursor:pointer;">X</button></div>'
+            + '<div style="display:flex;flex-direction:column;gap:6px;max-height:50vh;overflow-y:auto;">';
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            var sub = r.sub ? ' <span style="color:#a1a1aa;">(' + r.sub + ')</span>' : '';
+            h += '<label style="display:flex;gap:8px;align-items:flex-start;font-size:0.8rem;color:#f4f4f5;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:6px 8px;cursor:pointer;">'
+                + '<input type="checkbox" data-k="' + String(r.key).replace(/"/g, '') + '" checked style="margin-top:3px;">'
+                + '<span>' + String(r.title || '(sin título)') + sub + '</span></label>';
+        }
+        h += '</div><div data-report style="font-size:0.75rem;margin-top:8px;"></div>'
+            + '<div style="display:flex;gap:8px;margin-top:10px;">'
+            + '<button data-ok style="flex:1;background:#22c55e;border:none;border-radius:6px;padding:8px;color:#fff;font-weight:700;cursor:pointer;">' + okLabel + '</button>'
+            + '<button data-cancel style="flex:1;background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;cursor:pointer;">Cancelar</button></div>';
+        box.innerHTML = h;
+        ov.appendChild(box);
+        document.body.appendChild(ov);
+        var close = function() { ov.remove(); };
+        box.querySelector('[data-x]').onclick = close;
+        box.querySelector('[data-cancel]').onclick = close;
+        ov.addEventListener('click', function(e) { if (e.target === ov) close(); });
+        box.querySelector('[data-ok]').onclick = function() {
+            var cks = box.querySelectorAll('input[type=checkbox]:checked');
+            var keys = [];
+            for (var j = 0; j < cks.length; j++) keys.push(cks[j].getAttribute('data-k'));
+            if (!keys.length) { alert('Marca al menos uno.'); return; }
+            var rep = box.querySelector('[data-report]');
+            rep.textContent = 'Procesando…';
+            onConfirm(keys, rep, close);
+        };
+    }
+    function _localEditsReload() {
+        try { if (window.refreshLocalEditsNav) window.refreshLocalEditsNav(); } catch (e) {}
+        if (currentCategory === 'local_edits') _doLocalEditsLoad();
+    }
+    function _openBulkDeleteModal() {
+        var rows = (currentItems || []).map(function(it) {
+            var loc = it._local || {};
+            var sub = loc.is_cut ? 'corte' : (loc.orphan ? 'huérfano' : (loc.is_mine ? 'propio' : 'ajeno'));
+            return { key: loc.channelid_msgid, title: it.title, sub: sub };
+        }).filter(function(r) { return !!r.key; });
+        if (!rows.length) { alert('Nada que eliminar.'); return; }
+        _localEditsModal('Eliminar copias locales (' + rows.length + ')', rows, 'Eliminar', function(keys, rep, close) {
+            window.API.ajax({
+                method: 'POST', url: '/api/enricher/bulk_delete', data: { keys: keys },
+                success: function(res) {
+                    rep.innerHTML = res && res.ok
+                        ? '✅ Eliminadas: ' + res.deleted + ' (no encontradas: ' + (res.missing || 0) + ')'
+                        : '❌ ' + ((res && res.error) || 'Error');
+                    setTimeout(function() { close(); _localEditsReload(); }, 1200);
+                },
+                error: function() { rep.textContent = '❌ Error de red'; }
+            });
+        });
+    }
+    function _openBulkApplyModal() {
+        var rows = (currentItems || []).map(function(it) {
+            var loc = it._local || {};
+            if (!loc.is_mine) return null;
+            return { key: loc.channelid_msgid, title: it.title, sub: loc.is_cut ? 'corte' : 'propio' };
+        }).filter(function(r) { return !!r && !!r.key; });
+        if (!rows.length) { alert('Nada actualizable: solo mensajes propios.'); return; }
+        _localEditsModal('Actualizar en Telegram (' + rows.length + ')', rows, 'Actualizar', function(keys, rep, close) {
+            window.API.ajax({
+                method: 'POST', url: '/api/enricher/bulk_apply', data: { keys: keys },
+                success: function(res) {
+                    if (!res || !res.ok) { rep.textContent = '❌ ' + ((res && res.error) || 'Error'); return; }
+                    var ok = 0, skip = 0, fail = 0, html = '';
+                    (res.report || []).forEach(function(r) {
+                        if (r.ok) { ok++; html += '✅ ' + (r.title || r.item_id || r.key) + '<br>'; }
+                        else if (r.skipped) { skip++; html += '⏭️ ' + (r.item_id || r.key) + ': ' + (r.reason || '') + '<br>'; }
+                        else { fail++; html += '❌ ' + (r.item_id || r.key) + ': ' + (r.error || '') + '<br>'; }
+                    });
+                    rep.innerHTML = 'Actualizadas: ' + ok + ' · Omitidas: ' + skip + ' · Fallos: ' + fail + '<br>' + html;
+                    setTimeout(function() { close(); _localEditsReload(); }, 2500);
+                },
+                error: function() { rep.textContent = '❌ Error de red'; }
+            });
         });
     }
     Catalog.loadCollections = function() {
