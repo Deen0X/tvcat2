@@ -1092,19 +1092,32 @@ def _hide_candidate_topic_name(title: str = "", year: str = "", description: str
 
 async def _probe_topics_count(channel_id: str):
     """Una sola página (limit=1) para leer el `count` del servidor y capturar
-    el error REAL (acceso, entidad, FloodWait...). Usa el pool compartido:
-    no crea conexión nueva ni desconecta. Devuelve (count|None, error|None)."""
+    el error REAL (acceso, entidad, FloodWait...). Usa el pool compartido con
+    el cliente PREFERIDO (pyro por raw, telethon por request): no crea
+    conexión nueva ni desconecta. Devuelve (count|None, error|None)."""
     try:
-        from tvcat.services.userbot_service import get_active_client
-        wrapper = await get_active_client("telethon")
+        from tvcat.services.userbot_service import (
+            get_active_client, get_preferred_client_type)
+        ctype = get_preferred_client_type()
+        wrapper = await get_active_client(ctype)
         client = getattr(wrapper, "_client", wrapper) if wrapper else None
         if not client:
-            return None, "sin cliente telethon en el pool (¿solo pyrogram?)"
-        from telethon.tl.functions.messages import GetForumTopicsRequest
+            return None, f"sin cliente {ctype} en el pool"
         try:
             _cid: object = int(str(channel_id))
         except Exception:
             _cid = str(channel_id)
+        if getattr(wrapper, "_type", ctype) == "pyrogram":
+            from pyrogram.raw import functions as _rf
+            try:
+                peer = await client.resolve_peer(_cid)
+            except Exception:
+                peer = _cid
+            res = await client.invoke(_rf.messages.GetForumTopics(
+                peer=peer, offset_date=0, offset_id=0,
+                offset_topic=0, limit=1))
+            return int(getattr(res, "count", 0) or 0), None
+        from telethon.tl.functions.messages import GetForumTopicsRequest
         entity = await client.get_entity(_cid)
         peer = await client.get_input_entity(entity)
         res = await client(GetForumTopicsRequest(
@@ -3464,13 +3477,35 @@ def _resolve_topic_id(dest: dict, title: str) -> Optional[int]:
     return None
 
 
+async def _preferred_first() -> list:
+    """Orden de clientes: preferido (Comportamiento Telegram) primero,
+    el otro de fallback. Sin telethon fijo: en instancias solo-pyrogram el
+    listado/verificación ya no puede exigirlo."""
+    try:
+        from tvcat.services.userbot_service import get_preferred_client_type
+        preferred = get_preferred_client_type()
+    except Exception:
+        preferred = "telethon"
+    return [preferred] + (["telethon"] if preferred == "pyrogram" else ["pyrogram"])
+
+
 async def _list_forum_topics(client, dest: dict, job: dict = None) -> list:
     """Topics del canal foro vía servicio central. Devuelve [{id, title}].
-    SIEMPRE por Telethon (decisión 2026-09: pyrofork no es fiable para topics;
-    el ajuste global no aplica aquí)."""
+    Preferido primero + fallback (el servicio lista por pyro raw o telethon
+    según el tipo; antes era SIEMPRE telethon y en instancias sin sesión
+    telethon válida fallaba todo)."""
+    for ctype in await _preferred_first():
+        try:
+            creds = _svc_creds(job)
+            creds["client_type"] = ctype
+            items = await _svc().list_forum_topics(dest["channel_id"], **creds)
+            if items:
+                return items or []
+        except Exception as e:
+            print(f"[TGHirayi_v2] Error listando topics ({ctype}): {e}", flush=True)
+    # Último intento sin exigir items (canal sin topics devuelve [] real).
     try:
         creds = _svc_creds(job)
-        creds["client_type"] = "telethon"
         items = await _svc().list_forum_topics(dest["channel_id"], **creds)
         return items or []
     except Exception as e:
@@ -3606,19 +3641,21 @@ async def _topic_find_cached(client, dest: dict, title: str, job: dict = None) -
 
 async def _verify_topic_alive(client, dest: dict, topic_id: int, job: dict = None) -> bool:
     """Verificación viva antes de saltar: confirma que el topic_id sigue existiendo.
-    Vía servicio + Telethon forzado (igual que listado). Fail-safe: ante error se sube."""
-    try:
-        creds = _svc_creds(job)
-        creds["client_type"] = "telethon"
-        items = await _svc().list_forum_topics(dest["channel_id"], **creds)
-        for t in items or []:
-            tid = (t.get("id") if isinstance(t, dict) else getattr(t, 'id', None))
-            if tid is not None and int(tid) == int(topic_id):
-                return True
-        return False
-    except Exception as e:
-        print(f"[TGHirayi_v2] Error verificando topic {topic_id}: {e} → se sube (fail-safe)", flush=True)
-        return False
+    Preferido primero + fallback (igual que listado). Fail-safe: ante error se sube."""
+    for ctype in await _preferred_first():
+        try:
+            creds = _svc_creds(job)
+            creds["client_type"] = ctype
+            items = await _svc().list_forum_topics(dest["channel_id"], **creds)
+            for t in items or []:
+                tid = (t.get("id") if isinstance(t, dict) else getattr(t, 'id', None))
+                if tid is not None and int(tid) == int(topic_id):
+                    return True
+            return False
+        except Exception as e:
+            print(f"[TGHirayi_v2] Error verificando topic {topic_id} ({ctype}): {e} → prueba otro", flush=True)
+    print(f"[TGHirayi_v2] Error verificando topic {topic_id}: sin clientes → se sube (fail-safe)", flush=True)
+    return False
 
 async def _get_topic_episode_msg_ids(client, dest: dict, topic_id: int) -> List[int]:
     """msg_ids de episodios (vídeos) del topic existente en dest-0, orden ASC. F6.
@@ -3905,11 +3942,18 @@ def _fetch_episode_by_number(item_id: str, number: int) -> Optional[dict]:
 
 # ─── Normalización MP4 (ffmpeg) ───────────────────────────────────
 def _find_ffmpeg() -> Optional[str]:
-    """Busca ffmpeg en PATH (Linux/Docker), bundle propio o bundle del v1 (Windows)."""
+    """Busca ffmpeg en PATH (Linux/Docker), carpeta común tools/ffmpeg o bundles (Windows)."""
     import shutil
     p = shutil.which("ffmpeg")
     if p:
         return p
+    # Carpeta común (movida por el usuario): ./tools/ffmpeg desde el cwd de
+    # arranque + <tvcat>/tools/ffmpeg. Cubre .\tools\ffmpeg.
+    _tvcat_dir = os.path.dirname(os.path.dirname(_PLUGIN_DIR))
+    for _base in (os.getcwd(), _tvcat_dir):
+        _t = os.path.join(_base, "tools", "ffmpeg", "ffmpeg.exe")
+        if os.path.isfile(_t):
+            return _t
     bundle = os.path.join(_PLUGIN_DIR, "ffmpeg", "ffmpeg.exe")
     if os.path.isfile(bundle):
         return bundle

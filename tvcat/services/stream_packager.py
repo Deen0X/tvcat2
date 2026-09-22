@@ -25,11 +25,24 @@ INDEX_CACHE: Dict[int, list] = {}
 METADATA_CACHE: Dict[int, dict] = {}
 
 
+def _tools_ffmpeg(name: str):
+    """Carpeta común tools/ffmpeg: ./tools/ffmpeg desde cwd + <tvcat>/tools/ffmpeg."""
+    _tvcat = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for _base in (os.getcwd(), _tvcat):
+        _t = os.path.join(_base, "tools", "ffmpeg", name)
+        if os.path.isfile(_t):
+            return _t
+    return None
+
+
 def _find_ffmpeg():
     import shutil
     p = shutil.which("ffmpeg")
     if p:
         return p
+    t = _tools_ffmpeg("ffmpeg.exe")
+    if t:
+        return t
     # Ruta del plugin (relativa a este fichero: services/ -> raiz tvcat/)
     plugin_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -51,6 +64,9 @@ def _find_ffprobe():
     p = shutil.which("ffprobe")
     if p:
         return p
+    t = _tools_ffmpeg("ffprobe.exe")
+    if t:
+        return t
     plugin_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "plugins", "tvcat_TGHirayi", "ffmpeg", "ffprobe.exe"
