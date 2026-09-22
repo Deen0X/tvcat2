@@ -50,6 +50,9 @@
         try { console.log('[Enricher] open', itemData); } catch(e) {}
         var itemId = itemData.item_id;
         var _opts = opts || {};
+        // Customs frescos en cada apertura (si se editaron en Configuración,
+        // la caché de la SPA estaría rancia hasta recargar).
+        try { if (window.refreshCustomTags) window.refreshCustomTags(function(){}); } catch(eR) {}
         // Fetch estado + authorship en paralelo
         Promise.all([
             fetch('/api/enricher/item/' + encodeURIComponent(itemId)).then(function (r) { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).catch(function (e) { try { console.error('[Enricher] /item err', e); } catch(ex) {} return null; }),
@@ -527,10 +530,13 @@
         window._customTagsCache = window._customTagsCache || null;
         window.fetchCustomTags = function(cb) {
             if (window._customTagsCache) { if (cb) cb(window._customTagsCache); return; }
+            window.refreshCustomTags(cb);
+        };
+        window.refreshCustomTags = function(cb) {
             fetch('/api/enricher/custom-tags').then(function(r){ return r.json(); }).then(function(d){
                 window._customTagsCache = (d && d.custom) || {};
                 if (cb) cb(window._customTagsCache);
-            }).catch(function(){ if (cb) cb({}); });
+            }).catch(function(){ if (cb) cb(window._customTagsCache || {}); });
         };
         window.resolveCustomText = function(text, base) {
             var customs = window._customTagsCache || {};

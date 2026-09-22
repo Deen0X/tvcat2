@@ -659,12 +659,11 @@
                             <div style="font-size:0.7rem;color:var(--text-secondary);">Custom <code>{specialseason}</code> = plantilla con otros tags (ej: <code> - Season {temporada}</code>). Si algún tag referenciado está vacío, el custom entero da vacío. <code>\n</code> para saltos (sin salto automático). Nombres únicos (no igual a tags base ni a otros customs).</div>
                             <div style="display:flex;gap:6px;align-items:center;">
                                 <select id="ctag-select" class="variant-select" style="flex:1;padding:6px 8px;font-size:0.8rem;min-width:0;" onchange="onCustomTagSelect()"></select>
-                                <button class="btn-secondary" onclick="newCustomTag()" style="padding:6px 12px;font-size:0.8rem;white-space:nowrap;">+ Nuevo</button>
                                 <button class="btn-secondary" onclick="deleteCustomTag()" style="padding:6px 12px;font-size:0.8rem;white-space:nowrap;">Eliminar</button>
                             </div>
                             <div style="display:flex;gap:6px;align-items:center;">
                                 <label style="font-size:0.7rem;color:var(--text-secondary);min-width:52px;">Nombre:</label>
-                                <input type="text" id="ctag-name" placeholder="specialseason" class="settings-input" style="flex:1;padding:6px 8px;font-size:0.8rem;min-width:0;">
+                                <input type="text" id="ctag-name" placeholder="specialseason (escribir filtra; si no existe es nuevo)" class="settings-input" style="flex:1;padding:6px 8px;font-size:0.8rem;min-width:0;" oninput="onCustomTagNameInput()">
                             </div>
                             <div style="display:flex;gap:6px;align-items:flex-start;">
                                 <label style="font-size:0.7rem;color:var(--text-secondary);min-width:52px;padding-top:6px;">Formato:</label>

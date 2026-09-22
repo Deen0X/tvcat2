@@ -932,6 +932,47 @@ function loadUserbotConfig() {
     };
 
     window._ctCache = { custom: {}, base: [] };
+    window._ctPickerFilter = '';
+    // El campo Nombre filtra el combo: coincidencia exacta (insensible a
+    // mayúsculas) selecciona ese custom; si no existe, combo en __new__.
+    window.onCustomTagNameInput = function() {
+        var sel = document.getElementById('ctag-select');
+        var nameEl = document.getElementById('ctag-name');
+        var tplEl = document.getElementById('ctag-template');
+        if (!sel || !nameEl) return;
+        var typed = (nameEl.value || '').trim();
+        var customs = window._ctCache.custom || {};
+        var keys = Object.keys(customs).sort();
+        var vis = [];
+        for (var i = 0; i < keys.length; i++) {
+            if (!typed || keys[i].toLowerCase().indexOf(typed.toLowerCase()) !== -1) vis.push(keys[i]);
+        }
+        var exact = null;
+        for (var e = 0; e < keys.length; e++) {
+            if (keys[e].toLowerCase() === typed.toLowerCase() && typed) { exact = keys[e]; break; }
+        }
+        var cur = sel.value;
+        sel.innerHTML = '';
+        for (var k = 0; k < vis.length; k++) {
+            var o = document.createElement('option');
+            o.value = vis[k]; o.textContent = '{' + vis[k] + '}';
+            sel.appendChild(o);
+        }
+        var n = document.createElement('option');
+        n.value = '__new__'; n.textContent = '+ Nuevo custom…';
+        sel.appendChild(n);
+        if (exact && exact !== cur && tplEl) {
+            // Cambió a un custom existente: cargar su formato y fijar origen.
+            sel.value = exact;
+            tplEl.value = customs[exact] || '';
+            sel.setAttribute('data-old', exact);
+        } else if (exact) {
+            sel.value = exact;
+        } else {
+            sel.value = '__new__';
+        }
+        window.renderCustomTagPicker();
+    };
     window.loadCustomTags = function() {
         var sel = document.getElementById('ctag-select');
         if (!sel) return;
@@ -940,6 +981,8 @@ function loadUserbotConfig() {
         var done = function() {
             if (!gotCustom || !gotBase) return;
             window._ctCache = { custom: gotCustom, base: gotBase };
+            var sel = document.getElementById('ctag-select');
+            if (!sel) return;
             var keys = Object.keys(gotCustom).sort();
             sel.innerHTML = '';
             for (var k = 0; k < keys.length; k++) {
@@ -983,10 +1026,6 @@ function loadUserbotConfig() {
         window.renderCustomTagPicker();
     };
     window.onFtagSelect = window.onCustomTagSelect;
-    window.newCustomTag = function() {
-        var sel = document.getElementById('ctag-select');
-        if (sel) { sel.value = '__new__'; window.onCustomTagSelect(); }
-    };
     // Nombres que alcanzarían al custom editado (él mismo + los que lo
     // referencian transitivamente): se deshabilitan en el picker.
     window._ctBlockedFor = function(editName) {
@@ -1018,7 +1057,8 @@ function loadUserbotConfig() {
         var blocked = window._ctBlockedFor(editName);
         var customs = window._ctCache.custom || {};
         var base = window._ctCache.base || [];
-        var html = '';
+        var escQ = function(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+        var html = '<input type="text" data-picker-filter="1" placeholder="Filtrar tags…" value="' + escQ(window._ctPickerFilter || '') + '" style="flex-basis:100%;padding:4px 8px;font-size:0.75rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;box-sizing:border-box;">';
         var ckeys = Object.keys(customs).sort();
         for (var i = 0; i < ckeys.length; i++) {
             var cn = ckeys[i];
@@ -1029,6 +1069,21 @@ function loadUserbotConfig() {
             html += '<button data-tag="' + base[b] + '" title="Tag base: {' + base[b] + '}" style="font-size:0.7rem;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">{' + base[b] + '}</button>';
         }
         box.innerHTML = html || '<span style="font-size:0.7rem;">Sin tags</span>';
+        var applyPickerFilter = function() {
+            var fi = box.querySelector('input[data-picker-filter]');
+            var q = fi ? (fi.value || '').toLowerCase() : '';
+            window._ctPickerFilter = fi ? fi.value : '';
+            var btns = box.querySelectorAll('button[data-tag]');
+            for (var w = 0; w < btns.length; w++) {
+                var t = (btns[w].getAttribute('data-tag') || '').toLowerCase();
+                btns[w].style.display = (!q || t.indexOf(q) !== -1) ? '' : 'none';
+            }
+        };
+        var fiEl = box.querySelector('input[data-picker-filter]');
+        if (fiEl) {
+            fiEl.oninput = applyPickerFilter;
+            applyPickerFilter();
+        }
         var btns = box.querySelectorAll('button[data-tag]');
         for (var q = 0; q < btns.length; q++) {
             if (btns[q].disabled) continue;
@@ -1068,6 +1123,12 @@ function loadUserbotConfig() {
             data: { name: name, template: tplEl.value || '', old_name: old, force: !!force },
             success: function() {
                 if (status) { status.textContent = 'Guardado ✓'; setTimeout(function() { if (status) status.textContent = ''; }, 2000); }
+                // Invalidar caché de customs de la SPA (el modal del
+                // enriquecedor la reutiliza hasta recargar).
+                try {
+                    window._customTagsCache = null;
+                    if (window.refreshCustomTags) window.refreshCustomTags(function(){});
+                } catch (eC) {}
                 window.loadCustomTags();
             },
             error: function(status, resp) {
