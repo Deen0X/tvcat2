@@ -43,6 +43,8 @@ plugins_order.json
 config/
 *.session
 *.session-journal
+session_output.txt
+**/session_output.txt
 .env
 
 # Binarios externos
