@@ -101,11 +101,13 @@ function editPeer(i) {
 }
 function testPeer(i) {
     var p = PEERS[i];
-    setStatus('Probando ' + p.name + '...');
-    fetch(p.base_url + '/api/editsync/hello', { headers: { 'X-Sync-Token': p.token || '' } })
-        .then(function(r) { return r.json(); })
-        .then(function(j) {
-            setStatus((j && j.ok) ? ('✅ ' + p.name + ': ' + (j.titles || 0) + ' títulos, ' + (j.collections || 0) + ' colecciones') : '❌ ' + p.name);
+    setStatus('Probando ' + p.name + ' (vía este servidor)...');
+    fetch('/api/editsync/peer/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ peer: p.name }) })
+        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+        .then(function(w) {
+            var j = w.body || {};
+            if (w.status === 200 && j && j.ok) setStatus('✅ ' + p.name + ': ' + (j.titles || 0) + ' títulos, ' + (j.collections || 0) + ' colecciones');
+            else setStatus('❌ ' + p.name + ': ' + ((j && j.detail) || ('HTTP ' + w.status)));
         }).catch(function() { setStatus('❌ ' + p.name + ' (red)'); });
 }
 function pullPeer(i) {

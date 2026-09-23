@@ -1140,6 +1140,66 @@ async def pending_discard(pid: int, request: Request):
     return {"ok": True}
 
 
+@router.post("/api/editsync/peer/test")
+async def peer_test(request: Request):
+    """Probar un peer SERVIDOR→SERVIDOR (sin CORS del navegador).
+    Usa el token guardado en este lado. Devuelve el hello del peer."""
+    sess = _need_admin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    name = str((body or {}).get("peer") or "")
+    peer = None
+    for p in (_cfg_all().get("peers") or []):
+        if isinstance(p, dict) and str(p.get("name") or "") == name:
+            peer = p
+            break
+    if not peer:
+        raise HTTPException(404, "Peer no encontrado")
+    url = _peer_base(peer.get("base_url")) + "/api/editsync/hello"
+    try:
+        import httpx
+        with httpx.Client(timeout=15) as cli:
+            r = cli.get(url, headers={"X-Sync-Token": str(peer.get("token") or "")})
+        if r.status_code == 401:
+            raise HTTPException(502, "Token rechazado por el peer (401)")
+        if r.status_code != 200:
+            raise HTTPException(502, f"Peer respondió {r.status_code}")
+        try:
+            j = r.json()
+        except Exception:
+            raise HTTPException(502, "Respuesta no JSON del peer")
+        if not isinstance(j, dict) or not j.get("ok"):
+            raise HTTPException(502, f"Peer sin ok: {str(j)[:120]}")
+        return {"ok": True, "titles": j.get("titles", 0),
+                "collections": j.get("collections", 0),
+                "formato": j.get("formato", 1)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Red hacia el peer: {type(e).__name__}: {str(e)[:160]}")
+
+
+def _peer_base(raw: str) -> str:
+    """Normaliza base_url: sin path pegado, con esquema, sin barra final."""
+    try:
+        b = str(raw or "").strip().rstrip("/")
+        if not b:
+            return ""
+        if "://" not in b:
+            b = "http://" + b
+        # Quitar path si el usuario pegó la URL completa con /api/...
+        import re as _re_b
+        m = _re_b.match(r"^(https?://[^/]+)", b)
+        if m:
+            # conservar host+puerto, descartar path
+            return m.group(1)
+        return b
+    except Exception:
+        return str(raw or "").strip().rstrip("/")
+
+
 @router.post("/api/editsync/pull-now")
 async def pull_now(request: Request):
     sess = _need_admin(request)
@@ -1155,7 +1215,7 @@ async def pull_now(request: Request):
             break
     if not peer:
         raise HTTPException(404, "Peer no encontrado")
-    url = str(peer.get("base_url") or "").rstrip("/") + "/api/editsync/pull"
+    url = _peer_base(peer.get("base_url")) + "/api/editsync/pull"
     try:
         import httpx
         headers = {"X-Sync-Token": str(peer.get("token") or "")}

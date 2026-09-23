@@ -1045,6 +1045,11 @@ function loadUserbotConfig() {
             url: '/api/update/check?channel=' + channel,
             success: function(r) {
                 if (!r) return;
+                if (!r.ok) {
+                    if (info) info.textContent = 'No se pudo comprobar: ' + (r.error || '?');
+                    if (applyBtn) applyBtn.disabled = true;
+                    return;
+                }
                 var txt = 'Actual: v' + (r.current || '?') + ' · ' +
                     (channel === 'dev' ? ('Rama main @' + (r.remote || '?')) : ('Última release: ' + (r.remote || '?')));
                 if (r.update) txt += ' — HAY ACTUALIZACIÓN';
