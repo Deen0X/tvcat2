@@ -89,12 +89,9 @@
                 var filt = [];
                 for (var k = 0; k < all.length; k++) {
                     var pl = all[k].plugins || [];
-                    var ok = true;
-                    if (sel.length) {
-                        ok = false;
-                        for (var j = 0; j < sel.length; j++) {
-                            if (pl.indexOf(sel[j]) !== -1) { ok = true; break; }
-                        }
+                    var ok = false;
+                    for (var j = 0; j < sel.length; j++) {
+                        if (pl.indexOf(sel[j]) !== -1) { ok = true; break; }
                     }
                     if (ok) filt.push(all[k]);
                 }
@@ -175,6 +172,7 @@
         h += '<div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;align-items:center;">';
         h += '<label style="font-size:0.8rem;"><input type="checkbox" id="ix-noletras" ' + (cfg.noletras_mode === 'hash' ? 'checked' : '') + '> No-letras en #</label>';
         h += '<label style="font-size:0.8rem;" title="Une mayúsculas y minúsculas en la misma letra y ordena sin distinguirlas"><input type="checkbox" id="ix-unify" ' + (cfg.unify_case === false ? '' : 'checked') + '> Unificar mayús./minús.</label>';
+        h += '<label style="font-size:0.8rem;" title="Ignora emojis y símbolos iniciales al agrupar y ordenar (se siguen mostrando)"><input type="checkbox" id="ix-skipemoji" ' + (cfg.skip_emoji === false ? '' : 'checked') + '> Omitir emojis iniciales</label>';
         h += '<button id="ix-help" class="btn-secondary" style="padding:8px 12px;font-size:0.85rem;">Tags ❓</button>';
         h += '<span style="flex:1;"></span>';
         h += '<button id="ix-preview" class="btn-secondary" style="padding:10px 16px;font-size:0.9rem;">Previsualizar</button>';
@@ -188,6 +186,27 @@
         document.body.appendChild(o);
         o.onclick = function(e) { if (e.target === o) closeModal(); };
         box.querySelector('#ix-close').onclick = closeModal;
+        // Preseleccionar el último canal usado (persistido en servidor).
+        try {
+            var lastCh = cfg.last_channel_id || '';
+            var chselInit = box.querySelector('#ix-channel');
+            if (lastCh && chselInit) {
+                for (var lo = 0; lo < chselInit.options.length; lo++) {
+                    if (chselInit.options[lo].value === lastCh) { chselInit.selectedIndex = lo; break; }
+                }
+            }
+        } catch (e) {}
+        // Guardar el canal al seleccionarlo (delegado: sobrevive a re-pintados
+        // del combo). Así se mantiene al reabrir sin previsualizar/generar.
+        try {
+            box.addEventListener('change', function(e) {
+                try {
+                    if (e && e.target && e.target.id === 'ix-channel') {
+                        api('/api/indexator/config', { method: 'PUT', data: { last_channel_id: e.target.value || '' } }, function() {});
+                    }
+                } catch (err) {}
+            });
+        } catch (e2) {}
         // Cuentas Telegram (la activa por defecto; recordar última).
         (function() {
             var sel = box.querySelector('#ix-account');
@@ -246,6 +265,7 @@
                 exclude_topics: excl.split(','),
                 noletras_mode: box.querySelector('#ix-noletras').checked ? 'hash' : 'separado',
                 unify_case: !!box.querySelector('#ix-unify').checked,
+                skip_emoji: !!box.querySelector('#ix-skipemoji').checked,
                 header_template: box.querySelector('#ix-header').value || '',
                 body_template: box.querySelector('#ix-body').value || '',
                 sources: selectedSources(box)
@@ -255,7 +275,7 @@
         (function() {
             var cbs = box.querySelectorAll('.ix-src-cb');
             function inSel(ch, sel) {
-                if (!sel.length) return true;
+                if (!sel.length) return false;
                 var pl = ch.plugins || (ch.plugin ? [ch.plugin] : []);
                 for (var j = 0; j < sel.length; j++) {
                     if (pl.indexOf(sel[j]) !== -1) return true;
@@ -293,7 +313,7 @@
                 for (var o = 0; o < sel0.options.length; o++) {
                     if ((sel0.options[o].text || '').indexOf('(…)') !== -1) { pend0++; break; }
                 }
-            } catch (e) {}
+        } catch (e) {}
             var note0 = box.querySelector('#ix-names-note');
             if (note0 && pend0) note0.textContent = 'Resolviendo nombres…';
             repollNames(box, 3);

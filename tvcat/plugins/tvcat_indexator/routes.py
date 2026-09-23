@@ -133,12 +133,14 @@ def _load_cfg() -> dict:
         "exclude_topics": ["General", "charla"],
         "noletras_mode": "separado",
         "unify_case": True,
+        "skip_emoji": True,
+        "last_channel_id": "",
         "norm_capital_first": False,
         "norm_capital_words": False,
         "norm_keep_upper": True,
         "norm_unaccent": False,
         "special_allow": "",
-        "special_replace": "?",
+        "special_replace": "",
         "header_template": "<b>Índice</b> ({total_all} títulos)",
         "body_template": "{letters}<b>{letter}</b> ({total})\n{entries}{index}. {title_link}{/entries}\n{/letters}",
         "header_image": "",
@@ -155,6 +157,10 @@ def _load_cfg() -> dict:
                     cfg[k] = d[k]
     except Exception:
         pass
+    # Legado: "?" era el default anterior sin UI para cambiarlo; equivale a
+    # no filtrar (conservar emojis/CJK). Solo afecta a runtime, no al fichero.
+    if cfg.get("special_replace") == "?":
+        cfg["special_replace"] = ""
     return cfg
 
 
@@ -165,11 +171,27 @@ def _save_cfg(cfg: dict) -> dict:
     return cfg
 
 
+def _save_last_channel(channel_id: str):
+    """Recuerda el último canal usado (preview/generar) en el config."""
+    try:
+        cid = str(channel_id or "").strip()
+        if not cid:
+            return
+        cfg = _load_cfg()
+        if cfg.get("last_channel_id") != cid:
+            cfg["last_channel_id"] = cid
+            _save_cfg(cfg)
+    except Exception:
+        pass
+
+
 class ConfigUpdate(BaseModel):
     index_topic: Optional[str] = None
     exclude_topics: Optional[List[str]] = None
     noletras_mode: Optional[str] = None
     unify_case: Optional[bool] = None
+    skip_emoji: Optional[bool] = None
+    last_channel_id: Optional[str] = None
     norm_capital_first: Optional[bool] = None
     norm_capital_words: Optional[bool] = None
     norm_keep_upper: Optional[bool] = None
@@ -414,8 +436,20 @@ def _norm_text(s: str, cfg: dict) -> str:
     return t
 
 
-def _letter_key(title: str, cfg: dict) -> str:
+def _strip_leading_noise(title: str, cfg: dict) -> str:
+    """Quita símbolos iniciales (emojis, puntuación) para agrupar/ordenar.
+    La visualización conserva el título intacto. CJK y letras valen tal cual."""
     t = (title or "").strip()
+    if cfg.get("skip_emoji", True):
+        i = 0
+        while i < len(t) and not t[i].isalnum():
+            i += 1
+        t = t[i:]
+    return t
+
+
+def _letter_key(title: str, cfg: dict) -> str:
+    t = _strip_leading_noise(title, cfg)
     if not t:
         return "#"
     ch = t[0]
@@ -424,6 +458,15 @@ def _letter_key(title: str, cfg: dict) -> str:
     if cfg.get("unify_case", True) and ch.isalpha():
         return ch.upper()
     return ch
+
+
+def _sort_key(t: dict, cfg: dict) -> str:
+    s = str((t or {}).get("title") or "")
+    if cfg.get("skip_emoji", True):
+        s = _strip_leading_noise(s, cfg)
+    if cfg.get("unify_case", True):
+        return s.casefold()
+    return s
 
 
 def _topic_url(channel_id: str, topic_id: int) -> str:
@@ -448,11 +491,8 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
     usable = [t for t in (topics or [])
               if str(t.get("title") or "").strip().lower() not in excl]
     # Orden alfabético por título mostrado en crudo + global_index.
-    # Con unify_case, sin importar mayúsculas (casefold).
-    if cfg.get("unify_case", True):
-        usable.sort(key=lambda t: str(t.get("title") or "").casefold())
-    else:
-        usable.sort(key=lambda t: str(t.get("title") or ""))
+    # skip_emoji: desde el primer carácter alfanumérico; unify_case: casefold.
+    usable.sort(key=lambda t: _sort_key(t, cfg))
     for gi, t in enumerate(usable, 1):
         t["_gi"] = gi
     # Grupos por letra (primer carácter verbatim).
@@ -755,6 +795,7 @@ async def preview_index(request: Request, body: PreviewReq):
     _require_user(request)
     if not body.channel_id:
         raise HTTPException(400, "channel_id requerido")
+    _save_last_channel(body.channel_id)
     cfg = _load_cfg()
     try:
         tuid = int(body.tg_user_id) if body.tg_user_id else None
@@ -788,6 +829,7 @@ async def generate_index(request: Request, body: GenerateReq):
     _require_user(request)
     if not body.channel_id:
         raise HTTPException(400, "channel_id requerido")
+    _save_last_channel(body.channel_id)
     cfg = _load_cfg()
     try:
         tuid = int(body.tg_user_id) if body.tg_user_id else None
@@ -902,11 +944,14 @@ async def _post_part(svc, channel_id: str, topic_id: int, part: dict, tg_user_id
                                     caption=md[:CAPTION_LIMIT],
                                     reply_to_msg_id=int(topic_id),
                                     tg_user_id=tg_user_id, client_type=client_type,
+                                    message_thread_id=int(topic_id),
                                     parse_mode="md")
     # En topic: reply al id del topic (los topics direccionan por reply).
+    # En pyro además message_thread_id (si no, cae en General).
     return await svc.send_text(str(channel_id), text=md[:TEXT_LIMIT],
                                reply_to_msg_id=int(topic_id),
                                tg_user_id=tg_user_id, client_type=client_type,
+                               message_thread_id=int(topic_id),
                                parse_mode="md")
 
 

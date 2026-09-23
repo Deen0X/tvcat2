@@ -2587,10 +2587,15 @@ class TelegramService:
         _uid = self._user_key(task)
         try:
             await self._throttle(_uid)
+            try:
+                _mtid = int(task.get("message_thread_id") or 0) or None
+            except Exception:
+                _mtid = None
             if self._is_pyro(client, task.get("client_type")):
                 sent = await client.send_message(
                     chat_id=self._pyro_chat_id(chat), text=text,
                     reply_to_message_id=int(reply_to) if reply_to else None,
+                    message_thread_id=_mtid,
                     parse_mode=self._parse_mode_pyro(task.get("parse_mode")))
             else:
                 sent = await client.send_message(
@@ -2609,7 +2614,7 @@ class TelegramService:
     async def send_text(self, chat, text: str, reply_to_msg_id: int = None,
                         tg_user_id=None, client_type="telethon",
                         session_string=None, api_id=None, api_hash=None,
-                        parse_mode=None) -> int:
+                        parse_mode=None, message_thread_id=None) -> int:
         fut = asyncio.get_event_loop().create_future()
 
         async def callback(msg_id):
@@ -2620,7 +2625,7 @@ class TelegramService:
             "reply_to_msg_id": reply_to_msg_id,
             "tg_user_id": tg_user_id, "client_type": client_type,
             "session_string": session_string, "api_id": api_id, "api_hash": api_hash,
-            "parse_mode": parse_mode,
+            "parse_mode": parse_mode, "message_thread_id": message_thread_id,
             "callback": callback
         }, priority=PRIORITY_NORMAL)
         return await fut
@@ -2639,6 +2644,10 @@ class TelegramService:
             await self._throttle(_uid)
             _pm_tg = self._parse_mode_tg(task.get("parse_mode"))
             _pm_pyro = self._parse_mode_pyro(task.get("parse_mode"))
+            try:
+                _mtid = int(task.get("message_thread_id") or 0) or None
+            except Exception:
+                _mtid = None
             if photo_bytes:
                 if self._is_pyro(client, task.get("client_type")):
                     import tempfile as _tmp, os as _os
@@ -2650,6 +2659,7 @@ class TelegramService:
                             chat_id=self._pyro_chat_id(chat), photo=_tmp_path,
                             caption=caption or None,
                             reply_to_message_id=int(reply_to) if reply_to else None,
+                            message_thread_id=_mtid,
                             parse_mode=_pm_pyro)
                     finally:
                         try:
@@ -2668,6 +2678,7 @@ class TelegramService:
                 sent = await client.send_message(
                     chat_id=self._pyro_chat_id(chat), text=caption or "",
                     reply_to_message_id=int(reply_to) if reply_to else None,
+                    message_thread_id=_mtid,
                     parse_mode=_pm_pyro)
             else:
                 sent = await client.send_message(
@@ -2687,7 +2698,7 @@ class TelegramService:
                          reply_to_msg_id: int = None,
                          tg_user_id=None, client_type="telethon",
                          session_string=None, api_id=None, api_hash=None,
-                         parse_mode=None) -> int:
+                         parse_mode=None, message_thread_id=None) -> int:
         fut = asyncio.get_event_loop().create_future()
 
         async def callback(msg_id):
@@ -2698,7 +2709,7 @@ class TelegramService:
             "caption": caption, "reply_to_msg_id": reply_to_msg_id,
             "tg_user_id": tg_user_id, "client_type": client_type,
             "session_string": session_string, "api_id": api_id, "api_hash": api_hash,
-            "parse_mode": parse_mode,
+            "parse_mode": parse_mode, "message_thread_id": message_thread_id,
             "callback": callback
         }, priority=PRIORITY_NORMAL)
         return await fut
@@ -2915,8 +2926,8 @@ class TelegramService:
                     peer = await client.resolve_peer(self._pyro_chat_id(chat))
                 except Exception:
                     peer = self._pyro_chat_id(chat)
-                await client.invoke(_rf.channels.DeleteTopicHistory(
-                    channel=peer, top_msg_id=int(topic_id)))
+                await client.invoke(_rf.messages.DeleteTopicHistory(
+                    peer=peer, top_msg_id=int(topic_id)))
             else:
                 try:
                     from telethon.tl.functions.messages import DeleteTopicHistoryRequest as _DTH
