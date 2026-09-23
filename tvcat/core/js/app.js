@@ -1046,8 +1046,13 @@ function loadUserbotConfig() {
             success: function(r) {
                 if (!r) return;
                 if (!r.ok) {
-                    if (info) info.textContent = 'No se pudo comprobar: ' + (r.error || '?');
-                    if (applyBtn) applyBtn.disabled = true;
+                    if (channel === 'dev') {
+                        if (info) info.textContent = 'No se pudo comprobar (' + (r.error || '?') + '). Puedes forzar la descarga directa igualmente.';
+                        if (applyBtn) applyBtn.disabled = false;
+                    } else {
+                        if (info) info.textContent = 'No se pudo comprobar: ' + (r.error || '?');
+                        if (applyBtn) applyBtn.disabled = true;
+                    }
                     return;
                 }
                 var txt = 'Actual: v' + (r.current || '?') + ' · ' +

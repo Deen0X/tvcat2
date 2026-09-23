@@ -165,11 +165,19 @@ def _sync_tree(src: str, dst: str):
 
 
 def apply_update(channel: str = "stable") -> dict:
-    """Descarga y aplica. Retorna dict; el restart lo hace el llamante."""
+    """Descarga y aplica. Retorna dict; el restart lo hace el llamante.
+    En dev, si el check falla (p.ej. rate limit de la API), se descarga
+    igualmente el ZIP de main (la API y las descargas tienen límites
+    distintos): la versión registrada queda como 'desconocida'."""
     channel = (channel or "stable").strip().lower()
     chk = check(channel)
     if not chk.get("ok"):
-        return {"ok": False, "error": chk.get("error") or "check fallido"}
+        if channel == "dev":
+            cur = current_version()
+            chk = {"ok": True, "current": cur["version"], "codename": cur.get("codename", ""),
+                   "remote": None, "update": True, "forced": True}
+        else:
+            return {"ok": False, "error": chk.get("error") or "check fallido"}
     if channel == "stable" and not chk.get("update"):
         return {"ok": False, "error": "Ya estás en la última versión publicada"}
     url = chk.get("zip_url") if channel == "stable" else ZIPBALL_MAIN
