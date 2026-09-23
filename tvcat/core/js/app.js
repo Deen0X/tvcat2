@@ -4551,6 +4551,46 @@ window._ensureScanBar = function() {
     box.appendChild(wrap);
     return wrap;
 };
+// Barra azul de editados locales (reapply): misma posición que la roja.
+window._localBarActive = false;
+window._ensureLocalBar = function() {
+    var wrap = document.getElementById('localprog');
+    if (wrap) return wrap;
+    var box = document.querySelector('.search-container');
+    if (!box) return null;
+    wrap = document.createElement('div');
+    wrap.id = 'localprog';
+    wrap.className = 'hidden';
+    wrap.style.cssText = 'margin-top:3px;';
+    wrap.innerHTML = '<div style="display:flex;gap:2px;height:2px;background:rgba(255,255,255,0.10);border-radius:2px;overflow:hidden;">' +
+        '<div id="localprog-fill" style="height:100%;width:0%;background:#3b82f6;transition:width 0.4s;flex:none;"></div></div>';
+    box.appendChild(wrap);
+    return wrap;
+};
+window.pollReapplyBar = function() {
+    var wrap = window._ensureLocalBar ? window._ensureLocalBar() : document.getElementById('localprog');
+    if (!wrap) return;
+    window.API.ajax({
+        url: '/api/enricher/reapply/status',
+        success: function(res) {
+            var fill = document.getElementById('localprog-fill');
+            if (res && res.running && res.total > 0) {
+                wrap.classList.remove('hidden');
+                window._localBarActive = true;
+                if (fill) fill.style.width = Math.max(0, Math.min(100, Math.round(res.done * 100 / res.total))) + '%';
+                setTimeout(window.pollReapplyBar, 1500);
+            } else {
+                if (wrap) wrap.classList.add('hidden');
+                if (fill) fill.style.width = '0%';
+                if (window._localBarActive) {
+                    window._localBarActive = false;
+                    try { if (window.Catalog && window.Catalog.load) window.Catalog.load(window.Catalog.currentCategory || 'home'); } catch (e) {}
+                }
+            }
+        },
+        error: function() {}
+    });
+};
 window.refreshSources = function() {
     // Botón ⟳ del sidebar: refresco secuencial de fuentes (solo la línea).
     var wrap = window._ensureScanBar();
@@ -4623,6 +4663,7 @@ function pollSourcesBar() {
                     window._sourcesBarActive = false;
                     try { if (typeof buildCategoryTree === 'function') buildCategoryTree(); } catch (e) {}
                     try { if (window.Catalog && window.Catalog.load) window.Catalog.load(window.Catalog.currentCategory || 'home'); } catch (e2) {}
+                    try { if (window.pollReapplyBar) window.pollReapplyBar(); } catch (e3) {}
                 }
             }
         },
@@ -6497,6 +6538,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 error: function() { /* no reintentar si el endpoint no está disponible */ }
             });
         })();
+
+        // Barra azul de editados locales: el reapply corre tras el rebuild de
+        // arranque; si sigue en curso al cargar, se muestra con progreso.
+        // También se revisa al volver a la pestaña.
+        try {
+            setTimeout(function() { if (window.pollReapplyBar) window.pollReapplyBar(); }, 4000);
+            window.addEventListener('focus', function() { try { if (window.pollReapplyBar) window.pollReapplyBar(); } catch (e) {} });
+        } catch (e) {}
 
         // Registrar el manejador global de teclado en window y document para soporte Smart TV fullscreen
         window.addEventListener('keydown', globalKeydownHandler, true);

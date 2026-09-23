@@ -16,6 +16,19 @@ import os as _os
 import re as _re
 import sqlite3 as _sq
 
+# Progreso del reapply por lotes para la barra azul del frontal.
+_REAPPLY = {"running": False, "done": 0, "total": 0}
+
+
+def reapply_progress() -> dict:
+    """Snapshot {running, done, total} para /api/enricher/reapply/status."""
+    try:
+        return {"running": bool(_REAPPLY.get("running")),
+                "done": int(_REAPPLY.get("done") or 0),
+                "total": int(_REAPPLY.get("total") or 0)}
+    except Exception:
+        return {"running": False, "done": 0, "total": 0}
+
 
 def _title_from_cover_text(text: str) -> str:
     """2026-09-04: extrae el título del tag como un mensaje nativo. Ignora
@@ -273,7 +286,12 @@ def revert_enriched_title(item_id: str) -> dict:
 def reapply_all_enriched() -> dict:
     """Repasa la base con TODOS los covers guardados localmente (título +
     variantes). Para llamar al final de rebuild_cache(). Idempotente:
-    segunda pasada no cambia nada. Retorna {covers, titles, alts}."""
+    segunda pasada no cambia nada. Retorna {covers, titles, alts}.
+
+    Por lotes (2026-09-23): 1 conexión central + 1 SELECT masivo + 1 commit,
+    y cada DB de plugin se abre UNA vez (antes: N títulos × M bases con
+    commit por título). Sin logs por item (solo resumen). Progreso en
+    _REAPPLY para la barra azul del frontal."""
     from services.catalog_service import BASE_DIR as _bd
     _edb = _os.path.join(_bd, "plugins", "tvcat_enricher", "data", "tvcat.db")
     if not _os.path.isfile(_edb):
@@ -287,19 +305,187 @@ def reapply_all_enriched() -> dict:
     except Exception as e:
         print(f" [Enricher] reapply: no se pudo leer enriched_covers ({e})", flush=True)
         return {"covers": 0, "titles": 0, "alts": 0}
-    _t, _a = 0, 0
+    _items = []
     for _r in (_rows or []):
         try:
-            _iid = _r["item_id"]
-            _ct = _r["cover_text"] or ""
+            _iid, _ct = str(_r["item_id"] or ""), str(_r["cover_text"] or "")
             if not _iid or not _ct:
                 continue
-            _res = apply_enriched_title(str(_iid), str(_ct))
-            if (_res or {}).get("title_applied"):
-                _t += 1
-            _a += len((_res or {}).get("alts_applied") or [])
+            _raw = _title_from_cover_text(_ct)
+            _items.append((_iid, _ct, _raw))
+        except Exception:
+            continue
+    _REAPPLY.update({"running": True, "done": 0, "total": len(_items)})
+    _t, _a = 0, 0
+    if not _items:
+        _REAPPLY.update({"running": False, "done": 0, "total": 0})
+        print(" [Enricher] reapply: 0 covers", flush=True)
+        return {"covers": 0, "titles": 0, "alts": 0}
+    try:
+        from services.catalog_service import get_conn as _cc
+        _c = _cc()
+        try:
+            _ids = [i for i, _, _ in _items]
+            _chunks, _sz = [], 500
+            _central = {}
+            for _k in range(0, len(_ids), _sz):
+                _ch = _ids[_k:_k + _sz]
+                _ph = ",".join("?" for _ in _ch)
+                for _row in _c.execute(
+                        "SELECT item_id, title, group_title, group_title_flat, alt_titles"
+                        " FROM unified_catalog WHERE item_id IN (%s)" % _ph, _ch).fetchall():
+                    _central[str(_row["item_id"])] = dict(_row)
+            # Conteo por grupo (para _others) en una sola query.
+            _flats = list({_r.get("group_title_flat") or ""
+                           for _r in _central.values() if _r.get("group_title_flat")})
+            _flatcount = {}
+            if _flats:
+                _ph = ",".join("?" for _ in _flats)
+                for _fr in _c.execute(
+                        "SELECT group_title_flat, COUNT(*) FROM unified_catalog"
+                        " WHERE group_title_flat IN (%s) GROUP BY group_title_flat" % _ph,
+                        _flats).fetchall():
+                    _flatcount[str(_fr[0])] = int(_fr[1] or 0)
+            _plan = []  # (item_id, mode, raw, flat, old_flat, alts_nuevas)
+            for _iid, _ct, _raw in _items:
+                _row = _central.get(_iid)
+                if not _row or not _raw or (_row.get("title") or "") == _raw:
+                    pass
+                else:
+                    _old_flat = (_row.get("group_title_flat") or "")
+                    _others = int(_flatcount.get(_old_flat, 0) or 0)
+                    if _old_flat and str(_row.get("group_title_flat") or "") == _old_flat:
+                        _others = max(0, _others - 1)
+                    _flat = _re.sub(r"[^a-zA-Z0-9]", "", _raw).lower()
+                    _mode = "all"
+                    if _flat != _old_flat and _others:
+                        _mode = "split"
+                    elif _others and (_row.get("group_title") or "") == (_row.get("title") or ""):
+                        _mode = "group"
+                    elif _others:
+                        _mode = "title"
+                    _plan.append((_iid, _mode, _raw, _flat, _old_flat, None))
+                # Variantes (mismo merge que apply_enriched_title, sin prints).
+                _cover_alts = _parse_cover_alt_titles(_ct)
+                if _cover_alts and _row:
+                    try:
+                        _cur = _json.loads(_row.get("alt_titles") or "[]") or []
+                    except Exception:
+                        _cur = []
+                    _have = {str(x).strip().lower() for x in _cur if str(x).strip()}
+                    if (_row.get("title") or "").strip():
+                        _have.add((_row.get("title") or "").strip().lower())
+                    _new = [_x for _x in _cover_alts if _x.strip().lower() not in _have]
+                    if _new:
+                        _plan.append((_iid, "alts", None, None, None, _new))
+                _REAPPLY["done"] += 1
+            # Aplicar central en un solo commit.
+            for _iid, _mode, _raw, _flat, _old_flat, _extra in _plan:
+                try:
+                    if _mode == "alts":
+                        _mr = _central.get(_iid) or {}
+                        try:
+                            _mc = _json.loads(_mr.get("alt_titles") or "[]") or []
+                        except Exception:
+                            _mc = []
+                        _mh = {str(x).strip().lower() for x in _mc if str(x).strip()}
+                        for _x in (_extra or []):
+                            if _x.strip().lower() not in _mh:
+                                _mc.append(_x)
+                                _mh.add(_x.strip().lower())
+                        _c.execute("UPDATE unified_catalog SET alt_titles=? WHERE item_id=?",
+                                   (_json.dumps(_mc, ensure_ascii=False), _iid))
+                        _a += len(_extra or [])
+                    elif _mode == "split":
+                        _c.execute("UPDATE unified_catalog SET title=?, group_title=?, group_title_flat=? WHERE item_id=?",
+                                   (_raw, _raw, _flat, _iid))
+                        _t += 1
+                    elif _mode == "group":
+                        _c.execute("UPDATE unified_catalog SET title=CASE WHEN item_id=? THEN ? ELSE title END, group_title=?, group_title_flat=? WHERE group_title_flat=?",
+                                   (_iid, _raw, _raw, _flat, _old_flat))
+                        _t += 1
+                    elif _mode == "title":
+                        _c.execute("UPDATE unified_catalog SET title=? WHERE item_id=?", (_raw, _iid))
+                        _t += 1
+                    else:
+                        _c.execute("UPDATE unified_catalog SET title=?, group_title=?, group_title_flat=? WHERE item_id=?",
+                                   (_raw, _raw, _flat, _iid))
+                        _t += 1
+                except Exception:
+                    continue
+            _c.commit()
+            # Réplica en plugins: cada DB se abre UNA vez.
+            try:
+                _pdbs = [p for p in _g.glob(_os.path.join(_bd, "plugins", "*", "data", "tvcat.db"))
+                         if _os.path.isfile(p)]
+            except Exception:
+                _pdbs = []
+            _by_id = {}
+            for _iid, _mode, _raw, _flat, _old_flat, _extra in _plan:
+                _by_id.setdefault(_iid, []).append((_mode, _raw, _flat, _old_flat, _extra))
+            for _pdb in _pdbs:
+                try:
+                    _pc = _sq.connect(_pdb, timeout=10)
+                    try:
+                        _cols = [r[1] for r in _pc.execute("PRAGMA table_info(unified_catalog)").fetchall()]
+                    except Exception:
+                        _pc.close()
+                        continue
+                    if "item_id" not in _cols or "title" not in _cols:
+                        _pc.close()
+                        continue
+                    _has_alts = "alt_titles" in _cols
+                    _ids2 = list(_by_id.keys())
+                    _prows = {}
+                    for _k in range(0, len(_ids2), 500):
+                        _ch = _ids2[_k:_k + 500]
+                        _ph = ",".join("?" for _ in _ch)
+                        _sel = "item_id, title" + (", alt_titles" if _has_alts else "")
+                        for _pr in _pc.execute(
+                                "SELECT %s FROM unified_catalog WHERE item_id IN (%s)" % (_sel, _ph),
+                                _ch).fetchall():
+                            _prows[str(_pr[0])] = _pr
+                    for _iid, _ops in _by_id.items():
+                        if _iid not in _prows:
+                            continue
+                        for (_mode, _raw, _flat, _old_flat, _extra) in _ops:
+                            try:
+                                if _mode == "alts":
+                                    if not _has_alts:
+                                        continue
+                                    _prow = _prows[_iid]
+                                    try:
+                                        _pcur = _json.loads((_prow[2] if len(_prow) > 2 else None) or "[]") or []
+                                    except Exception:
+                                        _pcur = []
+                                    _phave = {str(x).strip().lower() for x in _pcur if str(x).strip()}
+                                    _pmerged = list(_pcur)
+                                    for _x in (_extra or []):
+                                        if _x.strip().lower() not in _phave:
+                                            _pmerged.append(_x)
+                                            _phave.add(_x.strip().lower())
+                                    _pc.execute("UPDATE unified_catalog SET alt_titles=? WHERE item_id=?",
+                                                (_json.dumps(_pmerged, ensure_ascii=False), _iid))
+                                elif _mode == "group":
+                                    _pc.execute("UPDATE unified_catalog SET group_title=?, group_title_flat=? WHERE group_title_flat=?",
+                                                (_raw, _flat, _old_flat))
+                                    _pc.execute("UPDATE unified_catalog SET title=? WHERE item_id=?", (_raw, _iid))
+                                elif _mode in ("split", "all"):
+                                    _pc.execute("UPDATE unified_catalog SET title=?, group_title=?, group_title_flat=? WHERE item_id=?",
+                                                (_raw, _raw, _flat, _iid))
+                                else:
+                                    _pc.execute("UPDATE unified_catalog SET title=? WHERE item_id=?", (_raw, _iid))
+                            except Exception:
+                                continue
+                    _pc.commit()
+                    _pc.close()
+                except Exception:
+                    continue
+            _c.close()
         except Exception as e:
-            print(f" [Enricher] reapply warn {(_r['item_id'] if _r else '?')}: {e}", flush=True)
-    print(f" [Enricher] reapply: {len(_rows or [])} covers, {_t} títulos, {_a} variantes",
+            print(f" [Enricher] reapply error: {e}", flush=True)
+    finally:
+        _REAPPLY.update({"running": False})
+    print(f" [Enricher] reapply: {len(_items)} covers, {_t} títulos, {_a} variantes",
           flush=True)
-    return {"covers": len(_rows or []), "titles": _t, "alts": _a}
+    return {"covers": len(_items), "titles": _t, "alts": _a}

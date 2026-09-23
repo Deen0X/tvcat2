@@ -664,7 +664,8 @@ _ACTIVITY = {}
 _ACTIVITY_LAST_FLUSH = 0.0
 _ACTIVITY_SKIP = ("/api/user/scan/status", "/api/sources/refresh/status",
                   "/api/telegram/throttle", "/api/telegram/usage",
-                  "/api/cache/rebuild-status", "/api/admin/activity",
+                  "/api/cache/rebuild-status", "/api/enricher/reapply/status",
+                  "/api/admin/activity",
                   "/api/network/", "/3ds", "/api/installer/3ds",
                   "/api/userbot/", "/static/", "/login")
 _ACTIVITY_PLAY = ("/api/stream", "/api/watch/progress", "/api/log_video")
@@ -8281,6 +8282,16 @@ async def update_apply(request: Request):
 @app.get(api_url("/api/cache/rebuild-status"))
 async def rebuild_status():
     return {"running": _rebuild_state.get("running"), "done": _rebuild_state.get("done"), "error": _rebuild_state.get("error")}
+
+
+@app.get(api_url("/api/enricher/reapply/status"))
+async def reapply_status():
+    """Progreso del reapply de editados locales (barra azul del frontal)."""
+    try:
+        from services.enrich_apply import reapply_progress
+        return reapply_progress()
+    except Exception:
+        return {"running": False, "done": 0, "total": 0}
 
 @app.get(api_url("/api/sync/refresh"))
 async def sync_refresh():

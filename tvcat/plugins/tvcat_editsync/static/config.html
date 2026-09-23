@@ -118,6 +118,7 @@ function testPeer(i) {
 }
 var _syncTimer = null;
 function syncProgressStart(label) {
+    syncProgressStop();
     var box = document.getElementById('syncprog');
     var fill = document.getElementById('syncprog-fill');
     var txt = document.getElementById('syncprog-text');
@@ -125,7 +126,7 @@ function syncProgressStart(label) {
     box.style.display = '';
     var t0 = Date.now(), w = 10;
     if (txt) txt.textContent = label + ' (0s)...';
-    syncProgressStop();
+    if (fill) fill.style.width = '10%';
     _syncTimer = setInterval(function() {
         var s = Math.round((Date.now() - t0) / 1000);
         w = w >= 90 ? 20 : w + 12;
