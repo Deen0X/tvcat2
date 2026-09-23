@@ -68,6 +68,7 @@ function paintPeers() {
         html += '<tr><td>' + esc(p.name) + '</td><td style="font-family:monospace;">' + esc(p.base_url) + '</td><td>' + (p.has_token ? '••••••' : '<span style="color:#f87171;">sin token</span>') + '</td>' +
             '<td style="white-space:nowrap;"><button class="btn sec" style="padding:4px 8px;" onclick="testPeer(' + i + ')">Probar</button> ' +
             '<button class="btn sec" style="padding:4px 8px;" onclick="pullPeer(' + i + ')">Sincronizar</button> ' +
+            '<button class="btn sec" style="padding:4px 8px;" onclick="editPeer(' + i + ')">Editar</button> ' +
             '<button class="btn sec" style="padding:4px 8px;" onclick="delPeer(' + i + ')">✕</button></td></tr>';
     }
     box.innerHTML = html + '</table><div class="muted" style="margin-top:4px;">Probar = hello · Sincronizar = pull + import ahora.</div>';
@@ -77,13 +78,27 @@ function addPeer() {
     var u = document.getElementById('peer-url').value.trim().replace(/\/+$/, '');
     var t = document.getElementById('peer-token').value.trim();
     if (!n || !u) { setStatus('Nombre y URL obligatorios'); return; }
-    PEERS.push({ name: n, base_url: u, token: t });
+    PEERS.push({ name: n, base_url: u, token: t, keep_token: !!window._editKeepToken });
+    window._editKeepToken = false;
     document.getElementById('peer-name').value = '';
     document.getElementById('peer-url').value = '';
     document.getElementById('peer-token').value = '';
+    document.getElementById('peer-token').placeholder = 'Token';
     paintPeers(); saveCfg(true);
 }
 function delPeer(i) { PEERS.splice(i, 1); paintPeers(); saveCfg(true); }
+function editPeer(i) {
+    var p = PEERS[i];
+    if (!p) return;
+    document.getElementById('peer-name').value = p.name || '';
+    document.getElementById('peer-url').value = p.base_url || '';
+    document.getElementById('peer-token').value = '';
+    document.getElementById('peer-token').placeholder = p.has_token ? '(con token guardado: reescribe para cambiar)' : 'Token';
+    window._editKeepToken = !!p.has_token;
+    PEERS.splice(i, 1);
+    paintPeers();
+    setStatus('Editando ' + (p.name || '') + ': pulsa Añadir para guardar (sin token = conserva el guardado).');
+}
 function testPeer(i) {
     var p = PEERS[i];
     setStatus('Probando ' + p.name + '...');
@@ -131,7 +146,7 @@ function pullBanner() {
 }
 function saveCfg(silent) {
     var body = {
-        peers: PEERS.map(function(p) { return { name: p.name, base_url: p.base_url, token: p.token || (p.has_token ? undefined : '') }; }),
+        peers: PEERS.map(function(p) { return { name: p.name, base_url: p.base_url, token: p.token || undefined, has_token: !!((p.has_token || p.keep_token) && !p.token) }; }),
         auto_export: !!document.getElementById('cfg-auto').checked,
         logical_mode: !!document.getElementById('cfg-logical').checked,
         notify_peers: !!document.getElementById('cfg-notify').checked
