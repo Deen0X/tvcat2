@@ -492,9 +492,23 @@ def _svc():
     return get_telegram_service()
 
 
-async def _channel_accessible(channel_id: str) -> bool:
+def _preferred_ctype() -> str:
+    """Cliente configurado globalmente (no telethon a piñón)."""
     try:
-        await _svc().get_entity(str(channel_id))
+        try:
+            from tvcat.services.userbot_service import get_preferred_client_type
+        except Exception:
+            from services.userbot_service import get_preferred_client_type
+        return get_preferred_client_type() or "telethon"
+    except Exception:
+        return "telethon"
+
+
+async def _channel_accessible(channel_id: str) -> bool:
+    # Con el cliente preferido global (no telethon a piñón: hay
+    # instalaciones solo-pyro donde eso siempre falla).
+    try:
+        await _svc().get_entity(str(channel_id), client_type=_preferred_ctype())
         return True
     except Exception:
         return False
@@ -520,19 +534,21 @@ def _author_from_raw(raw: dict):
 
 
 async def _channel_is_mine(channel_id: str, sample_msg_id: int = 0, _cache: dict = None) -> bool:
-    """Dueño por canal (se evalúa una vez por canal en cada import)."""
+    """Dueño por canal (se evalúa una vez por canal en cada import).
+    Todo por el servicio central con el cliente preferido."""
     try:
         if _cache is not None and channel_id in _cache:
             return bool(_cache[channel_id])
+        ctype = _preferred_ctype()
         mine = False
         try:
-            if await _svc().check_owner(str(channel_id)):
+            if await _svc().check_owner(str(channel_id), client_type=ctype):
                 mine = True
         except Exception:
             pass
         if not mine and sample_msg_id:
             try:
-                msg = await _svc().fetch_one(str(channel_id), int(sample_msg_id))
+                msg = await _svc().fetch_one(str(channel_id), int(sample_msg_id), client_type=ctype)
                 raw = msg if isinstance(msg, dict) else {}
                 author, is_out = _author_from_raw(raw)
                 ids = _my_tg_ids()
@@ -860,8 +876,9 @@ def _read_package(data: bytes):
         return None, f"ZIP inválido: {e}"
 
 
-async def apply_package(pkg: dict, session: dict, access=None, owner=None):
+async def apply_package(pkg: dict, session: dict, access=None, owner=None, progress=None):
     """Aplica la matriz. access/owner inyectables para tests.
+    progress(done, total, phase): callback opcional de avance.
     -> {applied, pending, skipped, bypassed, errors[]}."""
     res = {"applied": 0, "pending": 0, "skipped": 0, "bypassed": 0, "errors": []}
     try:
@@ -871,6 +888,7 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None):
         if logical or manifest.get("modo_logico"):
             logical = True
         owner_cache = {}
+        access_cache = {}
         editing_marks = {}
 
         async def _is_owner(cid, mid):
@@ -882,12 +900,22 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None):
             return await _channel_is_mine(cid, mid, owner_cache)
 
         async def _has_access(cid):
-            if access is not None:
-                try:
-                    return bool(access(cid))
-                except Exception:
-                    return False
-            return await _channel_accessible(cid)
+            # Cacheado por canal: sin esto se repite un get_entity (lento en
+            # pyro ante peers desconocidos) por cada título del pull.
+            if cid in access_cache:
+                return access_cache[cid]
+            try:
+                if access is not None:
+                    try:
+                        r = bool(access(cid))
+                    except Exception:
+                        r = False
+                else:
+                    r = await _channel_accessible(cid)
+            except Exception:
+                r = False
+            access_cache[cid] = r
+            return r
 
         def _standby_for(user_id, key):
             try:
@@ -915,7 +943,19 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None):
 
         user_id = (session or {}).get("user_id") or 0
 
-        for t in (pkg.get("titles") or []):
+        _titles = list(pkg.get("titles") or [])
+        _cols = list(pkg.get("collections") or [])
+        _total = len(_titles) + len(_cols)
+        _done = 0
+
+        def _tick():
+            try:
+                if progress:
+                    progress(_done, _total, "aplicando")
+            except Exception:
+                pass
+
+        for t in _titles:
             try:
                 if not isinstance(t, dict):
                     continue
@@ -1005,6 +1045,9 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None):
                 res["pending"] += 1
             except Exception as e:
                 res["errors"].append(str(e)[:200])
+            finally:
+                _done += 1
+                _tick()
 
         # Colecciones: siempre lógicas, solo local
         try:
@@ -1057,6 +1100,9 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None):
                         res["errors"].append(f"colección {name}: {str(e)[:120]}")
                 except Exception as e:
                     res["errors"].append(str(e)[:200])
+                finally:
+                    _done += 1
+                    _tick()
         _purge_resolved()
         return res
     except Exception as e:
@@ -1145,6 +1191,27 @@ def _pending_delete(pid: int):
         pass
 
 
+# ─── Progreso del pull (para la barra del frontal) ──────────────
+_PULL = {"running": False, "phase": "", "done": 0, "total": 0}
+
+
+def _pull_set(phase="", done=0, total=0, running=True):
+    try:
+        _PULL.update({"running": bool(running), "phase": str(phase or ""),
+                      "done": int(done or 0), "total": int(total or 0)})
+    except Exception:
+        pass
+
+
+@router.get("/api/editsync/pull-now/status")
+async def pull_status(request: Request):
+    _need_session(request)
+    try:
+        return dict(_PULL)
+    except Exception:
+        return {"running": False, "phase": "", "done": 0, "total": 0}
+
+
 # ─── Endpoints remotos (token) ──────────────────────────────────
 
 @router.get("/api/editsync/hello")
@@ -1215,6 +1282,23 @@ async def import_zip(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, err or "ZIP inválido")
     res = await apply_package(pkg, sess)
     return res
+
+
+def _norm_name(s: str) -> str:
+    try:
+        try:
+            from services.text_norm import normalize_title as _nt
+        except Exception:
+            from tvcat.services.text_norm import normalize_title as _nt
+        return _nt(s or "")
+    except Exception:
+        import unicodedata as _ud
+        try:
+            t = _ud.normalize("NFD", str(s or "").lower())
+            t = "".join(c for c in t if _ud.category(c) != "Mn")
+            return re.sub(r"\s+", " ", t).strip()
+        except Exception:
+            return str(s or "").strip().lower()
 
 
 def _display_title(inc: dict, loc: dict, kind: str, key: str, ident: dict) -> str:
@@ -1314,6 +1398,7 @@ async def pending_list(request: Request):
                 loc_text = loc.get("cover_text") or ""
                 inc_upd = int(inc.get("updated_at") or d.get("updated_at") or 0)
                 loc_upd = int(loc.get("updated_at") or 0)
+                conflict = False
                 if kind == "collection":
                     differs = (json.dumps(_as_entry_list(inc.get("entries")), sort_keys=True, ensure_ascii=False)
                                != json.dumps(_as_entry_list(loc.get("entries")), sort_keys=True, ensure_ascii=False)
@@ -1326,6 +1411,17 @@ async def pending_list(request: Request):
                         local_poster = bool(_lb)
                     except Exception:
                         local_poster = False
+                    # Colisión de serial (uid duplicado por DB clonada): mismo
+                    # serial, colecciones distintas. No fusionar a ciegas.
+                    conflict = False
+                    try:
+                        if has_local:
+                            _ln, _rn = _norm_name(loc.get("name")), _norm_name(inc.get("name"))
+                            if _ln and _rn and _ln != _rn and _ln not in _rn and _rn not in _ln:
+                                conflict = True
+                                auto = False
+                    except Exception:
+                        pass
                 else:
                     differs = inc_text != loc_text
                     has_local = bool(loc_text or loc_upd)
@@ -1337,6 +1433,8 @@ async def pending_list(request: Request):
                     "state": d.get("state"), "updated_at": d.get("updated_at"),
                     "ident": ident,
                     "title": _display_title(inc, loc, kind, key, ident),
+                    "local_title": str((loc.get("name") if kind == "collection" else "") or ""),
+                    "conflict": bool(conflict),
                     "incoming_text": inc_text[:2000],
                     "local_text": loc_text[:2000],
                     "text_differs": bool(differs),
@@ -1412,9 +1510,29 @@ def _apply_pending_row(row: dict):
                                     description=inc.get("description"),
                                     cover_text=inc.get("cover_text"))
         else:
-            # Nueva aceptada: crear local + cover si venía.
+            # Nueva aceptada: crear local + cover si venía. Si el serial
+            # colisionó mientras tanto con otra colección distinta, serial
+            # fresco para no fusionarlas.
+            _use_serial = str(row.get("key") or "")
+            try:
+                from services.catalog_service import next_collection_serial
+            except Exception:
+                try:
+                    from tvcat.services.catalog_service import next_collection_serial
+                except Exception:
+                    next_collection_serial = None
+            if next_collection_serial:
+                try:
+                    for c in (list_local_collections() or []):
+                        if str(c.get("serial") or "") == _use_serial:
+                            _ln2, _rn2 = _norm_name(c.get("name")), _norm_name(inc.get("name"))
+                            if _ln2 and _rn2 and _ln2 != _rn2 and _ln2 not in _rn2 and _rn2 not in _ln2:
+                                _use_serial = next_collection_serial()
+                            break
+                except Exception:
+                    pass
             created = create_local_collection(inc.get("name") or row.get("key") or "",
-                                              str(row.get("key") or ""),
+                                              _use_serial,
                                               _as_entry_list(inc.get("entries")),
                                               description=inc.get("description") or "",
                                               cover_text=inc.get("cover_text") or "")
@@ -1594,19 +1712,36 @@ async def pull_now(request: Request):
     if not peer:
         raise HTTPException(404, "Peer no encontrado")
     url = _peer_base(peer.get("base_url")) + "/api/editsync/pull"
+    _pull_set("descargando", 0, 0, True)
     try:
         import httpx
-        headers = {"X-Sync-Token": str(peer.get("token") or "")}
         with httpx.Client(timeout=120) as cli:
-            r = cli.get(url, headers=headers)
-        if r.status_code != 200:
-            raise HTTPException(502, f"Peer respondió {r.status_code}")
-        pkg, err = _read_package(r.content)
+            with cli.stream("GET", url, headers={"X-Sync-Token": str(peer.get("token") or "")}) as r:
+                if r.status_code == 401:
+                    raise HTTPException(502, "Token rechazado por el peer (401)")
+                if r.status_code != 200:
+                    raise HTTPException(502, f"Peer respondió {r.status_code}")
+                try:
+                    _total_dl = int(r.headers.get("content-length") or 0)
+                except Exception:
+                    _total_dl = 0
+                _buf = io.BytesIO()
+                _got = 0
+                for _chunk in r.iter_bytes(256 * 1024):
+                    _buf.write(_chunk)
+                    _got += len(_chunk)
+                    _pull_set("descargando", _got, _total_dl, True)
+                _data = _buf.getvalue()
+        if not _data:
+            raise HTTPException(502, "ZIP vacío del peer")
+        pkg, err = _read_package(_data)
         if not pkg:
             raise HTTPException(502, err or "ZIP del peer inválido")
     except HTTPException:
+        _pull_set(running=False)
         raise
     except Exception as e:
+        _pull_set(running=False)
         raise HTTPException(502, f"No se pudo traer: {str(e)[:200]}")
     # La sincronización parte de lista limpia: lo no aplicado vuelve a salir
     # del pull, así no se acumulan duplicados.
@@ -1627,11 +1762,14 @@ async def pull_now(request: Request):
                 continue
     except Exception:
         pass
-    res = await apply_package(pkg, sess)
+    res = await apply_package(
+        pkg, sess,
+        progress=lambda d, t, ph: _pull_set(ph, d, t, True))
     try:
         _cfg_set("pull_pending", {})
     except Exception:
         pass
+    _pull_set(running=False)
     return res
 
 

@@ -20,6 +20,8 @@
     pre { background:#09090b; border:1px solid #27272a; border-radius:4px; padding:6px; max-height:120px; overflow:auto; font-size:11px; white-space:pre-wrap; margin:4px 0 0; }
     #status { margin-left:8px; font-size:12px; }
     .standby { opacity:0.55; }
+    @keyframes esslide { 0% { margin-left:0; } 50% { margin-left:80%; } 100% { margin-left:0; } }
+    #syncprog-fill.marquee { animation:esslide 1.2s linear infinite; }
 </style>
 </head>
 <body>
@@ -116,7 +118,14 @@ function testPeer(i) {
             else setStatus('❌ ' + p.name + ': ' + ((j && j.detail) || ('HTTP ' + w.status)));
         }).catch(function() { setStatus('❌ ' + p.name + ' (red)'); });
 }
-var _syncTimer = null;
+var _syncTimer = null, _syncPoll = null, _syncT0 = 0, _syncGotData = false;
+function fmtMB(n) {
+    try {
+        n = parseInt(n || '0', 10) || 0;
+        if (n < 1048576) return Math.max(1, Math.round(n / 1024)) + ' KB';
+        return (n / 1048576).toFixed(1) + ' MB';
+    } catch (e) { return ''; }
+}
 function syncProgressStart(label) {
     syncProgressStop();
     var box = document.getElementById('syncprog');
@@ -124,22 +133,46 @@ function syncProgressStart(label) {
     var txt = document.getElementById('syncprog-text');
     if (!box) return;
     box.style.display = '';
-    var t0 = Date.now(), w = 10;
+    _syncT0 = Date.now();
+    _syncGotData = false;
+    if (fill) { fill.classList.add('marquee'); fill.style.width = '20%'; }
     if (txt) txt.textContent = label + ' (0s)...';
-    if (fill) fill.style.width = '10%';
     _syncTimer = setInterval(function() {
-        var s = Math.round((Date.now() - t0) / 1000);
-        w = w >= 90 ? 20 : w + 12;
-        if (fill) fill.style.width = w + '%';
+        if (_syncGotData) return;
+        var s = Math.round((Date.now() - _syncT0) / 1000);
         if (txt) txt.textContent = label + ' (' + s + 's)...';
     }, 600);
+    _syncPoll = setInterval(pollPullStatus, 1000);
+    pollPullStatus();
     var btns = document.querySelectorAll('#peers button, .card button');
     for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
 }
+function pollPullStatus() {
+    var fill = document.getElementById('syncprog-fill');
+    var txt = document.getElementById('syncprog-text');
+    fetch('/api/editsync/pull-now/status').then(function(r) { return r.json(); }).then(function(s) {
+        if (!s || !s.running) return;
+        _syncGotData = true;
+        var s_el = Math.round((Date.now() - _syncT0) / 1000);
+        if (s.total > 0) {
+            var p = Math.max(0, Math.min(100, Math.round(s.done * 100 / s.total)));
+            if (fill) { fill.classList.remove('marquee'); fill.style.width = p + '%'; }
+            var what = (s.phase === 'aplicando') ? ('Aplicando ' + s.done + '/' + s.total) : ('Descargando ' + fmtMB(s.done) + (s.total ? ' de ' + fmtMB(s.total) : ''));
+            if (txt) txt.textContent = what + ' (' + s_el + 's)...';
+        } else {
+            if (fill && !fill.classList.contains('marquee')) { fill.classList.add('marquee'); fill.style.width = '20%'; }
+            if (txt) txt.textContent = (s.phase === 'aplicando' ? 'Aplicando' : 'Descargando') + ' (' + s_el + 's)...';
+        }
+    }).catch(function() {});
+}
 function syncProgressStop() {
     if (_syncTimer) { clearInterval(_syncTimer); _syncTimer = null; }
+    if (_syncPoll) { clearInterval(_syncPoll); _syncPoll = null; }
+    _syncGotData = false;
     var box = document.getElementById('syncprog');
     if (box) box.style.display = 'none';
+    var fill = document.getElementById('syncprog-fill');
+    if (fill) { fill.classList.remove('marquee'); fill.style.width = '20%'; }
     var btns = document.querySelectorAll('#peers button, .card button');
     for (var i = 0; i < btns.length; i++) btns[i].disabled = false;
 }
@@ -242,6 +275,7 @@ function loadPending() {
             var isCol = p.kind === 'collection';
             var badge = isCol ? ' <span style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3);border-radius:4px;font-size:10px;padding:1px 6px;white-space:nowrap;">📚 Colección</span>' : '';
             var st = (p.state === 'standby') ? ' <span class="muted">(en edición)</span>' : '';
+            if (p.conflict) st += ' <span style="background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.4);border-radius:4px;font-size:10px;padding:1px 6px;white-space:nowrap;" title="Mismo serial pero distinto contenido en local y remoto (uid duplicado por DB clonada). Aplicar SOBREESCRIBE el local.">⚠ Colisión: en local es “' + esc(p.local_title || '') + '”</span>';
             var thumbs = '';
             if (p.local_poster) thumbs += '<img src="/api/editsync/pending/' + p.id + '/cover?side=local" title="Cover local" style="width:44px;height:66px;object-fit:cover;border-radius:4px;background:#09090b;border:1px solid #3f3f46;" onerror="this.style.display=\'none\'">';
             if (p.incoming_poster) thumbs += '<img src="/api/editsync/pending/' + p.id + '/cover?side=incoming" title="Cover entrante" style="width:44px;height:66px;object-fit:cover;border-radius:4px;background:#09090b;border:1px solid #eab308;" onerror="this.style.display=\'none\'">';
