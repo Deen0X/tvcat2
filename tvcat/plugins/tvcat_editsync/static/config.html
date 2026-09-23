@@ -29,6 +29,12 @@
     <div style="margin-bottom:6px;"><b>Peers (pull remoto con token)</b></div>
     <div class="muted" style="margin-bottom:6px;">Otra instancia avisa con <span style="font-family:monospace;">notify</span> y esta hace <span style="font-family:monospace;">pull</span> cuando quiere. El token viaja en cabecera <span style="font-family:monospace;">X-Sync-Token</span>.</div>
     <div id="peers"></div>
+    <div id="syncprog" style="display:none;margin-top:8px;">
+        <div style="height:6px;background:#27272a;border-radius:3px;overflow:hidden;">
+            <div id="syncprog-fill" style="height:100%;width:20%;background:#22c55e;border-radius:3px;transition:width 0.4s;"></div>
+        </div>
+        <div id="syncprog-text" class="muted" style="margin-top:4px;"></div>
+    </div>
     <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
         <input type="text" id="peer-name" placeholder="Nombre" style="flex:1;min-width:90px;">
         <input type="text" id="peer-url" placeholder="http://IP:puerto" style="flex:2;min-width:140px;">
@@ -110,16 +116,45 @@ function testPeer(i) {
             else setStatus('❌ ' + p.name + ': ' + ((j && j.detail) || ('HTTP ' + w.status)));
         }).catch(function() { setStatus('❌ ' + p.name + ' (red)'); });
 }
+var _syncTimer = null;
+function syncProgressStart(label) {
+    var box = document.getElementById('syncprog');
+    var fill = document.getElementById('syncprog-fill');
+    var txt = document.getElementById('syncprog-text');
+    if (!box) return;
+    box.style.display = '';
+    var t0 = Date.now(), w = 10;
+    if (txt) txt.textContent = label + ' (0s)...';
+    syncProgressStop();
+    _syncTimer = setInterval(function() {
+        var s = Math.round((Date.now() - t0) / 1000);
+        w = w >= 90 ? 20 : w + 12;
+        if (fill) fill.style.width = w + '%';
+        if (txt) txt.textContent = label + ' (' + s + 's)...';
+    }, 600);
+    var btns = document.querySelectorAll('#peers button, .card button');
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+}
+function syncProgressStop() {
+    if (_syncTimer) { clearInterval(_syncTimer); _syncTimer = null; }
+    var box = document.getElementById('syncprog');
+    if (box) box.style.display = 'none';
+    var btns = document.querySelectorAll('#peers button, .card button');
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = false;
+}
 function pullPeer(i) {
     var p = PEERS[i];
-    if (!confirm('Traer e importar de ' + p.name + '?')) return;
-    setStatus('Sincronizando con ' + p.name + '...');
+    if (!confirm('Traer e importar de ' + p.name + '? La lista de pendientes se limpia y se regenera.')) return;
+    syncProgressStart('Sincronizando con ' + p.name);
     fetch('/api/editsync/pull-now', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ peer: p.name }) })
-        .then(function(r) { return r.json(); })
-        .then(function(j) {
-            setStatus(j ? ('Aplicados ' + (j.applied || 0) + ', pendientes ' + (j.pending || 0) + ', omitidos ' + (j.skipped || 0) + ', bypass ' + (j.bypassed || 0)) : 'Error');
+        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+        .then(function(w) {
+            syncProgressStop();
+            var j = w.body || {};
+            if (w.status === 200 && j) setStatus('Aplicados ' + (j.applied || 0) + ', pendientes ' + (j.pending || 0) + ', omitidos ' + (j.skipped || 0) + ', bypass ' + (j.bypassed || 0));
+            else setStatus('Error: ' + ((j && j.detail) || ('HTTP ' + w.status)));
             loadPending();
-        }).catch(function() { setStatus('Error de red'); });
+        }).catch(function() { syncProgressStop(); setStatus('Error de red'); });
 }
 function setStatus(t) { document.getElementById('status').textContent = t; }
 function loadCfg() {
@@ -164,37 +199,131 @@ function doExport() { window.location.href = '/api/editsync/export'; }
 function doImport() {
     var f = document.getElementById('import-file').files[0];
     if (!f) return;
-    setStatus('Importando...');
+    syncProgressStart('Importando ZIP');
     var fd = new FormData();
     fd.append('file', f);
     fetch('/api/editsync/import', { method: 'POST', body: fd })
-        .then(function(r) { return r.json(); })
-        .then(function(j) {
-            setStatus(j ? ('Aplicados ' + (j.applied || 0) + ', pendientes ' + (j.pending || 0) + ', omitidos ' + (j.skipped || 0) + ', bypass ' + (j.bypassed || 0)) : 'Error');
-            if (j && j.errors && j.errors.length) setStatus(document.getElementById('status').textContent + ' (' + j.errors.length + ' errores)');
+        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+        .then(function(w) {
+            syncProgressStop();
+            var j = w.body || {};
+            if (w.status === 200 && j) {
+                setStatus('Aplicados ' + (j.applied || 0) + ', pendientes ' + (j.pending || 0) + ', omitidos ' + (j.skipped || 0) + ', bypass ' + (j.bypassed || 0));
+                if (j && j.errors && j.errors.length) setStatus(document.getElementById('status').textContent + ' (' + j.errors.length + ' errores)');
+            } else setStatus('Error: ' + ((j && j.detail) || ('HTTP ' + w.status)));
             document.getElementById('import-file').value = '';
             loadPending();
-        }).catch(function() { setStatus('Error de red'); });
+        }).catch(function() { syncProgressStop(); setStatus('Error de red'); });
+}
+function fmtTs(ts) {
+    try {
+        var t = parseInt(ts || '0', 10) || 0;
+        if (!t) return 'sin fecha';
+        var d = new Date(t * 1000);
+        var p = function(n) { return (n < 10 ? '0' : '') + n; };
+        return p(d.getDate()) + '/' + p(d.getMonth() + 1) + '/' + d.getFullYear() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    } catch (e) { return ''; }
 }
 function loadPending() {
     jget('/api/editsync/pending', function(j) {
         var box = document.getElementById('pending');
         var list = (j && j.pending) || [];
         if (!list.length) { box.innerHTML = '<span class="muted">Nada pendiente.</span>'; return; }
-        var html = '<table><tr><th></th><th>Clave</th><th>Diferencia</th></tr>';
+        window._pendingList = list;
+        var html = '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center;">' +
+            '<button class="btn sec" style="padding:4px 10px;" onclick="pendingCheckAll(true)">Marcar todos</button>' +
+            '<button class="btn sec" style="padding:4px 10px;" onclick="pendingCheckAll(false)">Quitar todos</button>' +
+            '<button class="btn" style="padding:4px 10px;" onclick="pendingApplySelected()">Aplicar seleccionados (<span id="pending-sel-n">' + list.filter(function(p){return p.auto;}).length + '</span>)</button>' +
+            '<button class="btn sec" style="padding:4px 10px;" onclick="pendingDiscardSelected()">Descartar seleccionados</button></div>';
+        html += '<table><tr><th></th><th>Cover</th><th>Título</th><th style="text-align:right;"></th></tr>';
         for (var i = 0; i < list.length; i++) {
             var p = list[i];
-            var line = (p.kind === 'collection' ? '📚 ' : '') + esc(p.key) + (p.state === 'standby' ? ' <span class="muted">(en edición)</span>' : '');
-            var diff = '';
-            if (p.text_differs) diff = '<pre>ANTES:\n' + esc(p.local_text || '') + '</pre><pre>ENTRANTE:\n' + esc(p.incoming_text || '') + '</pre>';
-            else diff = '<span class="muted">Solo póster u otros datos.</span>';
-            html += '<tr class="' + (p.state === 'standby' ? 'standby' : '') + '"><td style="white-space:nowrap;">' +
+            var isCol = p.kind === 'collection';
+            var badge = isCol ? ' <span style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3);border-radius:4px;font-size:10px;padding:1px 6px;white-space:nowrap;">📚 Colección</span>' : '';
+            var st = (p.state === 'standby') ? ' <span class="muted">(en edición)</span>' : '';
+            var thumbs = '';
+            if (p.local_poster) thumbs += '<img src="/api/editsync/pending/' + p.id + '/cover?side=local" title="Cover local" style="width:44px;height:66px;object-fit:cover;border-radius:4px;background:#09090b;border:1px solid #3f3f46;" onerror="this.style.display=\'none\'">';
+            if (p.incoming_poster) thumbs += '<img src="/api/editsync/pending/' + p.id + '/cover?side=incoming" title="Cover entrante" style="width:44px;height:66px;object-fit:cover;border-radius:4px;background:#09090b;border:1px solid #eab308;" onerror="this.style.display=\'none\'">';
+            if (!thumbs) thumbs = '<span class="muted">—</span>';
+            html += '<tr class="' + (p.state === 'standby' ? 'standby' : '') + '">' +
+                '<td><input type="checkbox" class="pending-cb" value="' + p.id + '"' + (p.auto ? ' checked' : '') + ' onchange="pendingCount()"></td>' +
+                '<td><div style="display:flex;gap:4px;align-items:center;">' + thumbs + '</div></td>' +
+                '<td><div style="font-weight:600;">' + esc(p.title || p.key) + '</div>' +
+                '<div class="muted" style="font-family:monospace;font-size:11px;">' + esc(p.key) + '</div>' +
+                '<div style="margin-top:2px;">' + badge + st + '</div>' +
+                '<div style="margin-top:4px;"><button class="btn sec" style="padding:4px 10px;" onclick="pendingCompare(' + p.id + ')">Comparar</button></div></td>' +
+                '<td style="text-align:right;white-space:nowrap;">' +
                 '<button class="btn" style="padding:4px 8px;" onclick="applyPending(' + p.id + ')">Aplicar</button> ' +
-                '<button class="btn sec" style="padding:4px 8px;" onclick="discardPending(' + p.id + ')">Descartar</button></td>' +
-                '<td style="font-family:monospace;">' + line + '</td><td>' + diff + '</td></tr>';
+                '<button class="btn sec" style="padding:4px 8px;" onclick="discardPending(' + p.id + ')">Descartar</button></td></tr>';
         }
-        box.innerHTML = html + '</table>';
+        box.innerHTML = html + '</table><div id="pending-compare"></div>';
     });
+}
+function pendingCount() {
+    var n = document.querySelectorAll('.pending-cb:checked').length;
+    var el = document.getElementById('pending-sel-n');
+    if (el) el.textContent = n;
+}
+function pendingCheckAll(v) {
+    var boxes = document.querySelectorAll('.pending-cb');
+    for (var i = 0; i < boxes.length; i++) boxes[i].checked = !!v;
+    pendingCount();
+}
+function pendingApplySelected() {
+    var boxes = document.querySelectorAll('.pending-cb:checked');
+    var ids = [];
+    for (var i = 0; i < boxes.length; i++) ids.push(parseInt(boxes[i].value, 10));
+    if (!ids.length) { setStatus('Marca al menos uno.'); return; }
+    setStatus('Aplicando ' + ids.length + '...');
+    fetch('/api/editsync/pending/apply-many', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: ids }) })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+            var f = (j && j.failed) || [];
+            setStatus('Aplicados ' + ((j && j.applied) || 0) + (f.length ? ' (' + f.length + ' fallos)' : ''));
+            loadPending();
+        }).catch(function() { setStatus('Error de red'); });
+}
+function pendingDiscardSelected() {
+    var boxes = document.querySelectorAll('.pending-cb:checked');
+    var ids = [];
+    for (var i = 0; i < boxes.length; i++) ids.push(parseInt(boxes[i].value, 10));
+    if (!ids.length) { setStatus('Marca al menos uno.'); return; }
+    if (!confirm('Descartar ' + ids.length + ' pendientes?')) return;
+    setStatus('Descartando ' + ids.length + '...');
+    fetch('/api/editsync/pending/discard-many', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: ids }) })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+            setStatus('Descartados ' + ((j && j.discarded) || 0));
+            loadPending();
+        }).catch(function() { setStatus('Error de red'); });
+}
+function pendingCompare(id) {
+    var list = window._pendingList || [];
+    var p = null;
+    for (var i = 0; i < list.length; i++) {
+        if (String(list[i].id) === String(id)) { p = list[i]; break; }
+    }
+    if (!p) return;
+    var host = document.getElementById('pending-compare');
+    if (!host) return;
+    var col = function(side, label, ts, hasImg, text) {
+        var img = hasImg
+            ? '<img src="/api/editsync/pending/' + id + '/cover?side=' + side + '" style="max-width:34vw;max-height:52vh;object-fit:contain;border-radius:6px;' + (side === 'incoming' ? 'border:1px solid #eab308;' : '') + '" onerror="this.outerHTML=\'<span class=muted>Sin imagen</span>\'">'
+            : '<span class="muted">Sin imagen</span>';
+        return '<div style="flex:1;min-width:220px;text-align:center;">' +
+            '<div style="font-weight:600;margin-bottom:2px;">' + label + '</div>' +
+            '<div class="muted" style="margin-bottom:6px;font-size:11px;">' + esc(ts) + '</div>' +
+            img +
+            '<pre style="text-align:left;margin-top:8px;">' + esc(text || '(vacío)') + '</pre></div>';
+    };
+    host.innerHTML = '<div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:99999;display:flex;align-items:center;justify-content:center;" onclick="if(event.target===this)this.remove()">' +
+        '<div style="background:#18181b;border:1px solid #3f3f46;border-radius:8px;padding:14px;max-width:92vw;max-height:92vh;overflow:auto;">' +
+        '<div style="text-align:center;font-weight:700;margin-bottom:10px;">' + esc(p.title || p.key) + '</div>' +
+        '<div style="display:flex;gap:14px;justify-content:center;flex-wrap:wrap;">' +
+        col('local', 'Actual', fmtTs(p.local_updated), p.local_poster, p.local_text) +
+        col('incoming', 'Nuevo', fmtTs(p.incoming_updated), p.incoming_poster, p.incoming_text) +
+        '</div><div style="text-align:center;margin-top:10px;"><button class="btn sec" onclick="document.getElementById(\'pending-compare\').innerHTML=\'\'">Cerrar</button></div>' +
+        '</div></div>';
 }
 function applyPending(id) {
     fetch('/api/editsync/pending/' + id + '/apply', { method: 'POST' })

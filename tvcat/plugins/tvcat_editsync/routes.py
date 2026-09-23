@@ -317,6 +317,145 @@ def _safe_cover_name(key: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", key or "x")[:80] + ".jpg"
 
 
+def _local_cover_by_serial(serial: str):
+    """(blob, mime) del cover de una colección local por SERIAL, o (b'', '')."""
+    try:
+        try:
+            from services.catalog_service import get_conn, get_local_cover
+        except Exception:
+            from tvcat.services.catalog_service import get_conn, get_local_cover
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT id FROM collections_local WHERE serial=?",
+                               (str(serial or ""),)).fetchone()
+            if not row:
+                return b"", ""
+            lid = row[0] if not isinstance(row, dict) else row.get("id")
+            cov = get_local_cover(int(lid), _conn=conn)
+            if cov and cov.get("blob"):
+                return bytes(cov["blob"]), cov.get("mime") or "image/jpeg"
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return b"", ""
+
+
+def _save_local_cover_by_serial(serial: str, blob: bytes, mime: str = "image/jpeg") -> bool:
+    try:
+        if not blob:
+            return False
+        try:
+            from services.catalog_service import get_conn, save_local_cover
+        except Exception:
+            from tvcat.services.catalog_service import get_conn, save_local_cover
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT id FROM collections_local WHERE serial=?",
+                               (str(serial or ""),)).fetchone()
+            if not row:
+                return False
+            lid = row[0] if not isinstance(row, dict) else row.get("id")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return bool(save_local_cover(int(lid), bytes(blob), mime or "image/jpeg"))
+    except Exception:
+        return False
+
+
+def _as_entry_list(v) -> list:
+    """Normaliza entries a lista de dicts (el export viejo metía el JSON crudo)."""
+    try:
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, dict)]
+        if isinstance(v, str) and v.strip():
+            try:
+                d = json.loads(v)
+            except Exception:
+                return []
+            if isinstance(d, str):
+                try:
+                    d = json.loads(d)
+                except Exception:
+                    return []
+            if isinstance(d, list):
+                return [x for x in d if isinstance(x, dict)]
+    except Exception:
+        pass
+    return []
+
+
+def _normalize_local_collection_entries():
+    """Repara filas con entries_json doblemente codificado (import viejo).
+    Corre una vez al cargar el plugin."""
+    try:
+        try:
+            from services.catalog_service import get_conn
+        except Exception:
+            from tvcat.services.catalog_service import get_conn
+        conn = get_conn()
+        try:
+            try:
+                rows = conn.execute("SELECT item_id, entries_json FROM collections_local").fetchall()
+            except Exception:
+                return
+            fixed = 0
+            for r in rows:
+                try:
+                    iid = r[0] if not isinstance(r, dict) else r.get("item_id")
+                    raw = r[1] if not isinstance(r, dict) else r.get("entries_json")
+                    if not (raw or "").strip():
+                        v, needs_fix = [], True
+                    else:
+                        try:
+                            v = json.loads(raw)
+                        except Exception:
+                            v, needs_fix = [], True
+                        else:
+                            needs_fix = False
+                    if isinstance(v, str):
+                        # Doble codificación (import viejo): re-parsear y reescribir.
+                        try:
+                            v = json.loads(v)
+                        except Exception:
+                            v = []
+                        needs_fix = True
+                    if not isinstance(v, list):
+                        v = []
+                        needs_fix = True
+                    else:
+                        clean = [x for x in v if isinstance(x, dict)]
+                        if len(clean) != len(v):
+                            needs_fix = True
+                        v = clean
+                    if not needs_fix:
+                        continue
+                    conn.execute("UPDATE collections_local SET entries_json=? WHERE item_id=?",
+                                 (json.dumps(v, ensure_ascii=False), iid))
+                    fixed += 1
+                except Exception:
+                    continue
+            if fixed:
+                conn.commit()
+                print(f"[EditSync] entries normalizadas en {fixed} colecciones", flush=True)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+_normalize_local_collection_entries()
+
+
 # ─── Mis userbots / acceso / dueño ──────────────────────────────
 
 def _my_tg_ids() -> set:
@@ -555,13 +694,24 @@ def build_package(since: int = 0, instance_id: str = "") -> bytes:
     try:
         for col in _export_collections():
             try:
+                serial = str(col.get("serial") or "")
+                fn = ""
+                try:
+                    _cb, _cm = _local_cover_by_serial(serial) if serial else (b"", "")
+                    if _cb:
+                        fn = "col-" + _safe_cover_name(serial)
+                        cover_files[fn] = bytes(_cb)
+                        counts_covers += 1
+                except Exception:
+                    fn = ""
                 collections.append({
                     "name": col.get("name") or "",
-                    "serial": col.get("serial") or "",
-                    "entries": col.get("entries_json") or col.get("entries") or [],
+                    "serial": serial,
+                    "entries": _as_entry_list(col.get("entries", col.get("entries_json"))),
                     "description": col.get("description") or "",
                     "cover_text": col.get("cover_text") or "",
                     "cover_asset_key": col.get("cover_asset_key") or "",
+                    "cover_file": fn,
                 })
             except Exception:
                 continue
@@ -805,6 +955,16 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None):
                             continue
                     except Exception:
                         pass
+                # Idéntico (mismo texto + misma imagen): sincronizados, ni se lista.
+                if local and (t.get("cover_text") or "") == (local.get("cover_text") or ""):
+                    try:
+                        _ip = bytes((pkg.get("covers") or {}).get(str(t.get("poster_file") or "")) or b"")
+                        _lb = bytes(local.get("poster_blob") or b"")
+                        if _lb == _ip:
+                            res["skipped"] += 1
+                            continue
+                    except Exception:
+                        pass
                 # Standby: modal editando esta key
                 if _standby_for(user_id, key) == key:
                     _poster0 = (pkg.get("covers") or {}).get(str(t.get("poster_file") or "")) or b""
@@ -814,7 +974,8 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None):
                                   "poster_file": str(t.get("poster_file") or ""),
                                   "staged": _stage_cover(key, _poster0) if _poster0 else "",
                                   "link": t.get("telegram_link") or "",
-                                  "item_id": t.get("item_id") or ""},
+                                  "item_id": t.get("item_id") or "",
+                                  "updated_at": t.get("updated_at") or 0},
                                  {"cover_text": (local or {}).get("cover_text") or "",
                                   "updated_at": (local or {}).get("updated_at") or 0},
                                  state="standby")
@@ -836,7 +997,8 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None):
                               "poster_file": str(t.get("poster_file") or ""),
                               "staged": _stage_cover(key, poster) if poster else "",
                               "link": t.get("telegram_link") or "",
-                              "item_id": t.get("item_id") or ""},
+                              "item_id": t.get("item_id") or "",
+                              "updated_at": t.get("updated_at") or 0},
                              {"cover_text": local.get("cover_text") or "",
                               "updated_at": local.get("updated_at") or 0},
                              state="pending")
@@ -866,16 +1028,31 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None):
                     if not serial and not name:
                         continue
                     if serial and serial in existing:
+                        _loc_c = existing[serial]
+                        _cposter = (pkg.get("covers") or {}).get(str(col.get("cover_file") or "")) or b""
+                        # Idéntica (texto + descripción + entries + imagen):
+                        # sincronizada, ni se lista.
+                        try:
+                            _same_txt = ((col.get("cover_text") or "") == (_loc_c.get("cover_text") or "")
+                                         and (col.get("description") or "") == (_loc_c.get("description") or "")
+                                         and _as_entry_list(col.get("entries")) == _as_entry_list(_loc_c.get("entries", _loc_c.get("entries_json"))))
+                            _lb, _ = _local_cover_by_serial(serial)
+                            if _same_txt and bytes(_lb or b"") == bytes(_cposter or b""):
+                                res["skipped"] += 1
+                                continue
+                        except Exception:
+                            pass
                         _pending_add("collection", serial, {}, dict(col), dict(existing[serial]), state="pending")
                         res["pending"] += 1
                         continue
+                    # Nueva: también a pendientes (nada se crea sin aceptar).
+                    # El cover entrante queda en staging para el apply.
                     try:
-                        create_local_collection(name or serial, serial,
-                                                col.get("entries") or [],
-                                                user_id=user_id or None,
-                                                description=col.get("description") or "",
-                                                cover_text=col.get("cover_text") or "")
-                        res["applied"] += 1
+                        _cposter2 = (pkg.get("covers") or {}).get(str(col.get("cover_file") or "")) or b""
+                        _incc = dict(col)
+                        _incc["staged"] = _stage_cover("col-" + (serial or name), _cposter2) if _cposter2 else ""
+                        _pending_add("collection", serial or name, {}, _incc, {}, state="pending")
+                        res["pending"] += 1
                     except Exception as e:
                         res["errors"].append(f"colección {name}: {str(e)[:120]}")
                 except Exception as e:
@@ -1040,6 +1217,76 @@ async def import_zip(request: Request, file: UploadFile = File(...)):
     return res
 
 
+def _display_title(inc: dict, loc: dict, kind: str, key: str, ident: dict) -> str:
+    """Título legible para la fila: detalle entrante > item local > key."""
+    try:
+        det = inc.get("enrich_details") or {}
+        if isinstance(det, str):
+            try:
+                det = json.loads(det)
+            except Exception:
+                det = {}
+        t = str((det or {}).get("api_title") or "").strip()
+        if t:
+            return t
+    except Exception:
+        pass
+    for iid in (inc.get("item_id") or "", (loc.get("item_id") if isinstance(loc, dict) else "") or ""):
+        if not iid:
+            continue
+        try:
+            conn = _central_conn()
+            try:
+                row = conn.execute("SELECT title FROM unified_catalog WHERE item_id=?", (iid,)).fetchone()
+                if row:
+                    v = row[0] if not isinstance(row, dict) else row.get("title")
+                    if v:
+                        return str(v)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    if kind == "collection":
+        try:
+            n = str((inc.get("name") or loc.get("name") or "")).strip()
+            if n:
+                return n
+        except Exception:
+            pass
+    try:
+        it = (ident or {}).get("title")
+        if it:
+            return str(it)
+    except Exception:
+        pass
+    return str(key or "")
+
+
+def _local_poster(key: str):
+    """(blob, mime) del cover local actual, o (b'', '')."""
+    try:
+        if not os.path.isfile(_enricher_db()):
+            return b"", ""
+        c = sqlite3.connect(f"file:{_enricher_db()}?mode=ro", uri=True, timeout=10)
+        c.row_factory = sqlite3.Row
+        try:
+            r = c.execute("SELECT poster_blob, poster_mime FROM enriched_covers WHERE channelid_msgid=?",
+                          (str(key),)).fetchone()
+            if r and r["poster_blob"]:
+                return bytes(r["poster_blob"]), r["poster_mime"] or "image/jpeg"
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return b"", ""
+
+
 @router.get("/api/editsync/pending")
 async def pending_list(request: Request):
     _need_session(request)
@@ -1061,21 +1308,169 @@ async def pending_list(request: Request):
                 inc = json.loads(d.get("incoming_json") or "{}")
                 loc = json.loads(d.get("local_json") or "{}")
                 ident = json.loads(d.get("ident_json") or "{}")
+                kind = d.get("kind") or "title"
+                key = d.get("key") or ""
+                inc_text = inc.get("cover_text") or ""
+                loc_text = loc.get("cover_text") or ""
+                inc_upd = int(inc.get("updated_at") or d.get("updated_at") or 0)
+                loc_upd = int(loc.get("updated_at") or 0)
+                if kind == "collection":
+                    differs = (json.dumps(_as_entry_list(inc.get("entries")), sort_keys=True, ensure_ascii=False)
+                               != json.dumps(_as_entry_list(loc.get("entries")), sort_keys=True, ensure_ascii=False)
+                               or (inc.get("cover_text") or "") != (loc.get("cover_text") or "")
+                               or (inc.get("description") or "") != (loc.get("description") or ""))
+                    has_local = bool(loc)
+                    auto = bool(differs) or not has_local
+                    try:
+                        _lb, _lm = _local_cover_by_serial(key)
+                        local_poster = bool(_lb)
+                    except Exception:
+                        local_poster = False
+                else:
+                    differs = inc_text != loc_text
+                    has_local = bool(loc_text or loc_upd)
+                    auto = (not has_local) or (inc_upd >= loc_upd)
+                    _lb, _lm = _local_poster(key)
+                    local_poster = bool(_lb)
                 out.append({
-                    "id": d["id"], "kind": d.get("kind"), "key": d.get("key"),
+                    "id": d["id"], "kind": kind, "key": key,
                     "state": d.get("state"), "updated_at": d.get("updated_at"),
                     "ident": ident,
-                    "incoming_text": (inc.get("cover_text") or "")[:2000],
-                    "local_text": (loc.get("cover_text") or "")[:2000],
-                    "text_differs": (inc.get("cover_text") or "") != (loc.get("cover_text") or ""),
+                    "title": _display_title(inc, loc, kind, key, ident),
+                    "incoming_text": inc_text[:2000],
+                    "local_text": loc_text[:2000],
+                    "text_differs": bool(differs),
                     "incoming_poster": bool(inc.get("poster_file") or inc.get("staged")),
-                    "incoming_name": (inc.get("item_id") or "") or (ident.get("title") or d.get("key")),
+                    "local_poster": bool(local_poster),
+                    "incoming_updated": inc_upd,
+                    "local_updated": loc_upd,
+                    "auto": bool(auto),
                 })
             except Exception:
                 continue
     except Exception as e:
         raise HTTPException(500, str(e)[:200])
+    try:
+        out.sort(key=lambda d: str(d.get("title") or d.get("key") or "").lower())
+    except Exception:
+        pass
     return {"pending": out}
+
+
+@router.get("/api/editsync/pending/{pid}/cover")
+async def pending_cover(pid: int, request: Request, side: str = "incoming"):
+    """Póster del pendiente: incoming (staging) o local (enriched_covers)."""
+    _need_session(request)
+    row = _pending_row(pid)
+    if not row:
+        raise HTTPException(404, "Pendiente no encontrado")
+    try:
+        inc = json.loads(row.get("incoming_json") or "{}")
+    except Exception:
+        inc = {}
+    blob, mime = b"", "image/jpeg"
+    if side == "local":
+        if row.get("kind") == "collection":
+            blob, mime = _local_cover_by_serial(str(row.get("key") or ""))
+        else:
+            blob, mime = _local_poster(str(row.get("key") or ""))
+    else:
+        try:
+            sp = _staged_path(inc.get("staged") or "")
+            if sp:
+                with open(sp, "rb") as f:
+                    blob = f.read()
+        except Exception:
+            blob = b""
+    if not blob:
+        raise HTTPException(404, "Sin póster")
+    return Response(content=blob, media_type=mime or "image/jpeg")
+
+
+def _apply_pending_row(row: dict):
+    """Aplica UNA fila pendiente. Lanza HTTPException/Exception si falla."""
+    try:
+        inc = json.loads(row.get("incoming_json") or "{}")
+    except Exception:
+        inc = {}
+    if row.get("kind") == "collection":
+        try:
+            from services.catalog_service import list_local_collections, update_local_collection, create_local_collection
+        except Exception:
+            from tvcat.services.catalog_service import list_local_collections, update_local_collection, create_local_collection
+        target = None
+        try:
+            for c in (list_local_collections() or []):
+                if str(c.get("serial") or "") == str(row.get("key") or ""):
+                    target = c
+                    break
+        except Exception:
+            target = None
+        if target:
+            update_local_collection(target["item_id"], name=inc.get("name") or None,
+                                    entries=_as_entry_list(inc.get("entries")),
+                                    description=inc.get("description"),
+                                    cover_text=inc.get("cover_text"))
+        else:
+            # Nueva aceptada: crear local + cover si venía.
+            created = create_local_collection(inc.get("name") or row.get("key") or "",
+                                              str(row.get("key") or ""),
+                                              _as_entry_list(inc.get("entries")),
+                                              description=inc.get("description") or "",
+                                              cover_text=inc.get("cover_text") or "")
+            target = created
+        try:
+            sp = _staged_path(inc.get("staged") or "")
+            if sp and target:
+                with open(sp, "rb") as f:
+                    _blob = f.read()
+                if _blob:
+                    _save_local_cover_by_serial(
+                        str(target.get("serial") or row.get("key") or ""), _blob, "image/jpeg")
+        except Exception:
+            pass
+        _staged_delete(inc.get("staged") or "")
+    else:
+        poster = b""
+        mime = "image/jpeg"
+        try:
+            sp = _staged_path(inc.get("staged") or "")
+            if sp:
+                with open(sp, "rb") as f:
+                    poster = f.read()
+        except Exception:
+            poster = b""
+        _upsert_enriched(str(row.get("key") or ""), inc.get("item_id") or "",
+                         inc.get("link") or "", inc.get("cover_text") or "",
+                         inc.get("enrich_details") or {}, poster, mime)
+        _staged_delete(inc.get("staged") or "")
+    _pending_delete(int(row["id"]))
+    return True
+
+
+@router.post("/api/editsync/pending/apply-many")
+async def pending_apply_many(request: Request):
+    """Aplica una lista de ids. Devuelve {applied, failed:[{id,error}]}."""
+    _need_session(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ids = (body or {}).get("ids") or []
+    applied, failed = 0, []
+    for pid in ids:
+        try:
+            row = _pending_row(int(pid))
+            if not row or row.get("state") not in ("pending", "standby"):
+                failed.append({"id": pid, "error": "no encontrado"})
+                continue
+            _apply_pending_row(row)
+            applied += 1
+        except HTTPException as e:
+            failed.append({"id": pid, "error": e.detail})
+        except Exception as e:
+            failed.append({"id": pid, "error": str(e)[:160]})
+    return {"ok": True, "applied": applied, "failed": failed}
 
 
 @router.post("/api/editsync/pending/{pid}/apply")
@@ -1085,44 +1480,7 @@ async def pending_apply(pid: int, request: Request):
     if not row or row.get("state") not in ("pending", "standby"):
         raise HTTPException(404, "Pendiente no encontrado")
     try:
-        inc = json.loads(row.get("incoming_json") or "{}")
-    except Exception:
-        inc = {}
-    try:
-        if row.get("kind") == "collection":
-            try:
-                from services.catalog_service import list_local_collections, update_local_collection
-            except Exception:
-                from tvcat.services.catalog_service import list_local_collections, update_local_collection
-            target = None
-            try:
-                for c in (list_local_collections() or []):
-                    if str(c.get("serial") or "") == str(row.get("key") or ""):
-                        target = c
-                        break
-            except Exception:
-                target = None
-            if not target:
-                raise HTTPException(404, "Colección local no encontrada")
-            update_local_collection(target["item_id"], name=inc.get("name") or None,
-                                    entries=inc.get("entries"),
-                                    description=inc.get("description"),
-                                    cover_text=inc.get("cover_text"))
-        else:
-            poster = b""
-            mime = "image/jpeg"
-            try:
-                sp = _staged_path(inc.get("staged") or "")
-                if sp:
-                    with open(sp, "rb") as f:
-                        poster = f.read()
-            except Exception:
-                poster = b""
-            _upsert_enriched(str(row.get("key") or ""), inc.get("item_id") or "",
-                             inc.get("link") or "", inc.get("cover_text") or "",
-                             inc.get("enrich_details") or {}, poster, mime)
-            _staged_delete(inc.get("staged") or "")
-        _pending_delete(pid)
+        _apply_pending_row(row)
         return {"ok": True}
     except HTTPException:
         raise
@@ -1138,6 +1496,26 @@ async def pending_discard(pid: int, request: Request):
         raise HTTPException(404, "Pendiente no encontrado")
     _pending_delete(pid)
     return {"ok": True}
+
+
+@router.post("/api/editsync/pending/discard-many")
+async def pending_discard_many(request: Request):
+    """Descarta una lista de ids. Devuelve {discarded}."""
+    _need_session(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ids = (body or {}).get("ids") or []
+    n = 0
+    for pid in ids:
+        try:
+            if _pending_row(int(pid)):
+                _pending_delete(int(pid))
+                n += 1
+        except Exception:
+            continue
+    return {"ok": True, "discarded": n}
 
 
 @router.post("/api/editsync/peer/test")
@@ -1230,6 +1608,25 @@ async def pull_now(request: Request):
         raise
     except Exception as e:
         raise HTTPException(502, f"No se pudo traer: {str(e)[:200]}")
+    # La sincronización parte de lista limpia: lo no aplicado vuelve a salir
+    # del pull, así no se acumulan duplicados.
+    try:
+        c = _pconn()
+        try:
+            _ids = [r[0] for r in c.execute(
+                "SELECT id FROM editsync_pending WHERE state IN ('pending','standby')").fetchall()]
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+        for _pid in _ids:
+            try:
+                _pending_delete(int(_pid))
+            except Exception:
+                continue
+    except Exception:
+        pass
     res = await apply_package(pkg, sess)
     try:
         _cfg_set("pull_pending", {})

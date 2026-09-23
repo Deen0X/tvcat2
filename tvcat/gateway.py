@@ -5935,6 +5935,14 @@ def _match_collection_entries(entries, norm_index, lit_index):
     used = set()
     _cover_memo = {}
     for pos, e in enumerate(entries or []):
+        # Entradas corruptas (string en vez de dict, p.ej. doble JSON de un
+        # import): se registran como ausentes en vez de romper el listado.
+        if not isinstance(e, dict):
+            try:
+                missing.append({"pos": pos, "entry": str(e)[:120]})
+            except Exception:
+                pass
+            continue
         et, ey = (e or {}).get("title", ""), (e or {}).get("year")
         if ey:
             ey = str(ey).strip()[:4]
