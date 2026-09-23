@@ -391,7 +391,8 @@ CORE_DIR = os.path.join(BASE_DIR, "core")
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
 DB_PATH = os.path.join(BASE_DIR, "data", "tvcat.db")
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "tvcat_config.json")
-__version__ = "2.0.0"
+__version__ = "2.1"
+__codename__ = "Soul Blade"
 
 from services.translate_service import xTranslate, load_translations
 load_translations()
@@ -571,7 +572,7 @@ def _spawn(coro):
 
 @asynccontextmanager
 async def lifespan(app_instance):
-    print(f" [TVCAT2] Iniciando TVCat 2 v{__version__}")
+    print(f" [TVCAT2] Iniciando TVCat 2 v{__version__} '{__codename__}'")
     print(f" [TVCAT2] Base path: '{base_path}'")
     _plugin_loader.scan()
     _plugin_loader.register_routers(app_instance)
@@ -771,7 +772,7 @@ async def serve_pro_sw():
 # --- API: Server ---
 @app.get(api_url("/api/server/info"))
 async def server_info():
-    return {"name": "TVCat 2", "version": __version__, "base_path": base_path, "plugins_count": len(_plugin_loader.registry)}
+    return {"name": "TVCat 2", "version": __version__, "codename": __codename__, "base_path": base_path, "plugins_count": len(_plugin_loader.registry)}
 
 @app.get(api_url("/api/plugins"))
 async def get_plugins():
@@ -1516,6 +1517,31 @@ def _filter_items(items, search: str = "", fields: Optional[str] = None, year_fr
     search_fields = [f.strip() for f in fields.split(",") if f.strip()] if fields is not None else None
     if search_fields is None:
         search_fields = ["title", "description", "alt_titles"]
+    # file_name vive en item_episodes: precargar mapa item_id -> nombres en 1 query
+    file_names_map = {}
+    if "file_name" in search_fields and items:
+        try:
+            from services.catalog_service import get_conn as _gconn
+            _gc = _gconn()
+            _ids = [str(it.get("item_id")) for it in items if isinstance(it, dict) and it.get("item_id")]
+            _int_ids = []
+            try:
+                _rows = _gc.execute("SELECT item_id, id FROM unified_catalog WHERE item_id IN (%s)" % ",".join("?" * len(_ids)), _ids).fetchall() if _ids else []
+                _int_ids = [(str(r["item_id"]), str(r["id"])) for r in _rows]
+            except Exception:
+                _int_ids = []
+            _keys = set(_ids) | set(_iid for _, _iid in _int_ids)
+            if _keys:
+                _kl = list(_keys)
+                for _er in _gc.execute("SELECT item_id, file_name FROM item_episodes WHERE item_id IN (%s)" % ",".join("?" * len(_kl)), _kl).fetchall():
+                    file_names_map.setdefault(str(_er["item_id"]), []).append(str(_er["file_name"] or ""))
+            # los episodios guardados por id entero también cuentan para su item
+            for _uid, _iid in _int_ids:
+                if _iid in file_names_map and _uid not in file_names_map:
+                    file_names_map[_uid] = file_names_map[_iid]
+            _gc.close()
+        except Exception:
+            file_names_map = {}
     # year
     yf = None
     yt = None
@@ -1569,16 +1595,25 @@ def _filter_items(items, search: str = "", fields: Optional[str] = None, year_fr
                     # En SQL: CAST('' AS INTEGER) -> 0? En SQLite CAST('' AS INTEGER)=0, entonces 0 >= yf sería falso si yf>0 -> descartado.
                     # Para simplificar, descartar si hay filtro y no hay año válido.
                     continue
-        # búsqueda
+        # búsqueda: a*b = partes EN ORDEN dentro del mismo campo
         if search_parts:
+            def _ordered(val, parts):
+                pos = 0
+                for part in parts:
+                    idx = val.find(part, pos)
+                    if idx < 0:
+                        return False
+                    pos = idx + len(part)
+                return True
             hay = False
             for field in search_fields:
-                val = str(it.get(field) or "").lower()
+                if field == "file_name":
+                    val = " ".join(file_names_map.get(str(it.get("item_id")), [])).lower()
+                else:
+                    val = str(it.get(field) or "").lower()
                 # para alt_titles es JSON array string -> contiene títulos
-                for part in search_parts:
-                    if part in val:
-                        hay = True; break
-                if hay: break
+                if _ordered(val, search_parts):
+                    hay = True; break
             if not hay:
                 continue
         filtered.append(it)
@@ -6079,11 +6114,23 @@ async def list_collections(request: Request, limit: int = 200, search: str = "",
             if prev is None or date > prev[0]:
                 winners[key] = (date, payload)
         items = [p for _, p in sorted(winners.values(), key=lambda t: str(t[1].get("title") or ""))][:min(limit, 200)]
-        # Filtro de búsqueda (igual que el resto de secciones).
+        # Filtro de búsqueda (igual que el resto de secciones: a*b = partes
+        # en orden dentro del mismo campo).
         q = (search or "").strip().lower()
         if q:
             import json as _js2
             wanted = {w.strip().lower() for w in str(fields or "title").split(",") if w.strip()} or {"title"}
+            parts = [p.strip() for p in q.split("*") if p.strip()] or [q]
+
+            def _ordered(val):
+                pos = 0
+                for part in parts:
+                    idx = val.find(part, pos)
+                    if idx < 0:
+                        return False
+                    pos = idx + len(part)
+                return True
+
             kept = []
             for it in items:
                 hay = []
@@ -6098,7 +6145,7 @@ async def list_collections(request: Request, limit: int = 200, search: str = "",
                         pass
                 if "description" in wanted:
                     hay.append(str(it.get("description") or ""))
-                if any(q in (h or "").lower() for h in hay):
+                if any(_ordered((h or "").lower()) for h in hay):
                     kept.append(it)
             items = kept
         _mark_favs(conn, s.get("profile_id") or user_id, items)
@@ -6320,6 +6367,14 @@ async def get_item_details(item_id: str, request: Request = None):
         if enriched and enriched.get("cover_text"):
             result["description"] = enriched["cover_text"]
             # opcional: si el cover trae api_cover como imagen externa, exponerla via metadata
+    except Exception:
+        pass
+    # Tags `_*` (media, solo se resuelven al copiar en TGHirayi): quitarlos en
+    # DISPLAY para que la hero no los muestre literales.
+    try:
+        from services.enrich_tags import strip_media_tags as _strip_mt
+        if result.get("description"):
+            result["description"] = _strip_mt(result["description"])
     except Exception:
         pass
     # Verificar si está en favoritos del usuario actual

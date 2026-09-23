@@ -184,7 +184,7 @@
             return;
         }
 
-        var processed = parseWildcardSearch(query).join(' ');
+        var processed = window.sanitizeSearchText(query).trim().replace(/\s+/g, ' ').replace(/\s*\*\s*/g, '*');
         var url = '/api/catalog/' + currentCategory + '?search=' + encodeURIComponent(processed);
 
         var fields = [];
@@ -192,6 +192,7 @@
             if (window._activeFilters.fields.title) fields.push('title');
             if (window._activeFilters.fields.alt_titles) fields.push('alt_titles');
             if (window._activeFilters.fields.description) fields.push('description');
+            if (window._activeFilters.fields.file_name) fields.push('file_name');
             url += '&fields=' + encodeURIComponent(fields.join(','));
             if (window._activeFilters.year_from) url += '&year_from=' + window._activeFilters.year_from;
             if (window._activeFilters.year_to) url += '&year_to=' + window._activeFilters.year_to;
@@ -614,6 +615,7 @@
                 if (window._activeFilters.fields.title) fields.push('title');
                 if (window._activeFilters.fields.alt_titles) fields.push('alt_titles');
                 if (window._activeFilters.fields.description) fields.push('description');
+                if (window._activeFilters.fields.file_name) fields.push('file_name');
             }
             if (!fields.length) fields.push('title');
             qs.push('fields=' + encodeURIComponent(fields.join(',')));

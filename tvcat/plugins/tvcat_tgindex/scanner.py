@@ -370,69 +370,6 @@ def _forum_topics_stale(canon_ch, want_ids=None):
         return True
 
 
-async def _fetch_forum_topics(channel_ref, session_string, api_id, api_hash, only_ids=None):
-    """Nombres de topics via Telegram por IDs (best-effort). Devuelve {id: title}.
-
-    Usa GetForumTopicsByIDRequest sobre los IDs que hay en cache: exacto y sin
-    tope de paginacion (el listado completo se cortaba en 100)."""
-    try:
-        from telethon import TelegramClient
-        from telethon.sessions import StringSession
-        from telethon.tl.functions.messages import GetForumTopicsByIDRequest
-        want = []
-        for _w in only_ids or []:
-            try:
-                _wi = int(_w)
-                if _wi and _wi not in want:
-                    want.append(_wi)
-            except Exception:
-                pass
-        if not want:
-            return {}
-        _s = str(channel_ref).strip()
-        try:
-            _entity_ref = int(_s)
-        except Exception:
-            _entity_ref = _s
-        client = TelegramClient(StringSession(session_string), int(api_id), str(api_hash), device_model="TVCat_Idx", app_version="1.0")
-        await client.connect()
-        try:
-            try:
-                peer = await client.get_input_entity(_entity_ref)
-            except Exception:
-                peer = _entity_ref
-            out = {}
-            def _collect(topics):
-                for _tt in topics or []:
-                    try:
-                        _tid = int(getattr(_tt, "id", 0) or 0)
-                        _ti = (" ".join(str(getattr(_tt, "title", "") or "").split()))[:60]
-                        if _tid and _ti:
-                            out[_tid] = _ti
-                    except Exception:
-                        pass
-            for _i in range(0, len(want), 100):
-                _chunk = want[_i:_i + 100]
-                try:
-                    res = await client(GetForumTopicsByIDRequest(peer=peer, topics=_chunk))
-                    _collect(getattr(res, "topics", []))
-                except Exception:
-                    for _single in _chunk:
-                        try:
-                            res = await client(GetForumTopicsByIDRequest(peer=peer, topics=[_single]))
-                            _collect(getattr(res, "topics", []))
-                        except Exception:
-                            pass
-            return out
-        finally:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-    except Exception:
-        return {}
-
-
 def _get_channel_topic_ids(canon_ch):
     """IDs de topic distintos en el cache de mensajes de un canal (central)."""
     try:
@@ -1050,7 +987,7 @@ def _parse_collection_items(msgs, entity_id_str, source_tag, subcat, category, c
     return count
 
 
-def _segment_blocks(msgs):
+def _segment_blocks(msgs, drop_empty=False):
     """Heurística file->image: segmenta mensajes en bloques {images, texts, files}.
     Frontera entre títulos = imagen (foto o documento-imagen) tras ficheros, o texto
     'tipo cover' (p. ej. '🎬 Nombre: ...') que aparece después de los ficheros del
@@ -1060,7 +997,11 @@ def _segment_blocks(msgs):
     al final) y se empieza uno nuevo. Dentro del mismo topic se acumula sin
     límite de salto por msg_id (una serie puede continuar 1000 mensajes después).
     Los mensajes sin topic (None/0) forman una única rama "sin topic" con
-    segmentación secuencial clásica (no un grupo por mensaje)."""
+    segmentación secuencial clásica (no un grupo por mensaje).
+    drop_empty (scan-item "Descartar covers vacíos"): una imagen sin ficheros
+    en curso descarta el bloque abierto (imágenes+textos) y empieza de cero —
+    el último cover es el vigente. Por defecto las imágenes son informativas
+    (gana la primera)."""
     blocks = []
     current = {"images": [], "texts": [], "files": []}
     current_topic = None
@@ -1084,6 +1025,9 @@ def _segment_blocks(msgs):
         if is_image:
             if current["files"]:
                 blocks.append(current)
+                current = {"images": [msg], "texts": [], "files": []}
+            elif drop_empty and (current["images"] or current["texts"]):
+                # Covers vacíos descartados: el nuevo cover es el vigente.
                 current = {"images": [msg], "texts": [], "files": []}
             else:
                 current["images"].append(msg)
@@ -1332,6 +1276,332 @@ def _deduce_season_number(text):
                 continue
             return str(num)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Subcategoría automática (Movie / TV Show / Type del cover + diccionario)
+# ---------------------------------------------------------------------------
+_VIDEO_CATEGORIES = frozenset([
+    "media", "video", "videos", "vídeo", "multimedia",
+    "pelicula", "peliculas", "película", "películas",
+    "serie", "series", "anime", "tv", "television", "televisión",
+    "cine", "dibujos",
+])
+
+_SUBCAT_DICT_KEY = "tgindex_subcat_dict"
+
+_SUBCAT_DICT_SEED = {"terms": [
+    {"label": "Movie", "aliases": ["movie", "pelicula", "película", "peli", "film", "filme"]},
+    {"label": "TV Show", "aliases": ["tvshow", "TV Show", "serie", "series", "show", "temporada"]},
+    {"label": "Anime", "aliases": ["anime", "monitos", "dibujos", "monos"]},
+    {"label": "Documental", "aliases": ["documental", "documentary", "docu"]},
+    {"label": "OVA", "aliases": ["ova"]},
+    {"label": "Especial", "aliases": ["especial", "special", "specials"]},
+]}
+
+_COVER_SUBCAT_LABELS = r"(?:type|tipo|categor[ií]a|categoria|subcategor[ií]a|subcategoria)"
+
+
+def _norm_subcat_term(s: str) -> str:
+    """Normaliza para comparar: minúsculas, sin acentos, solo [a-z0-9]."""
+    try:
+        import unicodedata as _ud
+        s = _ud.normalize("NFD", str(s or "").lower())
+        s = "".join(c for c in s if not _ud.combining(c))
+    except Exception:
+        s = str(s or "").lower()
+    return re.sub(r"[^a-z0-9]", "", s)
+
+
+def _load_subcat_dict() -> dict:
+    """Lee el diccionario de subcategorías (lo siembra si está vacío).
+    Migra el literal histórico "TV show" a "TV Show" una vez."""
+    from tvcat.gateway import get_db_connection
+    conn = get_db_connection(system=True)
+    try:
+        row = conn.execute("SELECT value FROM tvcat_settings WHERE key=?",
+                           (_SUBCAT_DICT_KEY,)).fetchone()
+        if row and row[0]:
+            d = json.loads(row[0])
+            if isinstance(d.get("terms"), list) and d["terms"]:
+                fixed = False
+                for t in d["terms"]:
+                    try:
+                        if isinstance(t, dict) and t.get("label") == "TV show":
+                            t["label"] = "TV Show"
+                            fixed = True
+                    except Exception:
+                        pass
+                if fixed:
+                    try:
+                        conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
+                                     (_SUBCAT_DICT_KEY, json.dumps(d, ensure_ascii=False)))
+                        conn.commit()
+                    except Exception:
+                        pass
+                return d
+    except Exception:
+        pass
+    try:
+        conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
+                     (_SUBCAT_DICT_KEY, json.dumps(_SUBCAT_DICT_SEED, ensure_ascii=False)))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return json.loads(json.dumps(_SUBCAT_DICT_SEED))
+
+
+def _save_subcat_dict(d: dict):
+    from tvcat.gateway import get_db_connection
+    terms = d.get("terms") if isinstance(d, dict) else None
+    if not isinstance(terms, list):
+        raise ValueError("terms debe ser lista")
+    clean = []
+    for t in terms:
+        if not isinstance(t, dict):
+            continue
+        label = str(t.get("label") or "").strip()
+        if not label:
+            continue
+        aliases = []
+        for a in (t.get("aliases") or []):
+            a = str(a or "").strip()
+            if a:
+                aliases.append(a)
+        clean.append({"label": label, "aliases": aliases})
+    conn = get_db_connection(system=True)
+    try:
+        conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
+                     (_SUBCAT_DICT_KEY, json.dumps({"terms": clean}, ensure_ascii=False)))
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return {"terms": clean}
+
+
+_VIDEO_EXTS = frozenset([
+    "mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "m2ts",
+    "wmv", "flv", "mpg", "mpeg", "3gp", "ogv",
+])
+
+
+def _is_video_file(name=None, mime=None) -> bool:
+    """True si es vídeo (Movie/TV show solo cuentan vídeos, no audios)."""
+    try:
+        if mime and str(mime).lower().startswith("video/"):
+            return True
+        if name:
+            ext = os.path.splitext(str(name).lower())[1].lstrip(".")
+            if ext in _VIDEO_EXTS:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _msg_video_info(msg):
+    """(file_name, mime) de un _Msg para clasificar vídeo (mime manda)."""
+    fname, mime = "", ""
+    try:
+        doc = getattr(msg, "document", None) or {}
+        if isinstance(doc, dict):
+            info = doc.get("document") or {}
+            mime = str(info.get("mime_type") or "").lower()
+            fname = str(info.get("original_name") or "")
+            if not fname:
+                for attr in (info.get("attributes") or []):
+                    if isinstance(attr, dict) and attr.get("_") == "DocumentAttributeFilename":
+                        fname = str(attr.get("file_name") or "")
+                        break
+    except Exception:
+        pass
+    try:
+        raw = getattr(msg, "_raw_media", {}) or {}
+        if not mime and isinstance(raw, dict):
+            d = raw.get("document") or {}
+            if isinstance(d, dict):
+                mime = str(d.get("mime_type") or "").lower()
+    except Exception:
+        pass
+    return fname, mime
+
+
+def _count_videos(files) -> int:
+    """Nº de ficheros de VÍDEO en una lista de _Msg (audios no cuentan)."""
+    n = 0
+    try:
+        for m in (files or []):
+            fname, mime = _msg_video_info(m)
+            if _is_video_file(fname or None, mime or None):
+                n += 1
+            elif not fname and not mime:
+                # Sin metadatos no se puede clasificar: se cuenta (no romper
+                # títulos viejos sin file_name en caché).
+                n += 1
+    except Exception:
+        pass
+    return n
+
+
+def _cover_subcat_tag(text: str):
+    """Lee Type/Tipo/Categoría/Subcategoría del texto del cover.
+    Devuelve el valor crudo o '' (campo libre, sin whitelist)."""
+    if not text:
+        return ""
+    try:
+        for line in str(text).split("\n"):
+            m = re.match(r"(?i)^\s*" + _COVER_SUBCAT_LABELS + r"\s*[:=\-]\s*(.+?)\s*$", line.strip())
+            if m:
+                val = m.group(1).strip()
+                if val and val.lower() not in ("n/a", "na", "none"):
+                    return val
+    except Exception:
+        pass
+    return ""
+
+
+def _match_subcat_dict(value: str, d: dict = None):
+    """Normaliza el valor contra el diccionario. Devuelve el literal
+    canónico si casa (valor o alias), o '' si no casa."""
+    if not value:
+        return ""
+    try:
+        d = d if isinstance(d, dict) else _load_subcat_dict()
+        nv = _norm_subcat_term(value)
+        if not nv:
+            return ""
+        for t in (d.get("terms") or []):
+            if not isinstance(t, dict):
+                continue
+            cands = [t.get("label")] + list(t.get("aliases") or [])
+            for c in cands:
+                if c and _norm_subcat_term(c) == nv:
+                    return str(t.get("label"))
+    except Exception:
+        pass
+    return ""
+
+
+def resolve_subcat(cover_text: str, ep_count: int, category: str, config_sub=None) -> str:
+    """Subcategoría efectiva de un título.
+    1. Tag del cover (campo libre; si casa en diccionario, literal canónico).
+    2. Subcategoría configurada en el scan-item.
+    3. Lógica por nº de episodios (solo categorías de vídeo):
+       1 = Movie, >1 = TV Show, 0 = '' (mantiene lo actual el llamante).
+    """
+    raw = _cover_subcat_tag(cover_text)
+    if raw:
+        canon = _match_subcat_dict(raw)
+        return canon or raw
+    if config_sub and str(config_sub).strip():
+        return str(config_sub).strip()
+    try:
+        n = int(ep_count or 0)
+    except Exception:
+        n = 0
+    if n <= 0:
+        return ""
+    if _norm_subcat_term(category) in _VIDEO_CATEGORIES:
+        return "Movie" if n == 1 else "TV Show"
+    return ""
+
+
+def _cover_raw_text(b: dict) -> str:
+    """Primer texto crudo del bloque (imágenes+textos por msg_id) para leer tags."""
+    try:
+        for msg in sorted((b.get("images") or []) + (b.get("texts") or []), key=lambda x: x.id):
+            if getattr(msg, "text", ""):
+                return msg.text
+    except Exception:
+        pass
+    return ""
+
+
+def _scan_config_sub(source_tag: str):
+    """custom_subcategory del scan-item dueño de un source 'scan_X' (o None)."""
+    try:
+        sid = int(str(source_tag or "").split("_")[-1])
+    except Exception:
+        return None
+    try:
+        from tvcat.gateway import get_db_connection
+        conn = get_db_connection(system=True)
+        row = conn.execute("SELECT custom_subcategory FROM tvcat_scanned_channels WHERE id=?", (sid,)).fetchone()
+        conn.close()
+        if row and row[0] and str(row[0]).strip():
+            return str(row[0]).strip()
+    except Exception:
+        pass
+    return None
+
+
+def resolve_item_subcat(conn, item_row: dict, cover_text_override: str = None) -> str:
+    """Recalcula la subcategoría de un título ya guardado (parse posterior,
+    enrich-save, slicer). Usa texto efectivo (override > enriched local >
+    raw en caché) + nº de episodios actuales + config del scan-item.
+    Devuelve '' si no hay nada que cambiar."""
+    try:
+        item = dict(item_row)
+        text = (cover_text_override or "").strip()
+        if not text:
+            # Enriched local (texto efectivo que ve el usuario).
+            try:
+                from tvcat.services.cover_override_registry import get_enriched_by_item_id as _gebi
+                _enr = _gebi(str(item.get("item_id") or ""))
+                if _enr and (_enr.get("cover_text") or "").strip():
+                    text = _enr["cover_text"].strip()
+            except Exception:
+                pass
+        if not text:
+            # Raw del cover en caché central por su msg.
+            try:
+                from tvcat.gateway import get_db_connection as _gdb
+                _cc = _gdb()
+                _mid = int(item.get("telegram_msg_id") or 0)
+                if _mid > 0:
+                    _r = _cc.execute("SELECT message FROM telegram_message_cache WHERE msg_id=? ORDER BY fetched_at DESC LIMIT 1", (_mid,)).fetchone()
+                    if _r and _r[0]:
+                        _d = json.loads(_r[0])
+                        text = str(_d.get("message") or "")
+                _cc.close()
+            except Exception:
+                pass
+        iid = str(item.get("item_id") or "")
+        # Solo cuentan VÍDEOS (un mp3 no es Movie). Por file_name (extensión);
+        # si no hay nombres, se cuenta todo (no romper títulos viejos).
+        names = []
+        try:
+            names = [r[0] for r in conn.execute(
+                "SELECT file_name FROM item_episodes WHERE item_id=?", (iid,)).fetchall()]
+        except Exception:
+            pass
+        if not names:
+            try:
+                names = [r[0] for r in conn.execute(
+                    "SELECT file_name FROM item_episodes WHERE item_id=?", (str(item.get("id") or ""),)).fetchall()]
+            except Exception:
+                pass
+        try:
+            named = [n for n in names if n]
+            if named:
+                n = sum(1 for n in named if _is_video_file(n))
+            else:
+                n = len(names)
+        except Exception:
+            n = len(names)
+        cat = str(item.get("category") or "")
+        cfg = _scan_config_sub(str(item.get("source") or ""))
+        return resolve_subcat(text, n, cat, cfg)
+    except Exception:
+        return ""
 
 
 def _extract_group_and_season(first_text, title):
@@ -1691,6 +1961,13 @@ async def parse_topology(scan_id, stop_event=None):
                 add_log(f"  ℹ️ '{name}': sin mensajes en topic {topic_id} dentro del rango")
                 return (0, 0)
 
+        # Covers consecutivos: el scan-item decide si gana el último
+        # ("Descartar covers vacíos") o el primero (informativos).
+        try:
+            _drop_empty = int(ch.get("drop_empty_covers") or 0) == 1
+        except Exception:
+            _drop_empty = False
+
         # Normalizar para enlaces t.me/c/X: quitar -100 y signo, usar ID positivo limpio
         entity_id_str = scan_channel_id.replace("-100", "").lstrip("-") if scan_channel_id else "0"
         try:
@@ -1711,7 +1988,7 @@ async def parse_topology(scan_id, stop_event=None):
         try:
             # ---- TOPOLOGÍA 1 (plano) ----
             if topo == 1:
-                blocks = _segment_blocks(msgs)
+                blocks = _segment_blocks(msgs, drop_empty=_drop_empty)
                 for i, b in enumerate(blocks):
                     if i % 25 == 0:
                         _parse_prog(i, len(blocks), "bloques")
@@ -1726,7 +2003,8 @@ async def parse_topology(scan_id, stop_event=None):
                     first_photo = b["images"][0].id if b["images"] else None
                     cover_id = first_photo if first_photo else (b["files"][0].id if b["files"] else 0)
                     link = f"https://t.me/c/{entity_id_str}/{cover_id}"
-                    cat_id = insert_scanned_item(title, subcat, category, desc, cover_id, link, b["files"], source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
+                    _sc1 = resolve_subcat(_cover_raw_text(b), _count_videos(block_files), category, custom_sub)
+                    cat_id = insert_scanned_item(title, _sc1 or subcat, category, desc, cover_id, link, b["files"], source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
                     new_count += 1
 
             # ---- TOPOLOGÍA 0/4 (automática por patrón de nombre de fichero) ----
@@ -1743,18 +2021,6 @@ async def parse_topology(scan_id, stop_event=None):
                     groups_to_process = [(0, msgs)]
                 for tid, tmsgs in groups_to_process:
                     tmsgs_sorted = sorted(tmsgs, key=lambda x: x.id)
-                    # 2026-09-04: sufijo por topic solo si el scan abarca VARIOS
-                    # topics (con topic_only a un topic concreto es ruido).
-                    _multi = len(groups_to_process) > 1
-                    _t4name = _topic_titles.get(tid)
-                    if not _t4name:
-                        for _pm in tmsgs_sorted:
-                                _pt = (getattr(_pm, "text", "") or "").strip().split("\n")[0].strip()[:50]
-                                if _pt:
-                                    _t4name = _pt
-                                    break
-                    _t4name = _t4name or f"Tema #{tid}"
-                    current_subcat = subcat if (not has_topics or tid == 0 or not _multi) else f"{subcat} - {_t4name}"
                     title_groups, pending_final = _group_messages_topo4(tmsgs_sorted)
                     add_log(f"  📦 Topo4 topic {tid}: {len(title_groups)} grupos (msgs {len(tmsgs_sorted)}, pending_final={pending_final})")
                     for _gi, g in enumerate(title_groups):
@@ -1762,6 +2028,9 @@ async def parse_topology(scan_id, stop_event=None):
                             _parse_prog(_gi, len(title_groups), "grupos")
                         files = g["files"]
                         cover_msg = g["cover_msg"]
+                        _t4base = resolve_subcat(getattr(cover_msg, "text", "") or "", _count_videos(files), category, custom_sub)
+                        # Subcategoría limpia (sin sufijo de topic): agrupa, no lista.
+                        current_subcat = _t4base or subcat
                         cover_id = g["cover_id"]
                         add_log(f"    → Grupo cover {cover_id} files {len(files)}: {_get_file_name_topo0(files[0])[:40]}")
                         # Título: si hay cover con texto, usar lógica existente, si no usar nombre de fichero
@@ -1818,7 +2087,7 @@ async def parse_topology(scan_id, stop_event=None):
                 for _ti, (tid, tmsgs) in enumerate(_t3t):
                     if _ti % 10 == 0:
                         _parse_prog(_ti, len(_t3t), "topics")
-                    blocks = _segment_blocks(tmsgs)
+                    blocks = _segment_blocks(tmsgs, drop_empty=_drop_empty)
                     if not blocks:
                         continue
                     info_block = blocks[0]
@@ -1836,13 +2105,14 @@ async def parse_topology(scan_id, stop_event=None):
                     if not content_files:
                         continue
                     link = f"https://t.me/c/{entity_id_str}/{tid}/{cover_id}"
-                    cat_id = insert_scanned_item(title, subcat, category, desc, cover_id, link, content_files, source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
+                    _sc3 = resolve_subcat(_cover_raw_text(info_block), _count_videos(content_files), category, custom_sub)
+                    cat_id = insert_scanned_item(title, _sc3 or subcat, category, desc, cover_id, link, content_files, source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
                     new_count += 1
 
             # ---- TOPOLOGÍA 2 (topics = categorías, múltiples títulos por topic) ----
             elif topo == 2:
                 if topic_only and topic_id is not None:
-                    blocks = _segment_blocks(msgs)
+                    blocks = _segment_blocks(msgs, drop_empty=_drop_empty)
                     for _bi, b in enumerate(blocks):
                         if _bi % 25 == 0:
                             _parse_prog(_bi, len(blocks), "bloques")
@@ -1850,21 +2120,19 @@ async def parse_topology(scan_id, stop_event=None):
                         first_photo = b["images"][0].id if b["images"] else None
                         cover_id = first_photo if first_photo else (b["files"][0].id if b["files"] else 0)
                         link = f"https://t.me/c/{entity_id_str}/{cover_id}"
-                        cat_id = insert_scanned_item(title, subcat, category, desc, cover_id, link, b["files"], source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
+                        _sc2 = resolve_subcat(_cover_raw_text(b), _count_videos(b["files"]), category, custom_sub)
+                        cat_id = insert_scanned_item(title, _sc2 or subcat, category, desc, cover_id, link, b["files"], source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
                         new_count += 1
                 else:
                     topic_groups = {}
                     for m in msgs:
-                        # Rama única "sin topic" (0) para NULLs: un grupo por
-                        # mensaje fabricaba un título fantasma por cada vídeo
-                        # huérfano (fallback a nombre de fichero).
                         tid = m._topic_id if m._topic_id else 0
                         topic_groups.setdefault(tid, []).append(m)
                     _t2t = list(topic_groups.items())
                     for _t2i, (tid, tmsgs) in enumerate(_t2t):
                         if _t2i % 10 == 0:
                             _parse_prog(_t2i, len(_t2t), "topics")
-                        blocks = _segment_blocks(tmsgs)
+                        blocks = _segment_blocks(tmsgs, drop_empty=_drop_empty)
                         tname = _topic_titles.get(tid)
                         if not tname:
                             for _pm in tmsgs:
@@ -1879,7 +2147,8 @@ async def parse_topology(scan_id, stop_event=None):
                             title, desc, alt_titles, grp, sn, sd, md = _parse_block_title_desc(b, fallback_title=tname)
                             first_photo = b["images"][0].id if b["images"] else None
                             cover_id = first_photo if first_photo else (b["files"][0].id if b["files"] else 0)
-                            current_subcat = f"{subcat} — {tname}"
+                            _base2 = resolve_subcat(_cover_raw_text(b), _count_videos(b["files"]), category, custom_sub)
+                            current_subcat = _base2 or subcat
                             link = f"https://t.me/c/{entity_id_str}/{cover_id}"
                             cat_id = insert_scanned_item(title, current_subcat, category, desc, cover_id, link, b["files"], source=source_tag, alt_titles=alt_titles, group_title=grp, season_number=sn, season_display=sd, metadata=md, conn=conn_central)
                             new_count += 1
@@ -2075,7 +2344,39 @@ async def _scan_channel(account_id, ch, idx, total):
             pass
         return last_id, 0
 
+    # Cuenta vía servicio central (antes del log: el rango la necesita).
+    _tgt, _tctype, _tlabel = _resolve_scan_target(account_id)
+    if not _tgt:
+        add_log(f"❌ Sin cuenta Telegram para '{name}': {_tlabel}.")
+        return last_id, -1
+    add_log(f"  🔑 Cuenta de escaneo: #{account_id} ({_tlabel} via {_tctype}).")
+
     add_log(f"  📊 Incremental desde msg_id={item_from}")
+
+    # Resolver `hasta` aquí para pintar rango+total en el log (antes se
+    # resolvía más abajo solo para la barra). Sin llamada extra después.
+    _hasta = 0
+    _pre = ch.get("_pre") if isinstance(ch, dict) else None
+    if _pre is not None:
+        # Pre-resuelto por el ciclo (sin llamada extra).
+        try:
+            item_from, _hasta = int(_pre[0]), int(_pre[1])
+        except Exception:
+            _pre = None
+    if _pre is None and end_id and end_id > 0:
+        _hasta = int(end_id)
+    if _pre is None and not _hasta:
+        try:
+            _live = await get_telegram_service().get_channel_last(
+                raw_ch_id, tg_user_id=_tgt, client_type=_tctype)
+            _hasta = int(_live) if _live else 0
+        except Exception:
+            _hasta = 0
+    if _hasta:
+        _lo_log = max(start_msg_id, item_from + 1)
+        _total_plan = max(0, int(_hasta) - _lo_log + 1)
+        add_log(f"  📊 Rango msg_id={_lo_log}..{int(_hasta)} (total {_total_plan} mensajes)")
+    ch["_hasta_resolved"] = int(_hasta) if _hasta else 0
 
     # Header del topic solo si topic_only está activo y hay topic_id
     header_msg_id = None
@@ -2085,11 +2386,62 @@ async def _scan_channel(account_id, ch, idx, total):
             header_msg_id = int(topic_id)
         effective_topic = topic_id
 
-    api_id, api_hash, session_string, _uname = _resolve_account_creds(account_id)
-    if not api_id or not api_hash or not session_string:
-        add_log(f"❌ Credenciales no válidas para la cuenta #{account_id}.")
-        return last_id, -1
-    add_log(f"  🔑 Cuenta de escaneo: #{account_id} ({_describe_account(account_id)}).")
+    # Reparar raws con media Unknown (serializaciones incompletas de
+    # fetches viejos que ciegan al parser): re-fetch por LOTES con fetch_many
+    # (1 llamada trae ~100; fetch_one con precache disparaba FloodWait).
+    # El canal va en forma -100... (canon): con el bare, Pyrogram devuelve
+    # PEER_ID_INVALID por cada mensaje.
+    try:
+        _svc0 = get_telegram_service()
+        try:
+            from services.cache_keys import canon_channel as _cc_r
+            _canon_ch = _cc_r(raw_ch_id)
+        except Exception:
+            _canon_ch = str(raw_ch_id)
+        try:
+            _b0 = str(raw_ch_id).replace("-100", "").lstrip("-")
+            if _canon_ch == _b0:
+                _canon_ch = "-100" + _b0
+        except Exception:
+            pass
+        _vars = {str(raw_ch_id), _canon_ch}
+        try:
+            _bare0 = str(raw_ch_id).replace("-100", "").lstrip("-")
+            _vars.add(_bare0)
+            _vars.add("-100" + _bare0)
+        except Exception:
+            pass
+        _vlist = [v for v in _vars if v]
+        _ph = ",".join("?" * len(_vlist))
+        _cc0 = None
+        _unk = []
+        try:
+            from tvcat.gateway import get_db_connection as _gdb0
+            _cc0 = _gdb0()
+            _lo0 = int(start_msg_id or 1)
+            _q = (f"SELECT channel_id, msg_id FROM telegram_message_cache WHERE channel_id IN ({_ph}) "
+                  f"AND msg_id >= ? AND message LIKE '%MessageMediaUnknown%' ORDER BY msg_id ASC LIMIT 500")
+            _unk = _cc0.execute(_q, tuple(_vlist) + (_lo0,)).fetchall()
+        finally:
+            try:
+                _cc0.close()
+            except Exception:
+                pass
+        if _unk:
+            _ids = sorted({int(_ur[1]) for _ur in _unk if int(_ur[1]) > 0})
+            add_log(f"  🩹 Reparando {len(_ids)} mensajes con media incompleta...")
+            _fixed = 0
+            for _ci in range(0, len(_ids), 100):
+                try:
+                    _fixed += int(await _svc0.fetch_many(
+                        _canon_ch, _ids[_ci:_ci + 100],
+                        tg_user_id=_tgt, client_type=_tctype) or 0)
+                except Exception:
+                    pass
+                add_log(f"  🩹 ... {min(_ci + 100, len(_ids))}/{len(_ids)}")
+            add_log(f"  🩹 Reparados {_fixed}/{len(_ids)}.")
+    except Exception as _e_repair:
+        add_log(f"  (reparación omitida: {_e_repair})")
 
     # 2026-09-09: titulos de topics del foro (cache central, TTL 24h). Best-effort.
     try:
@@ -2114,7 +2466,24 @@ async def _scan_channel(account_id, ch, idx, total):
             _need_ft = False
         if _need_ft:
             try:
-                _ft = await asyncio.wait_for(_fetch_forum_topics(raw_ch_id, session_string, api_id, api_hash, only_ids=_want_ft), timeout=60)
+                _ftl = await asyncio.wait_for(
+                    get_telegram_service().list_forum_topics(
+                        raw_ch_id, tg_user_id=_tgt, client_type=_tctype,
+                    ), timeout=60)
+                _ft = {}
+                for _t in (_ftl or []):
+                    try:
+                        if isinstance(_t, dict):
+                            _tid = int(_t.get("id"))
+                            _tt = _t.get("title") or ""
+                        else:
+                            _tid = int(getattr(_t, "id"))
+                            _tt = getattr(_t, "title", "") or ""
+                    except Exception:
+                        continue
+                    if _want_ft and _tid not in _want_ft:
+                        continue
+                    _ft[_tid] = _tt
             except Exception:
                 _ft = {}
             if _ft:
@@ -2131,37 +2500,20 @@ async def _scan_channel(account_id, ch, idx, total):
     except Exception as _e_ft:
         add_log(f"  (topics omitido: {_e_ft})")
 
-    # 2026-09-04: resolver `hasta` con 1 sola llamada (fin cfg o último del canal).
-    # Si hasta<=last y no hay saneados que re-traer: nada que hacer (ni fetch).
-    # El `hasta` se publica en el plan ANTES de resolver para que la barra no
-    # muestre el % rancio del ciclo anterior mientras dura la llamada.
+    # `hasta` ya resuelto arriba (log de rango); aquí solo se publica en el
+    # plan. Sin llamada extra.
+    if ch.get("_hasta_resolved"):
+        _hasta = int(ch["_hasta_resolved"])
     try:
         for _pi0 in scanner_status.get("plan_items", []):
             if int(_pi0.get("id", -1)) == int(ch.get("id", -2)):
                 _pi0["from"] = max(start_msg_id, item_from + 1)
-                _pi0["to"] = 0
-                _pi0["count"] = 0
+                _pi0["to"] = _hasta
+                _pi0["count"] = max(0, _hasta - max(start_msg_id, item_from + 1) + 1) + len(_saned_ids)
+                scanner_status["plan_total"] = sum(int(_x.get("count", 0)) for _x in scanner_status.get("plan_items", []))
                 break
     except Exception:
         pass
-    _hasta = 0
-    _pre = ch.get("_pre") if isinstance(ch, dict) else None
-    if _pre is not None:
-        # Pre-resuelto por el ciclo (sin llamada extra).
-        try:
-            item_from, _hasta = int(_pre[0]), int(_pre[1])
-        except Exception:
-            _pre = None
-    if _pre is None:
-        if end_id and end_id > 0:
-            _hasta = int(end_id)
-        else:
-            try:
-                _live = await get_telegram_service().get_channel_last(
-                    raw_ch_id, session_string=session_string, api_id=api_id, api_hash=api_hash)
-                _hasta = int(_live) if _live else item_from
-            except Exception:
-                _hasta = 0
     # Actualizar bounds del plan (progreso granular real).
     try:
         for _pi in scanner_status.get("plan_items", []):
@@ -2209,9 +2561,8 @@ async def _scan_channel(account_id, ch, idx, total):
                 from_id=item_from,
                 to_id=end_id if end_id > 0 else None,
                 topic_id=effective_topic,
-                session_string=session_string,
-                api_id=api_id,
-                api_hash=api_hash,
+                tg_user_id=_tgt,
+                client_type=_tctype,
                 header_msg_id=header_msg_id,
                 on_batch=_progress,
             ),
@@ -2237,9 +2588,8 @@ async def _scan_channel(account_id, ch, idx, total):
                             channel_id=raw_ch_id,
                             from_id=_a, to_id=_b,
                             topic_id=effective_topic,
-                            session_string=session_string,
-                            api_id=api_id,
-                            api_hash=api_hash,
+                            tg_user_id=_tgt,
+                            client_type=_tctype,
                             on_batch=lambda _t, _lo=0, _hi=0: _plan_bump(_base_saved + int(_t or 0), _lo, _hi),
                         ),
                         timeout=120,
@@ -2291,8 +2641,12 @@ def _get_last_cached_id(channel_id: str) -> int:
 
 def _describe_account(account_id):
     """Etiqueta legible de la cuenta que va a escanear (solo para log,
-    sin secretos): Principal -> nombre de la sesión Telethon activa;
-    centinela -> nombre de la sesión; legacy -> username."""
+    sin secretos): usa el client_type preferido, igual que el escaneo."""
+    try:
+        from tvcat.services.userbot_service import get_preferred_client_type as _pct
+        _ct = _pct()
+    except Exception:
+        _ct = "telethon"
     try:
         from tvcat.gateway import get_db_connection
         conn = get_db_connection(system=True)
@@ -2304,10 +2658,10 @@ def _describe_account(account_id):
             row = conn.execute(
                 "SELECT COALESCE(u.name, s.name) FROM userbot_sessions s "
                 "LEFT JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
-                "WHERE s.client_type = 'telethon' "
+                "WHERE s.client_type = ? "
                 "AND s.session_string IS NOT NULL AND s.session_string != '' "
-                "ORDER BY (s.is_active = 1) DESC, s.id ASC LIMIT 1").fetchone()
-            return "Principal -> %s" % (row[0] if row and row[0] else "?")
+                "ORDER BY (s.is_active = 1) DESC, s.id ASC LIMIT 1", (_ct,)).fetchone()
+            return "Principal -> %s (%s)" % (row[0] if row and row[0] else "?", _ct)
         if aid <= -2:
             row = conn.execute(
                 "SELECT COALESCE(u.name, s.name) FROM userbot_sessions s "
@@ -2326,90 +2680,6 @@ def _describe_account(account_id):
         except Exception:
             pass
 
-
-def _resolve_account_creds(account_id):
-    """Resuelve (api_id, api_hash, session_string, username).
-    - -1 = Principal (global).
-    - <= -2 = centinela de sesión nueva: userbot_sessions.id = -account_id
-      (solo Telethon, que es lo que usa TGIndex).
-    - > 0 = fila legacy de tvcat_telegram_accounts."""
-    from tvcat.gateway import get_db_connection
-    api_id, api_hash, global_session = _resolve_api_creds()
-    if account_id == -1:
-        return api_id, api_hash, global_session, "Principal"
-    try:
-        account_id = int(account_id)
-    except Exception:
-        return None, None, None, None
-    if account_id <= -2:
-        try:
-            conn = get_db_connection(system=True)
-            row = conn.execute(
-                "SELECT s.session_string, s.api_id, s.api_hash, "
-                "COALESCE(u.name, s.name) FROM userbot_sessions s "
-                "LEFT JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
-                "WHERE s.id = ? AND s.client_type = 'telethon' LIMIT 1",
-                (-account_id,)).fetchone()
-            conn.close()
-            if not row or not row[0]:
-                return None, None, None, None
-            return (row[1] or api_id), (row[2] or api_hash), row[0], row[3]
-        except Exception:
-            return None, None, None, None
-    try:
-        conn = get_db_connection(system=True)
-        row = conn.execute("SELECT session_string, username FROM tvcat_telegram_accounts WHERE id = ?", (account_id,)).fetchone()
-        conn.close()
-        if not row or not row[0]:
-            return None, None, None, None
-        return api_id, api_hash, row[0], row[1]
-    except Exception:
-        return None, None, None, None
-
-
-async def _has_scan_data(channel_id: str) -> bool:
-    """Verifica si telegram_message_cache tiene mensajes guardados para un canal."""
-    from tvcat.gateway import get_db_connection
-    bare = channel_id.replace("-100", "").lstrip("-")
-    try:
-        conn = get_db_connection()
-        cnt = conn.execute(
-            "SELECT COUNT(*) FROM telegram_message_cache WHERE channel_id IN (?, ?, ?)",
-            (channel_id, bare, f"-100{bare}")
-        ).fetchone()[0]
-        conn.close()
-        return cnt > 0
-    except Exception:
-        return False
-
-
-async def _parse_loop(scan_ids, stop_event):
-    """Cada 3s, solo parsea si telegram_scan tiene datos."""
-    import sqlite3
-    while not stop_event.is_set():
-        try:
-            if scanner_status.get("parse_pending"):
-                scanner_status["parse_pending"] = False
-                for sid in list(scan_ids):
-                    if stop_event.is_set():
-                        break
-                    # Solo parsear si hay mensajes guardados
-                    try:
-                        from tvcat.gateway import get_db_connection
-                        sys_conn = get_db_connection(system=True)
-                        sys_row = sys_conn.execute("SELECT channel_id FROM tvcat_scanned_channels WHERE id = ?", (sid,)).fetchone()
-                        sys_conn.close()
-                        if sys_row and not await _has_scan_data(sys_row[0]):
-                            continue
-                    except Exception:
-                        pass
-                    n, _ = await parse_topology(sid, stop_event)
-                    if n > 0:
-                        scanner_status["refresh_signal"] = scanner_status.get("refresh_signal", 0) + n
-                        scanner_status["current_item"] = f"+{n} título(s) nuevos"
-        except Exception as e:
-            print(f" [PARSE LOOP ERROR] {e}")
-        await asyncio.sleep(3.0)
 
 
 def _delete_all_channel_data(scan_config_id: int):
@@ -2587,126 +2857,84 @@ def _clear_channel_telegram_scan_cache(scan_config_id: int):
 # ---------------------------------------------------------------------------
 
 _manual_queue = asyncio.Queue()
-_active_clients = {}
 _worker_task = None
 _cycle_interval_seconds = 30 * 60  # 30 minutos
 _cycle_counter = 0
 
 
-def _resolve_api_creds():
-    """Resuelve api_id/api_hash y session_string de la cuenta Principal.
-    Orden:
-      - settings globales (userbot_api_id/hash/session_string) si existen.
-      - api_id/api_hash: userbot_sessions (preferir is_active=1; solo StringSession Telethon válidas).
-      - session_string (Principal): la cuenta configurada en tvcat_telegram_accounts
-        (la que el usuario marcó como principal); si no, userbot_sessions.
+def _resolve_scan_target(account_id):
+    """Resuelve (tg_user_id, client_type, label) para un scan-item SIN crear
+    ningún cliente y SIN sesión cruda: todo el tráfico posterior va por el
+    servicio central (pool + throttle + cola).
+
+    La cuenta del scan-item identifica la CUENTA (tg_user_id); el TIPO lo da
+    el ajuste global (Comportamiento Telegram) vía get_preferred_client_type.
+    Devuelve (None, ctype, motivo) si no hay sesión de ese tipo.
     """
-    from tvcat.gateway import get_global_setting, get_db_connection
-    api_id = get_global_setting("userbot_api_id")
-    api_hash = get_global_setting("userbot_api_hash")
-    session_string = get_global_setting("userbot_session_string")
-    if api_id and api_hash and session_string:
-        return api_id, api_hash, session_string
     try:
+        from tvcat.services.userbot_service import (
+            get_preferred_client_type as _pct,
+            get_default_telegram_user as _defu)
+        ctype = _pct()
+    except Exception:
+        ctype = "telethon"
+        _defu = None
+    try:
+        aid = int(account_id)
+    except Exception:
+        return None, ctype, f"cuenta inválida ({account_id})"
+    tg = None
+    label = ""
+    try:
+        from tvcat.gateway import get_db_connection
         conn = get_db_connection(system=True)
-        # api_id/api_hash desde userbot_sessions (sesiones Telethon: prefijo mágico 1BJWap1w)
-        row = conn.execute(
-            "SELECT api_id, api_hash FROM userbot_sessions "
-            "WHERE api_id IS NOT NULL AND api_hash IS NOT NULL "
-            "AND session_string LIKE '1BJWap1w%' "
-            "ORDER BY (is_active=1) DESC, id DESC LIMIT 1"
-        ).fetchone()
-        if row and row[0] and row[1]:
-            if not api_id:
-                api_id = row[0]
-            if not api_hash:
-                api_hash = row[1]
-        # session_string (Principal): cuenta configurada en tvcat_telegram_accounts
-        if not session_string:
-            acc = conn.execute(
-                "SELECT session_string FROM tvcat_telegram_accounts "
-                "WHERE session_string IS NOT NULL AND session_string != '' "
-                "ORDER BY id ASC LIMIT 1"
-            ).fetchone()
-            if acc and acc[0]:
-                session_string = acc[0]
-        # Instalación limpia con sistema de Sesiones nuevo (sin legacy):
-        # Principal = sesión Telethon activa; en empate, la más antigua
-        # (igual que el Principal legacy: ORDER BY id ASC).
-        if not session_string:
+        try:
+            if aid == -1:
+                label = "Principal"
+                if _defu is not None:
+                    try:
+                        _du = _defu()
+                        tg = (_du or {}).get("tg_user_id")
+                    except Exception:
+                        tg = None
+            elif aid <= -2:
+                row = conn.execute(
+                    "SELECT s.tg_user_id, COALESCE(u.name, s.name) FROM userbot_sessions s "
+                    "LEFT JOIN telegram_users u ON u.tg_user_id = s.tg_user_id "
+                    "WHERE s.id = ? LIMIT 1", (-aid,)).fetchone()
+                if row and row[0]:
+                    tg = int(row[0])
+                    label = str(row[1] or "")
+            else:
+                # Legacy sin vínculo tg: cuenta default.
+                label = f"legacy #{aid}"
+                if _defu is not None:
+                    try:
+                        _du = _defu()
+                        tg = (_du or {}).get("tg_user_id")
+                    except Exception:
+                        tg = None
+            if tg:
+                ok = conn.execute(
+                    "SELECT 1 FROM userbot_sessions WHERE tg_user_id=? "
+                    "AND client_type=? AND session_string IS NOT NULL "
+                    "AND session_string != '' LIMIT 1", (tg, ctype)).fetchone()
+                if not ok:
+                    conn.close()
+                    return None, ctype, (
+                        f"sin sesión {ctype} para '{label or tg}' "
+                        f"(ajuste: {ctype})")
+        finally:
             try:
-                srow = conn.execute(
-                    "SELECT session_string FROM userbot_sessions "
-                    "WHERE client_type = 'telethon' "
-                    "AND session_string IS NOT NULL AND session_string != '' "
-                    "ORDER BY (is_active = 1) DESC, id ASC LIMIT 1"
-                ).fetchone()
-                if srow and srow[0]:
-                    session_string = srow[0]
+                conn.close()
             except Exception:
                 pass
-        conn.close()
-    except Exception:
-        pass
-    return api_id, api_hash, session_string
-
-
-async def get_client_for_account(account_id: int):
-    global _active_clients
-    if account_id in _active_clients:
-        client = _active_clients[account_id]
-        if client.is_connected():
-            return client
-
-    from tvcat.gateway import get_db_connection
-    api_id, api_hash, global_session = _resolve_api_creds()
-
-    if account_id == -1:
-        session_string = global_session
-        username = "Principal"
-    elif int(account_id) <= -2:
-        # Centinela de sesión nueva (ver _resolve_account_creds).
-        _a, _b, _s, username = _resolve_account_creds(account_id)
-        api_id, api_hash, session_string = _a or api_id, _b or api_hash, _s
-    else:
-        conn = get_db_connection(system=True)
-        row = conn.execute("SELECT session_string, username FROM tvcat_telegram_accounts WHERE id = ?", (account_id,)).fetchone()
-        conn.close()
-        if not row:
-            add_log(f"❌ No se encontró la sesión para la cuenta #{account_id}")
-            return None
-        session_string = row[0]
-        username = row[1]
-
-    if not api_id or not api_hash or not session_string:
-        add_log(f"❌ api_id, api_hash o session_string no válidos para la cuenta '{username}'")
-        return None
-
-    try:
-        client = TelegramClient(StringSession(session_string), int(api_id), api_hash,
-                                device_model="TVCat_TGIndex", app_version="1.0")
-        await client.connect()
-        if not await client.is_user_authorized():
-            add_log(f"❌ Cuenta '{username}' no autorizada o sesión caducada")
-            await client.disconnect()
-            return None
-        _active_clients[account_id] = client
-        add_log(f"✅ Cliente Telegram para '{username}' iniciado.")
-        return client
     except Exception as e:
-        add_log(f"❌ Error al iniciar cliente para '{username}': {e}")
-        return None
+        return None, ctype, str(e)[:150]
+    if not tg:
+        return None, ctype, "sin cuenta Telegram (¿sin sesiones?)"
+    return tg, ctype, label or str(tg)
 
-
-async def disconnect_client(account_id: int):
-    global _active_clients
-    if account_id in _active_clients:
-        client = _active_clients.pop(account_id)
-        try:
-            await client.disconnect()
-            add_log(f"🔌 Cliente de cuenta #{account_id} desconectado.")
-        except:
-            pass
 
 
 def _migrate_telegram_scan_to_cache():
@@ -2923,22 +3151,22 @@ async def _process_manual_task(task):
 
         await _update_channel_status(channel_id, "scanning")
 
-        api_id, api_hash, session_string, uname = _resolve_account_creds(account_id)
-        if not api_id or not api_hash or not session_string:
-            add_log(f"❌ No se pudo resolver la cuenta de Telegram para '{name}'.")
-            await _update_channel_status(channel_id, "idle")
-            fut.set_result(False)
-            return
+        _mtgt, _mttc, _mtwhy = _resolve_scan_target(account_id)
+        _mfetch_ok = bool(_mtgt)
+        if not _mfetch_ok:
+            add_log(f"⚠️ Sin cuenta Telegram para '{name}' ({_mtwhy}): solo parseo desde caché (sin fetch).")
 
         add_log(f"📡 Iniciando escaneo manual de '{name}' en modo '{mode}'...")
-        add_log(f"✅ Cliente Telegram para '{uname or account_id}' iniciado.")
 
         if mode == "clean":
             _delete_all_channel_data(channel_id)
         elif mode == "incremental":
             _clear_channel_telegram_scan_cache(channel_id)
 
-        _, _msaved = await _scan_channel(account_id, ch_dict, 0, 1)
+        if _mfetch_ok:
+            _, _msaved = await _scan_channel(account_id, ch_dict, 0, 1)
+        else:
+            _msaved = 0
 
         # 2026-09-04: igual que el ciclo — sin filas parseadas no se salta.
         _mhas = True
@@ -3131,8 +3359,8 @@ async def _process_periodic_cycle():
             if not _acc:
                 _set_phase(_cid, "skip")
                 continue
-            _api, _ah, _ss, _un = _resolve_account_creds(_acc)
-            if not _api or not _ah or not _ss:
+            _ptgt, _ptc, _preason = _resolve_scan_target(_acc)
+            if not _ptgt:
                 _set_phase(_cid, "skip")
                 continue
             _start = int(_ch.get("start_msg_id") or 1)
@@ -3146,8 +3374,8 @@ async def _process_periodic_cycle():
             if not _hasta and _svc_pre is not None:
                 try:
                     _live = await _svc_pre.get_channel_last(
-                        str(_ch.get("channel_id")), session_string=_ss,
-                        api_id=_api, api_hash=_ah)
+                        str(_ch.get("channel_id")), tg_user_id=_ptgt,
+                        client_type=_ptc)
                     _hasta = int(_live) if _live else _from
                 except Exception:
                     _hasta = 0
@@ -3189,13 +3417,12 @@ async def _process_periodic_cycle():
         await _update_channel_status(channel_id, "scanning")
 
         try:
-            api_id, api_hash, session_string, uname = _resolve_account_creds(account_id)
-            if not api_id or not api_hash or not session_string:
-                add_log(f"❌ No se pudo resolver la cuenta de Telegram para '{name}'.")
-                await _update_channel_status(channel_id, "idle")
-                _set_phase(channel_id, "skip")
-                continue
-
+            _ctgt, _cttc, _ctwhy = _resolve_scan_target(account_id)
+            _fetch_ok = bool(_ctgt)
+            if not _fetch_ok:
+                # Sin cuenta no hay fetch, pero el parse solo lee caché:
+                # se sigue para re-parsear (p. ej. cambió la config) sin red.
+                add_log(f"⚠️ Sin cuenta Telegram para '{name}' ({_ctwhy}): solo parseo desde caché (sin fetch).")
             # 2026-09-04: regenerar si cambió su topología (borra generados, re-parsea).
             try:
                 _regen = [int(x) for x in (scanner_status.get("regen_ids") or [])]
@@ -3208,12 +3435,15 @@ async def _process_periodic_cycle():
                     add_log(f"  ♻️ '{name}': {_nreg} generados previos limpiados (nueva topología).")
                 except Exception as _e:
                     add_log(f"  (regenerar omitido para '{name}': {_e})")
-            _maxid, _saved = await _scan_channel(account_id, ch, idx, total)
+            if _fetch_ok:
+                _maxid, _saved = await _scan_channel(account_id, ch, idx, total)
+            else:
+                _maxid, _saved = 0, 0
             _set_phase(channel_id, "parse")
             # 2026-09-04: firma de config (topo+cat+sub+topic+rango). Si cambió,
             # hay que parsear (con regen si cambió la topología); si no hay filas
             # parseadas tampoco se puede saltar.
-            _sig_now = "|".join(str(ch.get(k) or "") for k in ("topology_type", "category", "custom_subcategory", "topic_id", "topic_only", "start_msg_id", "end_msg_id"))
+            _sig_now = "|".join(str(ch.get(k) or "") for k in ("topology_type", "category", "custom_subcategory", "topic_id", "topic_only", "start_msg_id", "end_msg_id", "drop_empty_covers"))
             _sig_old = ""
             try:
                 from tvcat.gateway import get_db_connection as _gdb2

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EditSync — Configuración</title>
+<style>
+    body { background:#0d0d0f; color:#f4f4f5; font-family:'Segoe UI',system-ui,Arial,sans-serif; margin:0; padding:16px; font-size:14px; box-sizing:border-box; }
+    h3 { margin:0 0 12px; }
+    .card { background:#18181b; border:1px solid #27272a; border-radius:8px; padding:12px; margin-bottom:12px; }
+    .btn { background:#22c55e; border:none; color:#fff; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:13px; font-weight:600; }
+    .btn.sec { background:#27272a; border:1px solid #3f3f46; font-weight:400; }
+    .btn.warn { background:#b45309; }
+    .muted { color:#a1a1aa; font-size:12px; }
+    label { display:flex; align-items:center; gap:8px; margin:4px 0; cursor:pointer; }
+    input[type="text"], input:not([type]) { background:#27272a; border:1px solid #3f3f46; color:#f4f4f5; border-radius:4px; padding:6px 8px; font-size:13px; box-sizing:border-box; }
+    input[type="checkbox"] { width:auto; accent-color:#eab308; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    td, th { border-bottom:1px solid #27272a; padding:6px 4px; text-align:left; vertical-align:top; }
+    pre { background:#09090b; border:1px solid #27272a; border-radius:4px; padding:6px; max-height:120px; overflow:auto; font-size:11px; white-space:pre-wrap; margin:4px 0 0; }
+    #status { margin-left:8px; font-size:12px; }
+    .standby { opacity:0.55; }
+</style>
+</head>
+<body>
+<h3>🔄 EditSync — Configuración</h3>
+<div id="pullbanner" class="card" style="display:none;border-color:#eab308;"></div>
+<div class="card">
+    <div style="margin-bottom:6px;"><b>Peers (pull remoto con token)</b></div>
+    <div class="muted" style="margin-bottom:6px;">Otra instancia avisa con <span style="font-family:monospace;">notify</span> y esta hace <span style="font-family:monospace;">pull</span> cuando quiere. El token viaja en cabecera <span style="font-family:monospace;">X-Sync-Token</span>.</div>
+    <div id="peers"></div>
+    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
+        <input type="text" id="peer-name" placeholder="Nombre" style="flex:1;min-width:90px;">
+        <input type="text" id="peer-url" placeholder="http://IP:puerto" style="flex:2;min-width:140px;">
+        <input type="text" id="peer-token" placeholder="Token" style="flex:2;min-width:140px;">
+        <button class="btn sec" onclick="addPeer()">Añadir</button>
+    </div>
+</div>
+<div class="card">
+    <label><input type="checkbox" id="cfg-auto"> <span><b>Auto-export</b> (avisar a peers al guardar un cover)</span></label>
+    <label><input type="checkbox" id="cfg-logical"> <span><b>Modo lógico</b> (match por título+año además del físico)</span></label>
+    <label><input type="checkbox" id="cfg-notify"> <span><b>Notificar a peers</b></span></label>
+    <div style="margin-top:8px;"><button class="btn" onclick="saveCfg()">💾 Guardar</button><span id="status"></span></div>
+</div>
+<div class="card">
+    <div style="margin-bottom:6px;"><b>Fichero</b></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button class="btn sec" onclick="doExport()">⬇ Exportar todo</button>
+        <label class="btn sec" style="margin:0;">⬆ Importar ZIP<input type="file" id="import-file" accept=".zip" style="display:none;" onchange="doImport()"></label>
+    </div>
+</div>
+<div class="card">
+    <div style="margin-bottom:6px;"><b>Pendientes de confirmar</b> <button class="btn sec" style="padding:4px 10px;" onclick="loadPending()">↻</button></div>
+    <div id="pending"><span class="muted">Sin cargar.</span></div>
+</div>
+<script>
+var PEERS = [];
+function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function jget(url, cb) {
+    fetch(url).then(function(r) { return r.json(); }).then(function(j) { cb(j); }).catch(function() { cb(null); });
+}
+function paintPeers() {
+    var box = document.getElementById('peers');
+    if (!PEERS.length) { box.innerHTML = '<span class="muted">Sin peers.</span>'; return; }
+    var html = '<table><tr><th>Nombre</th><th>URL</th><th>Token</th><th></th></tr>';
+    for (var i = 0; i < PEERS.length; i++) {
+        var p = PEERS[i];
+        html += '<tr><td>' + esc(p.name) + '</td><td style="font-family:monospace;">' + esc(p.base_url) + '</td><td>' + (p.has_token ? '••••••' : '<span style="color:#f87171;">sin token</span>') + '</td>' +
+            '<td style="white-space:nowrap;"><button class="btn sec" style="padding:4px 8px;" onclick="testPeer(' + i + ')">Probar</button> ' +
+            '<button class="btn sec" style="padding:4px 8px;" onclick="pullPeer(' + i + ')">Sincronizar</button> ' +
+            '<button class="btn sec" style="padding:4px 8px;" onclick="delPeer(' + i + ')">✕</button></td></tr>';
+    }
+    box.innerHTML = html + '</table><div class="muted" style="margin-top:4px;">Probar = hello · Sincronizar = pull + import ahora.</div>';
+}
+function addPeer() {
+    var n = document.getElementById('peer-name').value.trim();
+    var u = document.getElementById('peer-url').value.trim().replace(/\/+$/, '');
+    var t = document.getElementById('peer-token').value.trim();
+    if (!n || !u) { setStatus('Nombre y URL obligatorios'); return; }
+    PEERS.push({ name: n, base_url: u, token: t });
+    document.getElementById('peer-name').value = '';
+    document.getElementById('peer-url').value = '';
+    document.getElementById('peer-token').value = '';
+    paintPeers(); saveCfg(true);
+}
+function delPeer(i) { PEERS.splice(i, 1); paintPeers(); saveCfg(true); }
+function testPeer(i) {
+    var p = PEERS[i];
+    setStatus('Probando ' + p.name + '...');
+    fetch(p.base_url + '/api/editsync/hello', { headers: { 'X-Sync-Token': p.token || '' } })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+            setStatus((j && j.ok) ? ('✅ ' + p.name + ': ' + (j.titles || 0) + ' títulos, ' + (j.collections || 0) + ' colecciones') : '❌ ' + p.name);
+        }).catch(function() { setStatus('❌ ' + p.name + ' (red)'); });
+}
+function pullPeer(i) {
+    var p = PEERS[i];
+    if (!confirm('Traer e importar de ' + p.name + '?')) return;
+    setStatus('Sincronizando con ' + p.name + '...');
+    fetch('/api/editsync/pull-now', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ peer: p.name }) })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+            setStatus(j ? ('Aplicados ' + (j.applied || 0) + ', pendientes ' + (j.pending || 0) + ', omitidos ' + (j.skipped || 0) + ', bypass ' + (j.bypassed || 0)) : 'Error');
+            loadPending();
+        }).catch(function() { setStatus('Error de red'); });
+}
+function setStatus(t) { document.getElementById('status').textContent = t; }
+function loadCfg() {
+    jget('/api/editsync/config', function(cfg) {
+        if (!cfg) { setStatus('Error de red'); return; }
+        PEERS = (cfg.peers || []).map(function(p) { return { name: p.name, base_url: p.base_url, token: '', has_token: !!p.has_token }; });
+        document.getElementById('cfg-auto').checked = !!cfg.auto_export;
+        document.getElementById('cfg-logical').checked = !!cfg.logical_mode;
+        document.getElementById('cfg-notify').checked = cfg.notify_peers !== false;
+        paintPeers();
+        var pb = document.getElementById('pullbanner');
+        if (cfg.pull_pending && cfg.pull_pending.from) {
+            pb.style.display = '';
+            pb.innerHTML = '📥 Aviso de <b>' + esc(cfg.pull_pending.from) + '</b> pendiente de pull. <button class="btn sec" style="padding:4px 10px;" onclick="pullBanner()">Sincronizar ahora</button>';
+            pb.dataset.peer = cfg.pull_pending.from;
+        } else { pb.style.display = 'none'; }
+    });
+}
+function pullBanner() {
+    var pb = document.getElementById('pullbanner');
+    var from = pb ? (pb.dataset.peer || '') : '';
+    for (var i = 0; i < PEERS.length; i++) {
+        if (PEERS[i].name === from) { pullPeer(i); return; }
+    }
+    setStatus('Ese peer ya no está en la lista; añádelo para sincronizar.');
+}
+function saveCfg(silent) {
+    var body = {
+        peers: PEERS.map(function(p) { return { name: p.name, base_url: p.base_url, token: p.token || (p.has_token ? undefined : '') }; }),
+        auto_export: !!document.getElementById('cfg-auto').checked,
+        logical_mode: !!document.getElementById('cfg-logical').checked,
+        notify_peers: !!document.getElementById('cfg-notify').checked
+    };
+    fetch('/api/editsync/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+            if (!silent) setStatus((j && j.ok) ? '✅ Guardado' : '❌ Error');
+            loadCfg();
+        }).catch(function() { if (!silent) setStatus('❌ Error de red'); });
+}
+function doExport() { window.location.href = '/api/editsync/export'; }
+function doImport() {
+    var f = document.getElementById('import-file').files[0];
+    if (!f) return;
+    setStatus('Importando...');
+    var fd = new FormData();
+    fd.append('file', f);
+    fetch('/api/editsync/import', { method: 'POST', body: fd })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+            setStatus(j ? ('Aplicados ' + (j.applied || 0) + ', pendientes ' + (j.pending || 0) + ', omitidos ' + (j.skipped || 0) + ', bypass ' + (j.bypassed || 0)) : 'Error');
+            if (j && j.errors && j.errors.length) setStatus(document.getElementById('status').textContent + ' (' + j.errors.length + ' errores)');
+            document.getElementById('import-file').value = '';
+            loadPending();
+        }).catch(function() { setStatus('Error de red'); });
+}
+function loadPending() {
+    jget('/api/editsync/pending', function(j) {
+        var box = document.getElementById('pending');
+        var list = (j && j.pending) || [];
+        if (!list.length) { box.innerHTML = '<span class="muted">Nada pendiente.</span>'; return; }
+        var html = '<table><tr><th></th><th>Clave</th><th>Diferencia</th></tr>';
+        for (var i = 0; i < list.length; i++) {
+            var p = list[i];
+            var line = (p.kind === 'collection' ? '📚 ' : '') + esc(p.key) + (p.state === 'standby' ? ' <span class="muted">(en edición)</span>' : '');
+            var diff = '';
+            if (p.text_differs) diff = '<pre>ANTES:\n' + esc(p.local_text || '') + '</pre><pre>ENTRANTE:\n' + esc(p.incoming_text || '') + '</pre>';
+            else diff = '<span class="muted">Solo póster u otros datos.</span>';
+            html += '<tr class="' + (p.state === 'standby' ? 'standby' : '') + '"><td style="white-space:nowrap;">' +
+                '<button class="btn" style="padding:4px 8px;" onclick="applyPending(' + p.id + ')">Aplicar</button> ' +
+                '<button class="btn sec" style="padding:4px 8px;" onclick="discardPending(' + p.id + ')">Descartar</button></td>' +
+                '<td style="font-family:monospace;">' + line + '</td><td>' + diff + '</td></tr>';
+        }
+        box.innerHTML = html + '</table>';
+    });
+}
+function applyPending(id) {
+    fetch('/api/editsync/pending/' + id + '/apply', { method: 'POST' })
+        .then(function(r) { return r.json(); }).then(function() { loadPending(); });
+}
+function discardPending(id) {
+    fetch('/api/editsync/pending/' + id + '/discard', { method: 'POST' })
+        .then(function(r) { return r.json(); }).then(function() { loadPending(); });
+}
+loadCfg();
+loadPending();
+</script>
+</body>
+</html>

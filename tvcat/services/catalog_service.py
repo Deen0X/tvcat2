@@ -1575,6 +1575,20 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
         def resolve_item_id(raw):
             return id_to_item.get(str(raw), raw)
 
+        # El export de episodios guarda item_id ENTERO (id de unified del
+        # plugin); el filtro viene en claves USER-. Ampliar a ambas formas,
+        # si no el WHERE no casa nada y la central se queda sin episodios.
+        _want_eps = set(str(i) for i in item_ids)
+        try:
+            _inv = {}
+            for _iid, _u in id_to_item.items():
+                _inv.setdefault(str(_u), set()).add(str(_iid))
+            for _raw in list(item_ids):
+                _want_eps.update(_inv.get(str(_raw), ()))
+        except Exception:
+            pass
+        _want_eps = [w for w in _want_eps if w]
+
         # Preservar snapshot Original (INSERT OR REPLACE lo pisaría).
         orig_map = _load_orig_map(conn, plugin_name)
         items_inserted = 0
@@ -1617,7 +1631,7 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
         if active_set:
             _ph2 = ",".join("?" * len(active_set))
             c.execute(f"DELETE FROM item_episodes WHERE item_id IN ({_ph2})", list(active_set))
-        for row in pc.execute(f"SELECT * FROM plugin_episodes_export WHERE item_id IN ({ph})", list(item_ids)):
+        for row in pc.execute(f"SELECT * FROM plugin_episodes_export WHERE item_id IN ({','.join('?' * len(_want_eps))})", _want_eps):
             ed = dict(row)
             resolved_item = resolve_item_id(ed.get("item_id", ""))
             if not resolved_item or resolved_item not in active_set:
@@ -1872,20 +1886,36 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
         query = search.strip().lower()
         like_clauses = []
 
-        # Determinar qué campos buscar
-        fields_to_search = search_fields if search_fields is not None else ["title", "description", "alt_titles"]
+        # Determinar qué campos buscar (whitelist: los nombres se interpolan en SQL)
+        fields_to_search = [f for f in (search_fields if search_fields is not None else ["title", "description", "alt_titles"])
+                            if f in ("title", "description", "alt_titles", "file_name")]
+        if not fields_to_search:
+            fields_to_search = ["title", "description", "alt_titles"]
 
-        # Parsear comodines
+        # Parsear comodines: a*b = partes EN ORDEN dentro del mismo campo
+        # (mi*totoro casa "mi amigo totoro", no "totoro y mi").
+        def _like_esc(s):
+            return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         if '*' in query:
-            parts = [p.strip() for p in query.split('*') if p.strip()]
-            for part in parts:
-                for field in fields_to_search:
-                    like_clauses.append(f"LOWER({field}) LIKE ?")
-                    params.append(f"%{part}%")
+            parts = [_like_esc(p.strip()) for p in query.split('*') if p.strip()]
+            if not parts:
+                parts = [_like_esc(query)]
+            for field in fields_to_search:
+                if field == "file_name":
+                    # file_name vive en item_episodes, no en unified_catalog
+                    like_clauses.append("EXISTS (SELECT 1 FROM item_episodes e WHERE (e.item_id = unified_catalog.item_id OR e.item_id = CAST(unified_catalog.id AS TEXT)) AND LOWER(COALESCE(e.file_name,'')) LIKE ? ESCAPE '\\')")
+                    params.append("%" + "%".join(parts) + "%")
+                else:
+                    like_clauses.append(f"LOWER({field}) LIKE ? ESCAPE '\\'")
+                    params.append("%" + "%".join(parts) + "%")
         else:
             for field in fields_to_search:
-                like_clauses.append(f"LOWER({field}) LIKE ?")
-                params.append(f"%{query}%")
+                if field == "file_name":
+                    like_clauses.append("EXISTS (SELECT 1 FROM item_episodes e WHERE (e.item_id = unified_catalog.item_id OR e.item_id = CAST(unified_catalog.id AS TEXT)) AND LOWER(COALESCE(e.file_name,'')) LIKE ? ESCAPE '\\')")
+                    params.append(f"%{_like_esc(query)}%")
+                else:
+                    like_clauses.append(f"LOWER({field}) LIKE ? ESCAPE '\\'")
+                    params.append(f"%{_like_esc(query)}%")
 
         if like_clauses:
             where_clauses.append(f"({' OR '.join(like_clauses)})")

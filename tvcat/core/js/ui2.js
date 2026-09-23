@@ -835,6 +835,9 @@ var UI = {
                 playerSelect.value = playerSetting;
             }
 
+            // Botones hero por dispositivo (escala + modo botón/badge)
+            try { this.applyHeroButtons(); } catch (eHB) {}
+
             // Cargar tamaño de chunk preferido
             var chunkSetting = localStorage.getItem('tvcat_download_chunk_size') || '128';
             var chunkSelect = document.getElementById('player-chunk-size-select');
@@ -1348,6 +1351,35 @@ var UI = {
     changeScreenColumns: function(value) {
         localStorage.setItem('tvcat_grid_columns', value);
         this.applyScreenColumns(value);
+    },
+
+    // Botones hero: escala 30-100 por dispositivo + modo botón/badge.
+    // Se aplica por variable CSS y clase en body: efecto inmediato, sin
+    // recargar (el hero se re-renderiza solo al abrir otro título).
+    applyHeroButtons: function() {
+        var scale = 100;
+        try {
+            scale = parseInt(localStorage.getItem('tvcat_hero_btn_scale') || '100', 10);
+            if (!(scale >= 30 && scale <= 100)) scale = 100;
+        } catch (e) {}
+        var asButtons = true;
+        try { asButtons = localStorage.getItem('tvcat_hero_btn_badges') !== '1'; } catch (e2) {}
+        try { document.documentElement.style.setProperty('--hero-scale', (scale / 100).toFixed(2)); } catch (e3) {}
+        try {
+            if (asButtons) document.body.classList.remove('hero-badges');
+            else document.body.classList.add('hero-badges');
+        } catch (e4) {}
+        var slider = document.getElementById('screen-hero-scale');
+        if (slider) slider.value = String(scale);
+        var lab = document.getElementById('screen-hero-scale-val');
+        if (lab) lab.textContent = scale + '%';
+        var tg = document.getElementById('screen-hero-buttons-toggle');
+        if (tg) tg.checked = asButtons;
+    },
+
+    toggleHeroButtons: function(checked) {
+        try { localStorage.setItem('tvcat_hero_btn_badges', checked ? '0' : '1'); } catch (e) {}
+        this.applyHeroButtons();
     },
 
     // Cambiar tipo de reproductor (Plyr/Nativo/Auto)
@@ -2707,6 +2739,12 @@ window.switchSettingsTab = function(t) { UI.switchSettingsTab(t); };
 window.saveUserProfileChanges = function() { UI.saveUserProfileChanges(); };
 window.saveGlobalSettings = function() { UI.saveGlobalSettings(); };
 window.changeScreenColumns = function(v) { UI.changeScreenColumns(v); };
+window.changeHeroScale = function(v) {
+    var n = parseInt(v, 10);
+    if (!(n >= 30 && n <= 100)) return;
+    try { localStorage.setItem('tvcat_hero_btn_scale', String(n)); } catch (e) {}
+    UI.applyHeroButtons();
+};
 window.createUserFromAdmin = function() { UI.createUserFromAdmin(); };
 window.changeUserPassword = function() { UI.changeUserPassword(); };
 window.toggleUserCategoryAccess = function(uid, cat, allowed) { UI.toggleUserCategoryAccess(uid, cat, allowed); };

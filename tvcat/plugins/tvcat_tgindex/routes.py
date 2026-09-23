@@ -20,7 +20,6 @@ if _TVCAT_DIR not in sys.path:
 from tvcat.gateway import get_db_connection  # type: ignore
 from .config import load_user_config, save_user_config
 from .scanner import run_background_scan, parse_topology, scanner_status, _delete_all_channel_data, _clean_scan_items, get_plugin_db_path
-from .client import get_user_tg_client
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -173,6 +172,7 @@ class ChannelRequest(BaseModel):
     topic_id: Optional[int] = None        # ID del topic (thread) para filtrar escaneo a un solo topic
     topic_name: Optional[str] = None      # Nombre descriptivo del topic (ej. "3DS")
     topic_only: Optional[int] = None      # 1 = solo este topic; 0/null = canal completo
+    drop_empty_covers: Optional[int] = None  # 1 = descartar covers vacíos (último cover vigente)
     auto_refresh_interval: Optional[str] = None
     telegram_account_id: Optional[int] = None
     refresh_cycles: Optional[int] = 1
@@ -329,17 +329,19 @@ async def test_session_string(payload: TestSessionRequest):
         return {"success": False, "error": "api_id y api_hash no configurados en la aplicación"}
         
     try:
-        client = TelegramClient(StringSession(session_str), int(api_id), api_hash,
-                                device_model="TVCat_TGIndex", app_version="1.0")
-        await client.connect()
-        if not await client.is_user_authorized():
-            await client.disconnect()
+        # Verificación puntual vía servicio central (temporal compartido del
+        # tipo preferido; NO desconectar: es compartido).
+        from services.telegram_service import _shared_temp_client
+        from services.userbot_service import get_preferred_client_type
+        ctype = get_preferred_client_type()
+        client = await _shared_temp_client(session_str, int(api_id), api_hash, ctype)
+        try:
+            me = await client.get_me()
+        except Exception:
             return {"success": False, "error": "La cadena de sesión no es válida o ha caducado"}
-            
-        me = await client.get_me()
-        username = me.username or f"{me.first_name} {me.last_name or ''}".strip()
-        phone = me.phone or ""
-        await client.disconnect()
+
+        username = getattr(me, "username", None) or f"{getattr(me, 'first_name', '') or ''} {getattr(me, 'last_name', '') or ''}".strip()
+        phone = getattr(me, "phone", "") or ""
         return {"success": True, "username": username, "phone": phone}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -417,9 +419,6 @@ async def save_plugin():
 
 @router.post("/api/userbot/test")
 async def test_userbot_connection():
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-
     from tvcat.gateway import get_global_setting
     api_id = get_global_setting("userbot_api_id")
     api_hash = get_global_setting("userbot_api_hash")
@@ -429,15 +428,16 @@ async def test_userbot_connection():
         return {"success": False, "error": "Credenciales no configuradas"}
 
     try:
-        client = TelegramClient(StringSession(session_string), int(api_id), api_hash,
-                                device_model="TVCat_TGIndex", app_version="1.0")
-        await client.connect()
-        if not await client.is_user_authorized():
-            await client.disconnect()
+        # Vía servicio central (temporal compartido del tipo preferido).
+        from services.telegram_service import _shared_temp_client
+        from services.userbot_service import get_preferred_client_type
+        client = await _shared_temp_client(
+            session_string, int(api_id), api_hash, get_preferred_client_type())
+        try:
+            me = await client.get_me()
+        except Exception:
             return {"success": False, "error": "Sesión no autorizada o caducada"}
-        me = await client.get_me()
-        username = me.username or f"{me.first_name} {me.last_name or ''}".strip()
-        await client.disconnect()
+        username = getattr(me, "username", None) or f"{getattr(me, 'first_name', '') or ''} {getattr(me, 'last_name', '') or ''}".strip()
         return {"success": True, "username": username}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -464,6 +464,7 @@ _SCANNED_CHANNELS_DDL = """CREATE TABLE IF NOT EXISTS tvcat_scanned_channels (
                 enabled INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 custom_subcategory TEXT,
+                drop_empty_covers INTEGER DEFAULT 0,
                 auto_refresh_interval TEXT,
                 tg_user_id INTEGER,
                 category TEXT,
@@ -547,6 +548,21 @@ async def list_channels():
         """)
         channels = [dict(r) for r in cursor.fetchall()]
         conn.close()
+        # Nº de títulos identificados por scan item (source='scan_X' en la DB del plugin).
+        try:
+            _pdb = get_plugin_db_path()
+            if os.path.isfile(_pdb):
+                _pc = sqlite3.connect(f"file:{_pdb}?mode=ro", uri=True, timeout=10)
+                try:
+                    _rows = _pc.execute(
+                        "SELECT source, COUNT(*) FROM unified_catalog WHERE source LIKE 'scan_%' GROUP BY source").fetchall()
+                    _counts = {str(r[0]): int(r[1]) for r in _rows}
+                finally:
+                    _pc.close()
+                for _ch in channels:
+                    _ch["items_count"] = _counts.get(f"scan_{_ch.get('id')}", 0)
+        except Exception:
+            pass
         return channels
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -631,8 +647,10 @@ async def add_channel(payload: ChannelRequest):
         enabled = payload.enabled if payload.enabled is not None else 1
         topic_only = (payload.topic_only or 0) and 1 or 0
         effective_topic_name = (payload.topic_name or "").strip() or None
+        drop_empty = (payload.drop_empty_covers or 0) and 1 or 0
         # Migración: columnas topic_only y topic_name
-        for col in ["topic_only INTEGER DEFAULT 0", "topic_name TEXT"]:
+        for col in ["topic_only INTEGER DEFAULT 0", "topic_name TEXT",
+                    "drop_empty_covers INTEGER DEFAULT 0"]:
             try: conn.execute(f"ALTER TABLE tvcat_scanned_channels ADD COLUMN {col}")
             except Exception: pass
         conn.commit()
@@ -643,22 +661,23 @@ async def add_channel(payload: ChannelRequest):
                    SET channel_id = ?, display_name = ?, topology_type = ?, 
                        last_scanned_msg_id = ?, start_msg_id = ?, end_msg_id = ?, topic_id = ?, 
                        content_type = ?, category = ?, custom_subcategory = ?, auto_refresh_interval = ?,
-                       telegram_account_id = ?, refresh_cycles = ?, enabled = ?, topic_only = ?, topic_name = ?
+                       telegram_account_id = ?, refresh_cycles = ?, enabled = ?, topic_only = ?, topic_name = ?,
+                       drop_empty_covers = ?
                    WHERE id = ?""",
                 (channel_id, payload.display_name.strip(), payload.topology_type,
                  last_scanned_msg_id, start_msg_id or 0, end_msg_id, effective_topic_id, 
                  content_type, category, custom_sub, auto_refresh, payload.telegram_account_id,
-                 payload.refresh_cycles, enabled, topic_only, effective_topic_name, payload.id),
+                 payload.refresh_cycles, enabled, topic_only, effective_topic_name, drop_empty, payload.id),
             )
         else:
             conn.execute(
                 """INSERT INTO tvcat_scanned_channels 
                    (channel_id, display_name, topology_type, last_scanned_msg_id, start_msg_id, end_msg_id, 
-                    topic_id, content_type, category, custom_subcategory, auto_refresh_interval, telegram_account_id, refresh_cycles, enabled, topic_only, topic_name) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    topic_id, content_type, category, custom_subcategory, auto_refresh_interval, telegram_account_id, refresh_cycles, enabled, topic_only, topic_name, drop_empty_covers) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (channel_id, payload.display_name.strip(), payload.topology_type,
                  last_scanned_msg_id, start_msg_id or 0, end_msg_id, effective_topic_id, 
-                 content_type, category, custom_sub, auto_refresh, payload.telegram_account_id, payload.refresh_cycles, enabled, topic_only, effective_topic_name),
+                 content_type, category, custom_sub, auto_refresh, payload.telegram_account_id, payload.refresh_cycles, enabled, topic_only, effective_topic_name, drop_empty),
             )
         new_id = payload.id or conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         # 2026-09-06: si cambia el universo examinado (rango o topic), el cursor y
@@ -889,7 +908,10 @@ async def test_parse_channel(body: TestParseRequest):
     normal, no se desperdician), parsea en memoria con la topología indicada y devuelve
     conteo + muestra de títulos. NO guarda items ni toca la central."""
     try:
-        from .scanner import _resolve_account_creds, _rows_to_msgs, _group_messages_topo4, _segment_blocks, _parse_block_title_desc, _get_file_name_topo0, _is_collection_text, _parse_collection_entries
+        from .scanner import (_rows_to_msgs, _group_messages_topo4,
+                                 _segment_blocks, _parse_block_title_desc,
+                                 _get_file_name_topo0, _is_collection_text,
+                                 _parse_collection_entries, _resolve_scan_target)
         from services.telegram_service import get_telegram_service
         from services.cache_keys import canon_channel
         from tvcat.gateway import get_db_connection
@@ -902,15 +924,15 @@ async def test_parse_channel(body: TestParseRequest):
         Ulm = start + 99
         if body.end_msg_id and int(body.end_msg_id) > 0:
             Ulm = min(Ulm, int(body.end_msg_id))
-        api_id, api_hash, session_string, _uname = _resolve_account_creds(body.telegram_account_id)
-        if not api_id or not api_hash or not session_string:
-            raise HTTPException(status_code=400, detail="Cuenta de Telegram no válida")
+        _tgt, _tctype, _twhy = _resolve_scan_target(body.telegram_account_id)
+        if not _tgt:
+            raise HTTPException(status_code=400, detail=f"Cuenta de Telegram no válida ({_twhy})")
         svc = get_telegram_service()
         try:
             await asyncio.wait_for(svc.scan_messages(
                 channel_id=channel, from_id=start, to_id=Ulm,
-                topic_id=body.topic_id, session_string=session_string,
-                api_id=api_id, api_hash=api_hash), timeout=120)
+                topic_id=body.topic_id, tg_user_id=_tgt,
+                client_type=_tctype), timeout=120)
         except asyncio.TimeoutError:
             pass
         canon = canon_channel(channel)
@@ -1038,7 +1060,7 @@ async def check_channel_last(cid: int):
     sin tocar Telegram (evita tormentas de checks al abrir la config)."""
     import time as _time
     try:
-        from .scanner import _resolve_account_creds
+        from .scanner import _resolve_scan_target
         from services.telegram_service import get_telegram_service
         conn = get_db_connection(system=True)
         conn.row_factory = sqlite3.Row
@@ -1069,13 +1091,13 @@ async def check_channel_last(cid: int):
                     "end_msg_id": d.get("end_msg_id") or 0,
                     "cached": True}
         ch_id = d["channel_id"]
-        api_id, api_hash, session_string, _u = _resolve_account_creds(d["telegram_account_id"])
+        _tgt, _tctype, _twhy = _resolve_scan_target(d["telegram_account_id"])
         last = 0
-        if api_id and api_hash and session_string:
+        if _tgt:
             try:
                 svc = get_telegram_service()
                 last = await asyncio.wait_for(svc.get_channel_last(
-                    ch_id, session_string=session_string, api_id=api_id, api_hash=api_hash), timeout=60)
+                    ch_id, tg_user_id=_tgt, client_type=_tctype), timeout=60)
             except Exception:
                 last = 0
         conn.execute("UPDATE tvcat_scanned_channels SET channel_last_msg_id = ?, channel_last_checked_at = ? WHERE id = ?", (int(last or 0), now, cid))
@@ -1100,59 +1122,20 @@ async def test_channel_connection(payload: ChannelTestRequest):
     try:
         channel_url = payload.channel_url.strip()
         channel_id, topic_id, msg_id = parse_telegram_link(channel_url)
-        
-        from tvcat.gateway import get_global_setting
-        api_id = get_global_setting("userbot_api_id")
-        api_hash = get_global_setting("userbot_api_hash")
 
-        if payload.telegram_account_id == -1:
-            session_string = get_global_setting("userbot_session_string")
-        elif int(payload.telegram_account_id or -1) <= -2:
-            # Centinela de sesión nueva: userbot_sessions.id = -account_id.
-            from .scanner import _resolve_account_creds as _rac
-            _a, _h, session_string, _u = _rac(int(payload.telegram_account_id))
-            api_id = _a or api_id
-            api_hash = _h or api_hash
-        else:
-            conn = get_db_connection(system=True)
-            cursor = conn.cursor()
-            cursor.execute("SELECT session_string FROM tvcat_telegram_accounts WHERE id = ?", (payload.telegram_account_id,))
-            row = cursor.fetchone()
-            conn.close()
-            if not row:
-                return {"success": False, "error": "La cuenta de Telegram seleccionada no está configurada"}
-            session_string = row[0]
+        from .scanner import _resolve_scan_target
+        from services.telegram_service import get_telegram_service
+        _tgt, _tctype, _twhy = _resolve_scan_target(payload.telegram_account_id)
+        if not _tgt:
+            return {"success": False, "error": f"Cuenta de Telegram no válida ({_twhy})"}
 
-        # Instalación limpia con Sesiones nuevas: api en userbot_sessions.
-        if not api_id or not api_hash:
-            try:
-                from .scanner import _resolve_api_creds as _rac2
-                _a2, _h2, _s2 = _rac2()
-                api_id = api_id or _a2
-                api_hash = api_hash or _h2
-                if not session_string:
-                    session_string = _s2
-            except Exception:
-                pass
+        try:
+            ent = await get_telegram_service().get_entity(
+                channel_id, tg_user_id=_tgt, client_type=_tctype)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
-        if not api_id or not api_hash or not session_string:
-            return {"success": False, "error": "api_id, api_hash o session_string no configurados en la aplicación"}
-            
-        client = TelegramClient(StringSession(session_string), int(api_id), api_hash,
-                                device_model="TVCat_TGIndex", app_version="1.0")
-        await client.connect()
-        if not await client.is_user_authorized():
-            await client.disconnect()
-            return {"success": False, "error": "Sesión de Telegram no autorizada o caducada"}
-            
-        chat_entity = channel_id
-        if chat_entity.replace("-100", "").isdigit():
-            chat_entity = int(chat_entity)
-            
-        entity = await client.get_entity(chat_entity)
-        title = getattr(entity, "title", "Canal de Telegram")
-        await client.disconnect()
-        
+        title = (ent or {}).get("title") or "Canal de Telegram"
         return {"success": True, "title": title}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1375,285 +1358,10 @@ async def trigger_parse_all():
 # -------------------------------------------------------------------------
 @router.get("/stream/user/episode/{episode_id}")
 async def stream_user_episode(episode_id: int, request: Request):
-    """Streaming directo desde canal personal via Userbot."""
-    import traceback
-    import re
-    import json
-    from fastapi.responses import JSONResponse
+    """Retirado (410): streaming legacy Telethon-directo eliminado en la
+    centralizacion. Usar /api/stream del gateway (agnostico al cliente)."""
+    raise HTTPException(status_code=410, detail="Endpoint retirado: usar /api/stream del gateway")
 
-    # ── 1. Verificación de canal de escaneo habilitado (se ejecuta SIEMPRE) ─────
-    # Si el canal de escaneo del que proviene este episodio está deshabilitado
-    # en TGIndex, no se sirve a nadie (ni peers, ni clientes directos).
-    _db_path_chk = get_plugin_db_path()
-    try:
-        conn_pre = sqlite3.connect(_db_path_chk)
-        conn_pre.row_factory = sqlite3.Row
-        cursor_pre = conn_pre.cursor()
-        cursor_pre.execute("""
-            SELECT u.source
-            FROM unified_catalog u
-            JOIN item_episodes e ON u.id = e.item_id
-            WHERE e.id = ?
-        """, (episode_id,))
-        pre_row = cursor_pre.fetchone()
-        conn_pre.close()
-        if pre_row:
-            source_pre = pre_row["source"] or ""
-            if source_pre.startswith("scan_"):
-                try:
-                    scan_id_pre = int(source_pre.split("_")[1])
-                except ValueError:
-                    scan_id_pre = None
-                if scan_id_pre is not None:
-                    from tvcat.gateway import get_db_connection
-                    conn_sys_pre = get_db_connection(system=True)
-                    sys_row_pre = conn_sys_pre.execute(
-                        "SELECT enabled FROM tvcat_scanned_channels WHERE id = ?", (scan_id_pre,)
-                    ).fetchone()
-                    conn_sys_pre.close()
-                    if not sys_row_pre or not sys_row_pre[0]:
-                        print(f" [STREAM BLOCKED] episode_id={episode_id} denegado: canal {source_pre} deshabilitado (IP: {request.client.host if request.client else '?'})")
-                        return JSONResponse(
-                            status_code=451,
-                            content={"reason": "content_revoked", "episode_id": episode_id,
-                                     "detail": "El canal de escaneo de este contenido está deshabilitado."}
-                        )
-    except Exception as e_pre:
-        print(f" [STREAM PRE CHECK ERROR] {e_pre}")
-
-    # ── 2. Validación de acceso federado (Peers) — solo si viene con Bridge Key ─
-    bridge_key = request.headers.get("X-Bridge-Key", "")
-    if bridge_key:
-        from tvcat.plugins.tvcat_peers import bridge_manager as peer_mgr
-        peer = peer_mgr.get_peer_by_api_key(bridge_key)
-        if not peer:
-            raise HTTPException(status_code=403, detail="Bridge Key no autorizada o inválida")
-        
-        # Si tiene la compartición desactivada
-        if not peer.get("share_enabled"):
-            return JSONResponse(status_code=451, content={"reason": "content_revoked", "episode_id": episode_id})
-
-        # Comprobar si la subcategoría del ítem está compartida con este peer
-        db_path = get_plugin_db_path()
-        try:
-            conn_chk = sqlite3.connect(db_path)
-            conn_chk.row_factory = sqlite3.Row
-            cursor_chk = conn_chk.cursor()
-            cursor_chk.execute("""
-                SELECT u.category, u.subcategory, u.source 
-                FROM unified_catalog u
-                JOIN item_episodes e ON u.id = e.item_id
-                WHERE e.id = ?
-            """, (episode_id,))
-            item_row = cursor_chk.fetchone()
-            conn_chk.close()
-            
-            if item_row:
-                cat = item_row["category"] or ""
-                sub = item_row["subcategory"] or ""
-
-                # Cargar configuración compartida
-                shared_cfg = peer.get("shared_config", {})
-                allowed_subcats = shared_cfg.get("subcategories", [])
-                allowed_cats = shared_cfg.get("categories", [])
-                
-                authorized = False
-                if allowed_subcats:
-                    subcat_path = f"{cat}/{sub}" if sub else cat
-                    authorized = any(subcat_path.lower() == allowed.lower() for allowed in allowed_subcats)
-                elif allowed_cats:
-                    authorized = any(cat.lower() == allowed.lower() for allowed in allowed_cats)
-                else:
-                    # Sin filtro configurado → autorizado si share_enabled (ya verificado arriba)
-                    authorized = True
-                
-                if not authorized:
-                    logger = logging.getLogger("tvcat.peers")
-                    logger.warning(f"Acceso DENEGADO a peer '{peer['name']}' para episode_id={episode_id} (cat={cat}, sub={sub})")
-                    return JSONResponse(status_code=451, content={"reason": "content_revoked", "episode_id": episode_id})
-        except Exception as e_chk:
-            print(f" [STREAM ACC CHECK ERROR] {e_chk}")
-
-    try:
-        import os
-        db_path = get_plugin_db_path()
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        # Obtener el episodio (msg_id del video) y su item padre
-        print(f" [STREAM EPISODE] Buscando episode_id={episode_id}")
-        cursor.execute("""
-            SELECT e.item_id, e.telegram_msg_id
-            FROM item_episodes e
-            WHERE e.id = ?
-        """, (episode_id,))
-        ep_row = cursor.fetchone()
-        print(f" [STREAM EPISODE] ep_row={dict(ep_row) if ep_row else None}")
-        if not ep_row:
-            conn.close()
-            raise HTTPException(status_code=404, detail="Episodio no encontrado.")
-
-        parent_item_id = ep_row["item_id"]
-        msg_id = ep_row["telegram_msg_id"]
-        print(f" [STREAM EPISODE] parent_item_id={parent_item_id}, msg_id={msg_id}")
-
-        # Obtener telegram_link del item padre (tiene la entidad del canal)
-        cursor.execute("SELECT telegram_link, source FROM unified_catalog WHERE id = ?", (parent_item_id,))
-        uc_row = cursor.fetchone()
-        print(f" [STREAM EPISODE] uc_row={dict(uc_row) if uc_row else None}")
-        conn.close()
-
-        if not uc_row:
-            raise HTTPException(status_code=404, detail="Item padre no encontrado en unified_catalog.")
-
-        telegram_link = uc_row["telegram_link"] or ""
-        print(f" [STREAM EPISODE] telegram_link={telegram_link}")
-
-        # Extraer chat_entity del telegram_link (misma lógica que Yuki)
-        chat_entity = None
-        if "/c/" in telegram_link:
-            m = re.search(r"/c/(\d+)/", telegram_link)
-            if m:
-                chat_entity = int("-100" + m.group(1))
-        elif "t.me/" in telegram_link:
-            m = re.search(r"t\.me/([^/]+)/", telegram_link)
-            if m:
-                chat_entity = m.group(1)
-
-        if not chat_entity:
-            raise HTTPException(status_code=400, detail="No se pudo resolver la entidad del canal desde el enlace.")
-
-        # Obtener el cliente de la cuenta asociada
-        source = uc_row["source"] or ""
-        scan_id = None
-        if source.startswith("scan_"):
-            try:
-                scan_id = int(source.replace("scan_", ""))
-            except ValueError:
-                pass
-                
-        telegram_account_id = None
-        if scan_id is not None:
-            system_conn = get_db_connection(system=True)
-            row = system_conn.execute("SELECT telegram_account_id FROM tvcat_scanned_channels WHERE id = ?", (scan_id,)).fetchone()
-            system_conn.close()
-            if row:
-                telegram_account_id = row[0]
-                
-        if telegram_account_id is not None:
-            from .scanner import get_client_for_account
-            user_tg = await get_client_for_account(telegram_account_id)
-        else:
-            user_tg = await get_user_tg_client()
-
-        if not user_tg:
-            raise HTTPException(status_code=500, detail="TVCat_TGIndex no tiene cuenta/cliente configurado.")
-
-        try:
-            entity = await user_tg.get_entity(chat_entity)
-            streaming_url = f"https://t.me/c/{str(chat_entity).replace('-100','')}/{msg_id}"
-            print(f" [STREAM] Haciendo streaming desde: {streaming_url}")
-            # Obtener el mensaje con caché (más fiable para canales forum)
-            msgs = None
-            msg = await _tgindex_get_message(user_tg, entity, msg_id)
-            print(f" [STREAM] msg type={type(msg).__name__ if msg else 'None'}")
-            if not msg or not msg.media:
-                raise HTTPException(status_code=404, detail=f"Media no encontrado para msg_id={msg_id} en entity={chat_entity}.")
-            print(f" [STREAM] media type={type(msg.media).__name__}")
-            print(f" [STREAM] has_photo={hasattr(msg.media, 'photo')}, has_document={hasattr(msg.media, 'document')}")
-
-            file_size = 0
-            mime = "video/mp4"
-            if hasattr(msg.media, "document"):
-                doc = msg.media.document
-                file_size = doc.size
-                mime_original = doc.mime_type or "None"
-                print(f" [STREAM EPISODE] msg_id={msg_id}, doc_id={doc.id}, mime_original={mime_original}, file_size={file_size}, dc_id={doc.dc_id}")
-                if not file_size or file_size <= 0:
-                    raise HTTPException(status_code=400, detail=f"Archivo multimedia vacío (file_size={file_size}).")
-                mime = "video/mp4"
-            else:
-                raise HTTPException(status_code=400, detail=f"No es un archivo multimedia (msg_id={msg_id}, media={type(msg.media).__name__}).")
-
-            print(f" [STREAM EPISODE] Intentando descarga con iter_download (dc_id={doc.dc_id})...")
-            # TEST: descargar primeros 64 bytes con API directa
-            try:
-                from telethon.tl.functions.upload import GetFileRequest
-                from telethon.tl.types import InputDocumentFileLocation
-                from telethon.tl.types.upload import File as UploadFile, FileCdnRedirect
-                test_req = await user_tg(GetFileRequest(
-                    location=InputDocumentFileLocation(
-                        id=doc.id, access_hash=doc.access_hash,
-                        file_reference=doc.file_reference, thumb_size=""
-                    ),
-                    offset=0, limit=131072
-                ))
-                if isinstance(test_req, UploadFile):
-                    print(f" [STREAM TEST] Inicio archivo (hex): {test_req.bytes[:16].hex()}")
-                elif isinstance(test_req, FileCdnRedirect):
-                    print(f" [STREAM TEST] CDN Redirect: dc_id={test_req.dc_id}")
-            except Exception as test_err:
-                print(f" [STREAM TEST] Error: {test_err}")
-            
-            # Leer tamaño de chunk de query string (con fallback a 1MB - max getFile de Telegram)
-            try:
-                q_chunk = request.query_params.get("chunk")
-                pref_chunk_size = int(q_chunk) * 1024 if q_chunk else 1024 * 1024
-            except:
-                pref_chunk_size = 1024 * 1024
-
-            async def sender(offset=0):
-                chunk_count = 0
-                total_bytes = 0
-                first_bytes = None
-                try:
-                    async for chunk in user_tg.iter_download(msg, offset=offset, chunk_size=pref_chunk_size, dc_id=doc.dc_id):
-                        chunk_count += 1
-                        total_bytes += len(chunk)
-                        if first_bytes is None and len(chunk) > 3:
-                            first_bytes = chunk[:4].hex()
-                        if chunk_count == 1:
-                            print(f" [STREAM SENDER] Primer chunk: size={len(chunk)}, first_4_bytes={first_bytes}")
-                        if chunk:
-                            # Telethon retorna un objeto memoryview en algunas plataformas,
-                            # Starlette/FastAPI requiere obligatoriamente bytes/str en su StreamingResponse
-                            yield bytes(chunk)
-                except Exception as dl_err:
-                    print(f" [STREAM SENDER] Error descarga: {dl_err}")
-                    traceback.print_exc()
-                print(f" [STREAM SENDER] Total: {chunk_count} chunks, {total_bytes} bytes")
-
-            headers = {
-                "Accept-Ranges": "bytes",
-                "Content-Type": mime,
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-cache",
-            }
-            range_hdr = request.headers.get("Range")
-            if range_hdr:
-                try:
-                    start = int(range_hdr.replace("bytes=", "").split("-")[0])
-                except:
-                    start = 0
-                headers["Content-Range"] = f"bytes {start}-{file_size - 1}/{file_size}"
-                headers["Content-Length"] = str(file_size - start)
-                return StreamingResponse(sender(start), status_code=206, headers=headers)
-
-            headers["Content-Length"] = str(file_size)
-            return StreamingResponse(sender(0), headers=headers)
-
-        except HTTPException:
-            raise
-        except Exception as e_tg:
-            traceback.print_exc()
-            raise HTTPException(status_code=500, detail=f"Error streaming: {e_tg}")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error BD: {e}")
 
 
 # ─── CacheRelay ────────────────────────────────────────────────────
@@ -1759,3 +1467,39 @@ def get_indexator_channels():
         return out
     except Exception:
         return []
+
+# -------------------------------------------------------------------------
+# Diccionario de subcategor�as (normalizaci�n Type/Tipo/... del cover)
+# -------------------------------------------------------------------------
+class SubcatDictReq(BaseModel):
+    terms: list = []
+
+
+@router.get("/api/tgindex/subcat-dict")
+async def get_subcat_dict():
+    try:
+        from .scanner import _load_subcat_dict
+        return _load_subcat_dict()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/tgindex/subcat-dict")
+async def save_subcat_dict(body: SubcatDictReq, request: Request):
+    try:
+        from tvcat.gateway import get_db_connection as _gdb
+        from tvcat.services.auth_service import get_session as _gs
+        sess = _gs(request.cookies.get("tvcat_session", ""))
+        if not sess or sess.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Solo admin")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    try:
+        from .scanner import _save_subcat_dict
+        return _save_subcat_dict({"terms": body.terms or []})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -1,0 +1,16 @@
+{
+  "name": "tvcat_editsync",
+  "displayName": "EditSync",
+  "description": "Sincroniza ediciones locales (covers + colecciones) entre instancias vía ZIP o pull remoto con token.",
+  "type": "general",
+  "group": "General",
+  "version": "1.0.0",
+  "defaultEnabled": true,
+  "icon": "static/plugin_icon.png",
+  "iconEmoji": "🔄",
+  "js": ["editsync.js?v=20260922"],
+  "css": [],
+  "settings_ui": "/plugin-static/tvcat_editsync/config.html",
+  "has_interface": false,
+  "access": { "admin": true, "user": true, "child": false }
+}

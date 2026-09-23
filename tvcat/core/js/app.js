@@ -127,13 +127,14 @@ function buildCatalogQuery() {
     var si = document.getElementById('global-search');
     var st = si ? si.value.trim() : '';
     if (st.length >= 2) {
-        var processed = parseWildcardSearch(st).join(' ');
+        var processed = (window.sanitizeSearchText ? window.sanitizeSearchText(st) : st).trim().replace(/\s+/g, ' ').replace(/\s*\*\s*/g, '*');
         params.push('search=' + encodeURIComponent(processed));
         var fields = [];
         if (window._activeFilters) {
             if (window._activeFilters.fields.title) fields.push('title');
             if (window._activeFilters.fields.alt_titles) fields.push('alt_titles');
             if (window._activeFilters.fields.description) fields.push('description');
+            if (window._activeFilters.fields.file_name) fields.push('file_name');
             params.push('fields=' + encodeURIComponent(fields.join(',')));
             if (window._activeFilters.year_from) params.push('year_from=' + window._activeFilters.year_from);
             if (window._activeFilters.year_to) params.push('year_to=' + window._activeFilters.year_to);
@@ -281,9 +282,11 @@ function loadSearchState() {
             var titleChk = document.getElementById('filter-title');
             var altChk = document.getElementById('filter-alt-titles');
             var descChk = document.getElementById('filter-description');
+            var fileChk = document.getElementById('filter-filename');
             if (titleChk) titleChk.checked = _activeFilters.fields.title !== false;
             if (altChk) altChk.checked = _activeFilters.fields.alt_titles === true;
             if (descChk) descChk.checked = _activeFilters.fields.description === true;
+            if (fileChk) fileChk.checked = _activeFilters.fields.file_name === true;
             var yearFrom = document.getElementById('filter-year-from');
             var yearTo = document.getElementById('filter-year-to');
             if (yearFrom) yearFrom.value = _activeFilters.year_from || '';
@@ -294,7 +297,7 @@ function loadSearchState() {
                 if (_activeFilters.categories[g] === false) { hasGenreFilter = true; break; }
             }
             var hasFilters = !_activeFilters.fields.title || _activeFilters.fields.alt_titles ||
-                _activeFilters.fields.description || _activeFilters.year_from || _activeFilters.year_to || hasGenreFilter;
+                _activeFilters.fields.description || _activeFilters.fields.file_name || _activeFilters.year_from || _activeFilters.year_to || hasGenreFilter;
             var filterBtn = document.getElementById('filter-btn');
             if (filterBtn) filterBtn.classList.toggle('active', hasFilters);
         }
@@ -303,7 +306,7 @@ function loadSearchState() {
 
 // --- Filter Modal ---
 var _activeFilters = {
-    fields: { title: true, alt_titles: false, description: false },
+    fields: { title: true, alt_titles: false, description: false, file_name: false },
     categories: {},
     year_from: null,
     year_to: null
@@ -404,6 +407,7 @@ window.applyFilters = function() {
     _activeFilters.fields.title = document.getElementById('filter-title').checked;
     _activeFilters.fields.alt_titles = document.getElementById('filter-alt-titles').checked;
     _activeFilters.fields.description = document.getElementById('filter-description').checked;
+    _activeFilters.fields.file_name = document.getElementById('filter-filename').checked;
 
     var yearFrom = document.getElementById('filter-year-from').value;
     var yearTo = document.getElementById('filter-year-to').value;
@@ -416,7 +420,7 @@ window.applyFilters = function() {
         if (_activeFilters.categories[g] === false) { hasGenreFilter = true; break; }
     }
     var hasFilters = !_activeFilters.fields.title || _activeFilters.fields.alt_titles ||
-        _activeFilters.fields.description || _activeFilters.year_from || _activeFilters.year_to || hasGenreFilter;
+        _activeFilters.fields.description || _activeFilters.fields.file_name || _activeFilters.year_from || _activeFilters.year_to || hasGenreFilter;
     if (filterBtn) filterBtn.classList.toggle('active', hasFilters);
 
     saveSearchState();
@@ -3043,7 +3047,9 @@ window.showTgindexConfig = function() {
         '<div class="settings-section" style="margin-bottom:12px;padding:10px;background:var(--bg-surface);border-radius:8px;border:1px solid var(--border-color);">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
         '<h4 style="margin:0;font-size:0.9rem;">\uD83D\uDCE1 Scan Items</h4>' +
-        '<button class="btn-secondary" onclick="openTgindexEditModal(null)" style="padding:4px 10px;font-size:0.75rem;">+ Nuevo scan item</button></div>' +
+        '<div style="display:flex;gap:6px;">' +
+        '<button class="btn-secondary" onclick="openSubcatDictModal()" title="Diccionario de subcategorías auto (Type del cover)" style="padding:4px 10px;font-size:0.75rem;">\uD83D\uDCD6 Subcategorías</button>' +
+        '<button class="btn-secondary" onclick="openTgindexEditModal(null)" style="padding:4px 10px;font-size:0.75rem;">+ Nuevo scan item</button></div></div>' +
         '<div id="channels-list" style="font-size:0.8rem;">Cargando...</div></div>' +
 
         // Sección: CacheRelay (config auxiliar + backup completo)
@@ -3251,6 +3257,8 @@ function loadTgindexChannels() {
                 var cat = ch.category || (ch.content_type || 'media');
                 var sub = ch.custom_subcategory || '';
                 var chip = (cat || 'media') + (sub ? ' \u00b7 ' + sub : '');
+                var _nItems = (ch.items_count !== undefined && ch.items_count !== null) ? ch.items_count : null;
+                if (_nItems !== null) chip += ' \u00b7 ' + _nItems + ' título' + (_nItems === 1 ? '' : 's');
                 // Enlace al canal Telegram (t.me/c/{bare}/{start_msg})
                 var chLink = '';
                 if (ch.channel_id) {
@@ -3634,7 +3642,11 @@ window.openTgindexEditModal = function(id) {
         '<div style="flex:1;"><label style="display:block;font-size:0.65rem;color:#a1a1aa;text-transform:uppercase;margin-bottom:2px;">ID del Topic</label>' +
         '<input type="text" id="tgindex-topic-id" value="" placeholder="1201" style="width:100%;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:6px 8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div>' +
         '<div style="flex:2;"><label style="display:block;font-size:0.65rem;color:#a1a1aa;text-transform:uppercase;margin-bottom:2px;">Nombre del Topic</label>' +
-        '<input type="text" id="tgindex-topic-name" value="" placeholder="3DS" style="width:100%;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:6px 8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div></div></div>' +
+        '<input type="text" id="tgindex-topic-name" value="" placeholder="3DS" style="width:100%;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:6px 8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;"></div></div>' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-top:6px;">' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.75rem;color:#f4f4f5;" title="Si hay varios covers seguidos sin contenido, el último es el vigente. Al cambiar re-parsea sin descargar (si el cover cambia de identidad, usa Limpiar+reescanear).">' +
+        '<input type="checkbox" id="tgindex-drop-empty" style="accent-color:var(--accent);">' +
+        'Descartar covers vacíos</label></div></div>' +
 
         '<div style="display:flex;gap:8px;margin-bottom:8px;">' +
         '<div style="flex:1;"><label style="display:block;font-size:0.68rem;color:#a1a1aa;text-transform:uppercase;margin-bottom:3px;">Cuenta de Telegram</label>' +
@@ -3686,12 +3698,15 @@ window.openTgindexEditModal = function(id) {
                         var list = (r && r.sessions) || [];
                         for (var i = 0; i < list.length; i++) {
                             var s = list[i] || {};
-                            if ((s.client_type || 'telethon') !== 'telethon') continue;
+                            // Todas las sesiones (T y P): el centinela -(id)
+                            // identifica la CUENTA y el tipo lo da el ajuste.
                             var sid = parseInt(s.id, 10) || 0;
                             if (sid <= 0) continue;
+                            var ctype = (s.client_type || 'telethon').toLowerCase();
+                            var tag = ctype.charAt(0).toUpperCase();
                             var opt = document.createElement('option');
                             opt.value = String(-sid);
-                            var lbl = s.name || ('Sesión ' + sid);
+                            var lbl = (s.name || ('Sesión ' + sid)) + ' (' + tag + ')';
                             opt.textContent = lbl;
                             acc.appendChild(opt);
                         }
@@ -3745,6 +3760,8 @@ window.openTgindexEditModal = function(id) {
                     if (topicIdEl && ch.topic_id) topicIdEl.value = ch.topic_id;
                     if (topicNameEl && ch.topic_name) topicNameEl.value = ch.topic_name;
                     if (topicOnlyEl) topicOnlyEl.checked = (ch.topic_only ? true : false);
+                    var dropEmptyEl = document.getElementById('tgindex-drop-empty');
+                    if (dropEmptyEl) dropEmptyEl.checked = (ch.drop_empty_covers ? true : false);
                     tgindexTopicOnlyChange();
                     break;
                 }
@@ -3773,6 +3790,88 @@ window.autofillTgindexId = function() {
 window.closeTgindexEditModal = function() {
     var el = document.getElementById('tgindex-edit-modal');
     if (el) el.parentNode.removeChild(el);
+};
+
+window.openSubcatDictModal = function() {
+    if (document.getElementById('tgindex-subcatdict-modal')) return;
+    var overlay = document.createElement('div');
+    overlay.id = 'tgindex-subcatdict-modal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:30px 12px;';
+    overlay.innerHTML = '<div style="background:#111113;border:1px solid var(--border-color,#3f3f46);border-radius:10px;max-width:640px;width:100%;padding:16px;box-sizing:border-box;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">' +
+        '<h3 style="margin:0;font-size:1rem;">\uD83D\uDCD6 Subcategorías auto</h3>' +
+        '<button onclick="closeSubcatDictModal()" style="background:none;border:none;color:#a1a1aa;font-size:1.4rem;cursor:pointer;line-height:1;padding:0 4px;">&times;</button></div>' +
+        '<div style="font-size:0.75rem;color:#a1a1aa;margin-bottom:8px;">Literal mostrado + alias que traducen a él (separados por coma, punto y coma o salto de línea). Comparación sin mayúsculas ni acentos. Ej: <code>Movie = película, peli, movie</code>.</div>' +
+        '<div id="subcatdict-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px;"></div>' +
+        '<button class="btn-secondary" onclick="addSubcatDictTerm()" style="padding:6px 12px;font-size:0.8rem;">+ Nuevo término</button>' +
+        '<div style="display:flex;gap:6px;margin-top:12px;border-top:1px solid var(--border-color,#3f3f46);padding-top:10px;">' +
+        '<button class="btn-primary" onclick="saveSubcatDict()" style="padding:6px 14px;font-size:0.8rem;">\ud83d\udcbe Guardar</button>' +
+        '<button class="btn-secondary" onclick="closeSubcatDictModal()" style="padding:6px 14px;font-size:0.8rem;">\u2190 Volver</button></div>' +
+        '<div id="subcatdict-status" style="font-size:0.75rem;color:var(--text-secondary);margin-top:8px;"></div></div>';
+    document.body.appendChild(overlay);
+    window.API.ajax({
+        url: '/api/tgindex/subcat-dict',
+        success: function(data) { renderSubcatDictTerms((data && data.terms) || []); },
+        error: function() {
+            var st = document.getElementById('subcatdict-status');
+            if (st) st.textContent = '❌ Error cargando';
+        }
+    });
+};
+
+window.closeSubcatDictModal = function() {
+    var el = document.getElementById('tgindex-subcatdict-modal');
+    if (el) el.parentNode.removeChild(el);
+};
+
+function renderSubcatDictTerms(terms) {
+    var list = document.getElementById('subcatdict-list');
+    if (!list) return;
+    list.innerHTML = '';
+    (terms || []).forEach(function(t) {
+        addSubcatDictRow(t.label || '', (t.aliases || []).join(', '));
+    });
+    if (!terms || !terms.length) addSubcatDictRow('', '');
+}
+
+window.addSubcatDictTerm = function() { addSubcatDictRow('', ''); };
+
+function addSubcatDictRow(label, aliases) {
+    var list = document.getElementById('subcatdict-list');
+    if (!list) return;
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:6px;align-items:flex-start;';
+    row.innerHTML = '<input type="text" class="subcatdict-label" value="" placeholder="Literal (ej: Movie)" style="flex:0 0 140px;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:6px 8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;">' +
+        '<textarea class="subcatdict-aliases" rows="2" placeholder="alias1, alias2, ..." style="flex:1;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:6px 8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;resize:vertical;"></textarea>' +
+        '<button class="btn-secondary subcatdict-del" style="padding:6px 10px;font-size:0.8rem;">✖</button>';
+    row.querySelector('.subcatdict-label').value = label || '';
+    row.querySelector('.subcatdict-aliases').value = aliases || '';
+    row.querySelector('.subcatdict-del').onclick = function() { list.removeChild(row); };
+    list.appendChild(row);
+}
+
+window.saveSubcatDict = function() {
+    var st = document.getElementById('subcatdict-status');
+    var list = document.getElementById('subcatdict-list');
+    if (!list) return;
+    var terms = [];
+    var rows = list.children;
+    for (var i = 0; i < rows.length; i++) {
+        var lab = rows[i].querySelector('.subcatdict-label');
+        var ali = rows[i].querySelector('.subcatdict-aliases');
+        var label = lab ? lab.value.trim() : '';
+        if (!label) continue;
+        var raw = ali ? ali.value : '';
+        var aliases = raw.split(/[,;\n]+/).map(function(a) { return a.trim(); }).filter(function(a) { return a; });
+        terms.push({ label: label, aliases: aliases });
+    }
+    if (st) st.textContent = 'Guardando...';
+    window.API.ajax({
+        method: 'PUT', url: '/api/tgindex/subcat-dict',
+        data: { terms: terms },
+        success: function() { if (st) st.textContent = '✅ Guardado (aplica en el próximo parse)'; },
+        error: function() { if (st) st.textContent = '❌ Error al guardar'; }
+    });
 };
 
 window.tgindexTopicOnlyChange = function() {
@@ -3814,6 +3913,8 @@ function _tgindexModalPayload() {
         if (tid) payload.topic_id = parseInt(tid, 10) || null;
     }
     if (topicOnlyEl) payload.topic_only = topicOnlyEl.checked ? 1 : 0;
+    var dropEmptyEl = document.getElementById('tgindex-drop-empty');
+    if (dropEmptyEl) payload.drop_empty_covers = dropEmptyEl.checked ? 1 : 0;
     var topicNameEl = document.getElementById('tgindex-topic-name');
     if (topicNameEl && topicNameEl.value.trim()) payload.topic_name = topicNameEl.value.trim();
     if (window.modalTgindexId) payload.id = window.modalTgindexId;
@@ -6164,6 +6265,10 @@ document.addEventListener('DOMContentLoaded', function() {
         if (window.UI && window.UI.applyScreenColumns) {
             var savedCols = localStorage.getItem('tvcat_grid_columns') || 'auto';
             window.UI.applyScreenColumns(savedCols);
+        }
+        // Restaurar botones hero (escala + modo botón/badge, por dispositivo)
+        if (window.UI && window.UI.applyHeroButtons) {
+            window.UI.applyHeroButtons();
         }
 
         // Restaurar preferencia de posición del avatar

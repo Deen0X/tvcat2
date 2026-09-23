@@ -132,6 +132,34 @@
 </div>
 
 <div class="card">
+    <div style="margin-bottom:8px;"><b>Datos multimedia del cover (tags _*)</b></div>
+    <label style="display:block;margin:6px 0;">
+        <input type="checkbox" id="media-probe">
+        <span>Sondar el primer fichero con ffprobe (resoluci&oacute;n, pistas, bitrate...)</span>
+    </label>
+    <div class="muted" style="margin-top:2px;">Al crear el cover se analizan los datos del primer v&iacute;deo descargado para resolver los tags <span class="tag">{_resolution}</span> <span class="tag">{_audiotracks}</span> etc. Sin fichero (copia Telegram) quedan vac&iacute;os y se omiten. El cover no se reedita despu&eacute;s.</div>
+</div>
+
+<div class="card">
+    <div style="margin-bottom:8px;"><b>Limpieza de nombres de fichero</b></div>
+    <label style="display:block;margin:6px 0;">
+        <input type="checkbox" id="clean-filenames">
+        <span>Limpiar nombres al subir (diccionario de abajo)</span>
+    </label>
+    <div class="muted" style="margin-bottom:6px;">T&eacute;rminos prohibidos, uno por l&iacute;nea. Comparaci&oacute;n literal (no regex): insensible a may&uacute;sculas salvo prefijo <span class="tag">!</span> (<span class="tag">!!</span> = <span class="tag">!</span> literal + sensible). Si el nombre queda vac&iacute;o se usa <span class="tag">T&iacute;tulo S01E02</span>. Solo renombra al subir; el origen no se toca.</div>
+    <textarea id="clean-terms" rows="5" placeholder="@Compartir&#10;[ReyBrena]&#10;by_dual34" style="width:100%;box-sizing:border-box;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:6px;padding:6px 8px;font-size:0.8rem;font-family:monospace;resize:vertical;"></textarea>
+    <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;">
+        <button class="btn" id="clean-analyze-btn" style="flex:1;min-width:200px;">Analizar patrones con IA</button>
+    </div>
+    <div id="clean-analyze-out" style="margin-top:6px;font-size:0.8rem;"></div>
+    <label style="display:block;margin:8px 0 0 0;">
+        <input type="checkbox" id="llm-clean">
+        <span>Limpieza con IA por título (sugiere renames al procesar; apagado = solo diccionario)</span>
+    </label>
+    <div class="muted" style="margin-top:2px;">Una llamada por título como mucho (pausa m&iacute;nima 20s entre llamadas). Si falla o no hay IA configurada, se usa solo el diccionario.</div>
+</div>
+
+<div class="card">
     <label>
         <input type="checkbox" id="normalize-mp4">
         <span>Normalizar v&iacute;deos a MP4 (compatible con stream de Telegram)</span>
@@ -333,8 +361,16 @@ function loadConfig() {
         if (skp) skp.checked = cfg.skip_if_exists_topo3 || false;
         var ttl = document.getElementById('topics-cache-ttl');
         if (ttl) ttl.value = String(cfg.topics_cache_ttl_min || 60);
-        var cyt = document.getElementById('clean-year-title');
+    var cyt = document.getElementById('clean-year-title');
         if (cyt) cyt.checked = cfg.clean_year_from_title !== false;
+        var mpr = document.getElementById('media-probe');
+        if (mpr) mpr.checked = !!cfg.media_probe;
+        var cfn = document.getElementById('clean-filenames');
+        if (cfn) cfn.checked = cfg.clean_filenames !== false;
+        var ctm = document.getElementById('clean-terms');
+        if (ctm) ctm.value = (cfg.clean_terms || []).join('\n');
+        var llm = document.getElementById('llm-clean');
+        if (llm) llm.checked = !!cfg.llm_clean;
         // Opción oculta: forward directo de terceros (5 clics en el aviso). Sin checkbox visible.
         window._forwardThirdParty = !!cfg.forward_third_party;
         updateForwardWarningUI(window._forwardThirdParty);
@@ -473,7 +509,12 @@ function saveConfig(silent) {
     var skp = document.getElementById('skip-exists-topo3');
     var ttl = document.getElementById('topics-cache-ttl');
     var cyt = document.getElementById('clean-year-title');
+    var mpr = document.getElementById('media-probe');
+    var cfn = document.getElementById('clean-filenames');
+    var ctm = document.getElementById('clean-terms');
+    var llm = document.getElementById('llm-clean');
     var passwords = ap ? ap.value.split(/\n+/).map(function(s) { return s.trim(); }).filter(Boolean) : [];
+    var cleanTerms = ctm ? ctm.value.split(/\n+/).map(function(s) { return s.trim(); }).filter(Boolean) : [];
     api(API + '/config', { method: 'POST', data: {
         credential_name: sel ? sel.value : '',
         delay_seconds: dSel ? parseFloat(dSel.value) : 3.0,
@@ -499,12 +540,61 @@ function saveConfig(silent) {
         skip_if_exists_topo3: skp ? skp.checked : false,
         topics_cache_ttl_min: ttl ? parseInt(ttl.value) || 60 : 60,
         clean_year_from_title: cyt ? cyt.checked : true,
+        media_probe: mpr ? mpr.checked : false,
+        clean_filenames: cfn ? cfn.checked : true,
+        clean_terms: cleanTerms,
+        llm_clean: llm ? llm.checked : false,
     }}, function(r) {
         if (silent) return;
         if (r && r.ok) showToast('Configuraci\u00f3n guardada');
         else showToast('Error al guardar configuraci\u00f3n');
     });
 }
+
+function analyzeCleanPatterns() {
+    var out = document.getElementById('clean-analyze-out');
+    if (out) out.innerHTML = '<span class="muted">Analizando con IA (puede tardar unos minutos)...</span>';
+    api(API + '/clean/analyze', { method: 'POST', data: { sample: 300, group: 50 } }, function(r) {
+        if (!out) return;
+        if (!r || !r.ok) { out.innerHTML = '<span style="color:#f87171;">Error: ' + ((r && r.detail) || 'desconocido') + '</span>'; return; }
+        var cands = r.candidates || [];
+        if (!cands.length) { out.innerHTML = '<span class="muted">Sin candidatos (' + (r.calls || 0) + ' llamadas, ' + (r.titles || 0) + ' títulos).</span>'; return; }
+        var html = '<div class="muted" style="margin-bottom:4px;">Candidatos (' + cands.length + ', ' + r.calls + ' llamadas): marca y añade al diccionario.</div><div style="max-height:180px;overflow-y:auto;border:1px solid var(--border-color);border-radius:6px;padding:4px 8px;">';
+        for (var i = 0; i < cands.length; i++) {
+            var c = cands[i];
+            var t = String(c.term || '').replace(/</g, '&lt;');
+            var ex = String(c.example || '').replace(/</g, '&lt;');
+            html += '<label style="display:flex;gap:8px;align-items:center;padding:3px 0;cursor:pointer;font-size:0.8rem;">' +
+                '<input type="checkbox" class="clean-cand-cb" value="' + t.replace(/"/g, '&quot;') + '" checked>' +
+                '<span style="font-family:monospace;">' + t + '</span>' +
+                '<span class="muted">×' + (c.count || 1) + '</span>' +
+                '<span class="muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + ex + '</span></label>';
+        }
+        html += '</div><button class="btn" id="clean-cand-add" style="margin-top:6px;">Añadir seleccionados al diccionario</button>';
+        out.innerHTML = html;
+        var add = document.getElementById('clean-cand-add');
+        if (add) add.onclick = function() {
+            var boxes = out.querySelectorAll('.clean-cand-cb:checked');
+            var ta = document.getElementById('clean-terms');
+            var cur = ta ? ta.value.split(/\n+/).map(function(s) { return s.trim(); }).filter(Boolean) : [];
+            for (var k = 0; k < boxes.length; k++) {
+                var v = boxes[k].value;
+                if (cur.indexOf(v) === -1) cur.push(v);
+            }
+            if (ta) ta.value = cur.join('\n');
+            saveConfig();
+            showToast('Añadidos ' + boxes.length + ' términos (guardado)');
+        };
+    });
+}
+(function() {
+    function hook() {
+        var b = document.getElementById('clean-analyze-btn');
+        if (b) b.onclick = analyzeCleanPatterns;
+        else setTimeout(hook, 300);
+    }
+    hook();
+})();
 
 function showToast(msg) {
     var el = document.createElement('div');
@@ -721,6 +811,7 @@ document.addEventListener('change', function(e) {
         e.target.id === 'real-copy-owner' || e.target.id === 'real-copy-rest' || e.target.id === 'normalize-mp4' || e.target.id === 'streaming-mkv' ||
         e.target.id === 'extract-archives' || e.target.id === 'archive-parallel' || e.target.id === 'download-parallel' || e.target.id === 'max-pending-archives' ||
         e.target.id === 'skip-exists-topo3' || e.target.id === 'topics-cache-ttl' || e.target.id === 'clean-year-title' ||
+        e.target.id === 'media-probe' || e.target.id === 'clean-filenames' || e.target.id === 'clean-terms' || e.target.id === 'llm-clean' ||
         e.target.id === 'default-audio-lang' || e.target.id === 'default-sub-lang' || e.target.id === 'archive-passwords' ||
         e.target.id === 'seven-zip-path' || e.target.id === 'unrar-path') {
         if (e.target.id === 'real-copy-owner') updateRealCopyGating();

@@ -227,6 +227,10 @@ class ConfigUpdate(BaseModel):
     skip_if_exists_topo3: Optional[bool] = None  # Omitir si existe en destino (solo topología 3)
     topics_cache_ttl_min: Optional[int] = None   # TTL caché de topics en minutos
     clean_year_from_title: Optional[bool] = None  # Limpiar año (YYYY) del título para generar topic
+    media_probe: Optional[bool] = None  # Sondar ffprobe del primer fichero para tags _* del cover
+    clean_filenames: Optional[bool] = None  # Limpiar nombres al subir (diccionario banned_terms)
+    clean_terms: Optional[List[str]] = None  # Términos prohibidos en filenames (uno por línea en UI)
+    llm_clean: Optional[bool] = None  # Sugerir limpieza con LLM por título (default OFF, fail-open)
 
 
 class TestLink(BaseModel):
@@ -356,6 +360,10 @@ def _load_config():
         "skip_if_exists_topo3": False,
         "topics_cache_ttl_min": 60,
         "clean_year_from_title": True,
+        "media_probe": False,
+        "clean_filenames": True,
+        "clean_terms": [],
+        "llm_clean": False,
     }
     if isinstance(cfg, dict):
         for k, v in defaults.items():
@@ -841,6 +849,14 @@ async def update_config(body: ConfigUpdate, request: Request):
         cfg["topics_cache_ttl_min"] = max(5, min(1440, int(body.topics_cache_ttl_min)))
     if body.clean_year_from_title is not None:
         cfg["clean_year_from_title"] = bool(body.clean_year_from_title)
+    if body.media_probe is not None:
+        cfg["media_probe"] = bool(body.media_probe)
+    if body.clean_filenames is not None:
+        cfg["clean_filenames"] = bool(body.clean_filenames)
+    if body.clean_terms is not None:
+        cfg["clean_terms"] = [str(p) for p in (body.clean_terms or []) if str(p or "").strip()]
+    if body.llm_clean is not None:
+        cfg["llm_clean"] = bool(body.llm_clean)
     _save_config(cfg)
     return {"ok": True}
 
@@ -882,6 +898,42 @@ async def list_destinations(request: Request):
             d["id"] = did
             result.append(d)
     return {"destinations": result}
+
+
+@router.get("/api/telegram-copy-v2/hide-uploaded/scans")
+async def list_hide_scans(request: Request):
+    """Todos los scan items definidos (activos o no) para comparar como
+    orígenes en Ocultar subidos. Sin red: solo la tabla de definición."""
+    session = _session_user(request)
+    if not session:
+        raise HTTPException(401, "Inicia sesion")
+    try:
+        from tvcat.services.catalog_service import get_conn as _gc
+        _g = _gc()
+        _cols = [r[1] for r in _g.execute(
+            "PRAGMA table_info(tvcat_scanned_channels)").fetchall()]
+        _sel = [c for c in ("id", "display_name", "title", "name", "channel_id",
+                            "enabled", "topology_type") if c in _cols]
+        out = []
+        for _r in _g.execute("SELECT " + ", ".join(_sel) +
+                             " FROM tvcat_scanned_channels ORDER BY id").fetchall():
+            _d = dict(_r)
+            out.append({
+                "scan_id": "scan_%s" % _d.get("id"),
+                "name": _d.get("display_name") or _d.get("title") or _d.get("name") or "?",
+                "channel_id": _d.get("channel_id") or "",
+                "enabled": bool(_d.get("enabled", 1)),
+                "topo": _d.get("topology_type"),
+            })
+        _g.close()
+        try:
+            _strict = bool(_load_config().get("hide_strict_year", True))
+        except Exception:
+            _strict = True
+        return {"scans": out, "strict_year": _strict}
+    except Exception as e:
+        print(f"[TGHirayi_v2] hide-uploaded scans: {e}", flush=True)
+        return {"scans": [], "strict_year": True}
 
 
 @router.post("/api/telegram-copy-v2/destinations")
@@ -976,10 +1028,12 @@ class HideUploadedItem(BaseModel):
 
 class HideUploadedCheck(BaseModel):
     destination_ids: List[str] = []
+    scan_ids: List[str] = []  # Orígenes: "scan_5" (parseados, no topics)
     items: List[HideUploadedItem] = []
     full_catalog: bool = False  # True: compara TODO el catálogo central (ignora items/filtros)
     for_hide: bool = True  # False: modo mostrar (no excluye ya-ocultos)
     include_queue: bool = False  # True: además oculta los que estén en la cola (no terminales)
+    strict_year: bool = None  # None: usar config hide_strict_year
 
 
 def _hide_skip_sets(session: dict) -> set:
@@ -1076,10 +1130,10 @@ def _hide_candidate_topic_name(title: str = "", year: str = "", description: str
             _clean = bool(_load_config().get("clean_year_from_title", True))
             if _clean and _t:
                 import re as _re_y
-                _m = _re_y.search(r"\((19|20)\d{2}\)", _t)
+                _m = _re_y.search(r"\((?:19|20)\d{2}\)", _t)
                 if _m:
                     _y = _m.group(0)[1:-1]
-                    _t = _re_y.sub(r"\((19|20)\d{2}\)", "", _t).strip()
+                    _t = _re_y.sub(r"\((?:19|20)\d{2}\)", "", _t).strip()
                     _t = _re_y.sub(r"\s{2,}", " ", _t).strip()
             if not _y:
                 _y = (year or "").strip()
@@ -1090,41 +1144,119 @@ def _hide_candidate_topic_name(title: str = "", year: str = "", description: str
         return (title or "").strip()
 
 
-async def _probe_topics_count(channel_id: str):
-    """Una sola página (limit=1) para leer el `count` del servidor y capturar
-    el error REAL (acceso, entidad, FloodWait...). Usa el pool compartido con
-    el cliente PREFERIDO (pyro por raw, telethon por request): no crea
-    conexión nueva ni desconecta. Devuelve (count|None, error|None)."""
+def _split_union_key(norm: str) -> tuple:
+    """(título, año) desde una clave normalizada `título[🗓AAAA]` o
+    `título (AAAA)`: para la tupla comparativa en modo estricto."""
     try:
-        from tvcat.services.userbot_service import (
-            get_active_client, get_preferred_client_type)
-        ctype = get_preferred_client_type()
-        wrapper = await get_active_client(ctype)
-        client = getattr(wrapper, "_client", wrapper) if wrapper else None
-        if not client:
-            return None, f"sin cliente {ctype} en el pool"
+        import re as _re_s
+        _t = (norm or "").strip()
+        _y = ""
+        _m = _re_s.search(r"🗓\s*((?:19|20)\d{2})", _t)
+        if _m:
+            _y = _m.group(1)
+            _t = _re_s.sub(r"\s*🗓\s*(?:19|20)\d{2}", "", _t).strip()
+        else:
+            _m2 = _re_s.search(r"\(((?:19|20)\d{2})\)\s*$", _t)
+            if _m2:
+                _y = _m2.group(1)
+                _t = _re_s.sub(r"\s*\((?:19|20)\d{2}\)\s*$", "", _t).strip()
+        return _t.strip().lower(), _y
+    except Exception:
+        return (norm or "").strip().lower(), ""
+
+
+def _hide_scan_union(scan_ids: list) -> tuple:
+    """{(title_lower, year): label} desde parseados de scans (topo1 OK).
+    Sin red: lectura directa de la DB del plugin tgindex. Devuelve
+    (unión, stale_labels)."""
+    union = {}
+    stale = set()
+    try:
+        from tvcat.plugins.tvcat_tgindex.scanner import get_plugin_db_path as _pdb
+        _db = _pdb()
+    except Exception:
         try:
-            _cid: object = int(str(channel_id))
+            _db = os.path.join(os.path.dirname(_PLUGIN_DIR), "tvcat_tgindex", "data", "tvcat.db")
         except Exception:
-            _cid = str(channel_id)
-        if getattr(wrapper, "_type", ctype) == "pyrogram":
-            from pyrogram.raw import functions as _rf
+            return union, stale
+    if not _db or not os.path.isfile(_db):
+        return union, stale
+    try:
+        import sqlite3 as _sq
+        _c = _sq.connect(f"file:{_db}?mode=ro", uri=True, timeout=10)
+        _c.row_factory = _sq.Row
+        _scans = {}
+        try:
+            from tvcat.services.catalog_service import get_conn as _gc
+            _g = _gc()
+            for _r in _g.execute(
+                "SELECT id, display_name, title, name, enabled, topology_type"
+                " FROM tvcat_scanned_channels").fetchall():
+                _d = dict(_r)
+                _nm = _d.get("display_name") or _d.get("title") or _d.get("name") or "?"
+                _scans["scan_%s" % _d.get("id")] = (_nm, bool(_d.get("enabled")),
+                                                   _d.get("topology_type"))
+            _g.close()
+        except Exception:
+            pass
+        for _sid in (scan_ids or []):
+            _sid = str(_sid or "").strip()
+            if not _sid:
+                continue
+            _nm, _en, _topo = _scans.get(_sid, (_sid, True, None))
+            _lbl = "%s%s" % (_nm, "" if _en else " (desactualizado?)")
+            if not _en:
+                stale.add(_lbl)
             try:
-                peer = await client.resolve_peer(_cid)
+                _rows = _c.execute(
+                    "SELECT title, year FROM unified_catalog WHERE source=?", (_sid,)).fetchall()
             except Exception:
-                peer = _cid
-            res = await client.invoke(_rf.messages.GetForumTopics(
-                peer=peer, offset_date=0, offset_id=0,
-                offset_topic=0, limit=1))
-            return int(getattr(res, "count", 0) or 0), None
-        from telethon.tl.functions.messages import GetForumTopicsRequest
-        entity = await client.get_entity(_cid)
-        peer = await client.get_input_entity(entity)
-        res = await client(GetForumTopicsRequest(
-            peer=peer, offset_date=0, offset_id=0, offset_topic=0, limit=1))
-        return int(getattr(res, "count", 0) or 0), None
+                continue
+            for _r in _rows:
+                try:
+                    _t = str((_r["title"] if "title" in _r.keys() else "") or "").strip().lower()
+                    _y = ""
+                    try:
+                        _y = str(_r["year"] or "").strip()
+                    except Exception:
+                        pass
+                    if _t and (_t, _y) not in union:
+                        union[(_t, _y)] = _lbl
+                except Exception:
+                    continue
+        _c.close()
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        print(f"[TGHirayi_v2] hide-uploaded: error leyendo scans: {e}", flush=True)
+    return union, stale
+
+
+def _hide_season_variant(item_id: str, base: str):
+    """Variante `"Title - Season N🗓Year"` para topics creados a mano con el
+    badge TitleSeason del enriquecedor. None si no hay temporada guardada."""
+    try:
+        if not base or not item_id:
+            return None
+        from tvcat.services.cover_override_registry import get_enriched_by_item_id as _gebi
+        _row = _gebi(str(item_id)) or {}
+        det = _row.get("enrich_details") or {}
+        if isinstance(det, str):
+            import json as _js
+            try:
+                det = _js.loads(det) or {}
+            except Exception:
+                det = {}
+        n = (det or {}).get("api_season_number")
+        if n is None:
+            return None
+        n = str(n).strip()
+        if not n:
+            return None
+        cal = base.find("🗓")
+        if cal >= 0:
+            return base[:cal] + " - Season " + n + base[cal:]
+        return base + " - Season " + n
+    except Exception:
+        return None
 
 
 @router.post("/api/telegram-copy-v2/hide-uploaded/check")
@@ -1191,7 +1323,20 @@ async def check_hide_uploaded(body: HideUploadedCheck, request: Request):
                     "topics_count": 0, "destinations_checked": 0,
                     "skipped_hidden": _skipped_hidden, "detail": []}
     # NOTA: el listado va por el servicio central; no se necesita cliente crudo.
-    # Mapa unión en minúsculas (clave lógica): {norm_lower: True}
+    # Unión de tuplas (título, año) en minúsculas: destinos (partiendo 🗓) +
+    # scans (título+año parseados). Estricto = año obligatorio en ambos lados.
+    try:
+        _strict = body.strict_year if body.strict_year is not None else bool(
+            _load_config().get("hide_strict_year", True))
+    except Exception:
+        _strict = True
+    if body.strict_year is not None:
+        try:
+            _cfg = _load_config()
+            _cfg["hide_strict_year"] = bool(body.strict_year)
+            _save_config(_cfg)
+        except Exception:
+            pass
     import time as _time2
     try:
         _ttl2 = max(5, min(1440, int(_load_config().get("topics_cache_ttl_min", 60) or 60)))
@@ -1216,50 +1361,43 @@ async def check_hide_uploaded(body: HideUploadedCheck, request: Request):
             _detail.append({"dest": _dname, "topics": 0, "cached": False, "error": True})
             continue
         if not _map:
-            # Sin topics (topo1/2 o grupo no-foro): se salta sin comparar.
-            # Si tampoco hay caché, sondar el error real (acceso/entidad/Flood).
-            _err = ""
-            _srv = None
-            try:
-                _ent0b = _TOPIC_CACHE.get(_topic_cache_key(_dest))
-                if not _ent0b or not _ent0b.get("map"):
-                    _srv, _err = await _probe_topics_count(str(_dest.get("channel_id") or ""))
-                    if _err is None and (_srv or 0) > 0:
-                        _err = f"listado vacío pero el servidor dice {_srv} (ver consola)"
-                    _err = _err or ""
-            except Exception:
-                _err = ""
-            _d = {"dest": _dname, "topics": 0, "cached": _was_cached}
-            if _srv is not None:
-                _d["server_count"] = _srv
-            if _err:
-                _d["error"] = _err
-            _detail.append(_d)
+            # Sin topics (topo1/2, grupo no-foro o listado fallido): se salta
+            # sin comparar. El motivo exacto queda en consola del servicio.
+            _detail.append({"dest": _dname, "topics": 0, "cached": _was_cached})
             continue
         _checked += 1
         _topics_total += len(_map)
         _dd = {"dest": _dname, "topics": len(_map), "cached": _was_cached}
-        # Conteo del servidor para mapas sospechosamente pequeños (<500):
-        # distingue "el canal tiene N" de "paginado truncado".
-        if len(_map) < 500:
-            try:
-                _srv2, _err2 = await _probe_topics_count(str(_dest.get("channel_id") or ""))
-                if _srv2 is not None:
-                    _dd["server_count"] = _srv2
-                if _err2:
-                    _dd["probe_error"] = _err2
-            except Exception:
-                pass
         _detail.append(_dd)
         print(f"[TGHirayi_v2] hide-uploaded: {_dname} -> {len(_map)} topics "
               f"({'cache' if _was_cached else 'completo'})", flush=True)
         for _tn in _map.keys():
             try:
-                _union[str(_tn or "").strip().lower()] = True
+                _raw = str(_tn or "").strip().lower()
+                _tt, _yy = _split_union_key(_raw)
+                if (_tt, _yy) not in _union:
+                    _union[(_tt, _yy)] = _dname
+                # Clave simple para modo no-estricto (comportamiento legacy).
+                if _raw and _raw not in _union:
+                    _union[_raw] = _dname
             except Exception:
                 continue
+    # Unión de orígenes (parseados, sin red).
+    _scans_checked = 0
+    _stale_lbls = set()
+    if body.scan_ids:
+        try:
+            _sunion, _stale_lbls = _hide_scan_union(body.scan_ids)
+            for _k, _lbl in _sunion.items():
+                if _k not in _union:
+                    _union[_k] = "origen:" + _lbl
+            _scans_checked = len(body.scan_ids)
+        except Exception as e:
+            print(f"[TGHirayi_v2] hide-uploaded: error unión scans: {e}", flush=True)
     _matched: list = []
     _titles: dict = {}
+    _via: dict = {}
+    _no_year = 0
     _in_queue: set = set()
     if body.include_queue:
         # Items en la cola (no terminales): encolados, procesando, pausados...
@@ -1291,15 +1429,46 @@ async def check_hide_uploaded(body: HideUploadedCheck, request: Request):
             )
             if not _cand:
                 continue
-            if _cand.strip().lower() in _union:
-                _matched.append(_it["item_id"])
+            _ct, _cy = _split_union_key(_cand.strip().lower())
+            if _strict:
+                if not _cy:
+                    _no_year += 1
+                    continue
+                if (_ct, _cy) in _union:
+                    _matched.append(_it["item_id"])
+                    _via[_it["item_id"]] = _union[(_ct, _cy)]
+                    continue
+            else:
+                if _cand.strip().lower() in _union or (_ct, _cy) in _union:
+                    _matched.append(_it["item_id"])
+                    _via[_it["item_id"]] = _union.get((_ct, _cy)) or _union.get(_cand.strip().lower()) or ""
+                    continue
+            # Variante con sufijo de temporada (topics manuales TitleSeason).
+            try:
+                _v = _hide_season_variant(_it.get("item_id") or "", _cand)
+                if not _v:
+                    continue
+                _vt, _vy = _split_union_key(_v.strip().lower())
+                if _strict:
+                    if _vy and (_vt, _vy) in _union:
+                        _matched.append(_it["item_id"])
+                        _via[_it["item_id"]] = _union[(_vt, _vy)]
+                elif _v.strip().lower() in _union or (_vt, _vy) in _union:
+                    _matched.append(_it["item_id"])
+                    _via[_it["item_id"]] = _union.get((_vt, _vy)) or _union.get(_v.strip().lower()) or ""
+            except Exception:
+                pass
         except Exception:
             continue
     _matched_queue = [i for i in _matched if i in _in_queue]
     return {"ok": True, "matched": _matched,
             "titles": {k: _titles[k] for k in _matched if k in _titles},
+            "matched_via": _via,
             "total_items": len(_items), "topics_count": _topics_total,
-            "destinations_checked": _checked, "skipped_hidden": _skipped_hidden,
+            "destinations_checked": _checked, "scans_checked": _scans_checked,
+            "stale_scans": sorted(list(_stale_lbls)),
+            "skipped_hidden": _skipped_hidden, "skipped_no_year": _no_year,
+            "strict_year": _strict,
             "matched_queue": _matched_queue, "queue_count": len(_in_queue),
             "detail": _detail}
 
@@ -3105,6 +3274,17 @@ async def _process_job(job: dict, db: dict):
             if not job.get("_cover_done") and ep_num == (first_pending or 1):
                 job["status_text"] = "Copiando cover..."
                 _persist_job(job)
+                # Sonda media del primer fichero (first-only) para los tags _*
+                # del cover. Sin fichero (copia Telegram) quedan vacíos.
+                # + sugerencia LLM de limpieza (una vez por job, default OFF).
+                try:
+                    await _ensure_job_media(job, media_data, client=client, episode=episode, source_channel_id=source_channel_id)
+                except Exception:
+                    pass
+                try:
+                    await _ensure_job_llm(job)
+                except Exception:
+                    pass
                 if int(source_msg_id) in (-999, -1000) or job.get("force_generic_cover"):
                     cover_messages = []  # genérico, no pedir a Telegram (ya en cache -3 / partido)
                     _cids = await _copy_cover_to_destinations(job, client, cover_messages, destinations, delay)
@@ -3248,7 +3428,7 @@ async def _process_job(job: dict, db: dict):
                             if first_real:
                                 job["status_text"] = f"Subiendo ep.{_disp_ep(ep_num)} a {dest.get('name','?')}..."
                                 _persist_job(job)
-                                sent_ids = await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job)
+                                sent_ids = await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job, ep_num=ep_num, season_num=(episode.get("season_number") if isinstance(episode, dict) else None))
                             elif use_forward:
                                 # OPCIÓN OCULTA: forward directo aunque el origen sea de terceros.
                                 # Sin descarga ni subida. Si falla (NoForwards/sin acceso) → fallback
@@ -3264,7 +3444,7 @@ async def _process_job(job: dict, db: dict):
                                     media_data = await _download_episode_media(client, episode, source_channel_id, _progress,
                                                                                 normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
                                                                                 streaming_mkv=streaming_mkv, job=job)
-                                    sent_ids = await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job)
+                                sent_ids = await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job, ep_num=ep_num, season_num=(episode.get("season_number") if isinstance(episode, dict) else None))
                             else:
                                 job["status_text"] = f"Copiando (telegram) ep.{_disp_ep(ep_num)} a {dest.get('name','?')}..."
                                 _persist_job(job)
@@ -3274,7 +3454,7 @@ async def _process_job(job: dict, db: dict):
                             # Resto: copia REAL desde el media descargado del origen (cada destino su file_id)
                             job["status_text"] = f"Subiendo ep.{_disp_ep(ep_num)} a {dest.get('name','?')}..."
                             _persist_job(job)
-                            await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job)
+                            await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job, ep_num=ep_num, season_num=(episode.get("season_number") if isinstance(episode, dict) else None))
                         else:
                             # Resto: copia telegram desde el primer destino (sin re-subir).
                             # F5: si dest-0 fue omitido y su topic no dio msg_ids (vacío),
@@ -4367,9 +4547,9 @@ def _resolve_cover_override(job) -> Optional[str]:
     Un cover_text explícito (editado por el usuario) siempre manda si lo hay."""
     stored = (job.get("cover_text") or "").strip()
     if stored:
-        if "{f" in stored:
+        if "{f" in stored or "{_" in stored:
             cover_episodes = _job_episode_count(job)
-            return _resolve_cover_tags(stored, job.get("title", ""), cover_episodes, job.get("enrich_details") or {})
+            return _resolve_cover_tags(stored, job.get("title", ""), cover_episodes, job.get("enrich_details") or {}, media=job.get("_media_info"))
         return stored
     # Sin cover_text: solo usar plantilla default si vino del enriquecedor
     if not job.get("enrich_details"):
@@ -4378,7 +4558,7 @@ def _resolve_cover_override(job) -> Optional[str]:
     if not dtpl:
         return None
     cover_episodes = _job_episode_count(job)
-    return _resolve_cover_tags(dtpl, job.get("title", ""), cover_episodes, job.get("enrich_details") or {})
+    return _resolve_cover_tags(dtpl, job.get("title", ""), cover_episodes, job.get("enrich_details") or {}, media=job.get("_media_info"))
 
 
 def _download_poster_bytes_sync(url, timeout=25):
@@ -4417,7 +4597,7 @@ def _title_year_from_cover_tags(text):
                 if _v and len(_v) >= 2 and "{" not in _v and "}" not in _v and not _orig:
                     _orig = _v[:200]
                 continue
-            _m2 = _re_t.match(r"(?i)^(year|a[ñn]o)\s*[:=\-]?\s*(\d{4})", _l)
+            _m2 = _re_t.match(r"(?i)^(year|a[ñn]o|anno|release)\s*[:=\-]?\s*(\d{4})", _l)
             if _m2 and not _yr:
                 _yr = _m2.group(2)
                 continue
@@ -4620,7 +4800,7 @@ async def _copy_cover_to_destinations(job, client, cover_messages, destinations,
                     dtpl = _default_cover_template(job.get("category", ""), job.get("subcategory", ""))
                     if dtpl and job.get("enrich_details"):
                         ep_cnt = _job_episode_count(job)
-                        cover_override = _resolve_cover_tags(dtpl, job.get("title", ""), ep_cnt, job.get("enrich_details") or {})
+                        cover_override = _resolve_cover_tags(dtpl, job.get("title", ""), ep_cnt, job.get("enrich_details") or {}, media=job.get("_media_info"))
                     else:
                         cover_override = (job.get("title") or "").strip()
                 except Exception:
@@ -5284,7 +5464,7 @@ async def _archive_upload_phase(job, client, pyro_client, destinations, delay,
                     {"caption": fname, "title": fname, "episode_title": fname},
                     [media_entry], dest, topic_id, delay,
                     progress_callback=_archive_progress_cb(job, v_idx, total_videos, total_dest),
-                    job=job,
+                    job=job, ep_num=v_idx, season_num=1,
                 )
                 await asyncio.sleep(delay)
             # El cover queda confirmado SOLO después de subir con éxito el primer vídeo.
@@ -6315,7 +6495,477 @@ def _sanitize_file_title(file_name: str) -> tuple:
     return (name, ext)
 
 
-def _resolve_cover_tags(text: str, title: str, total_episodes: int, details: dict = None) -> str:
+_DEFAULT_CLEAN_TERMS = [
+    "@Compartir",
+    "@La_Comunidad",
+    "[ReyBrena]",
+    "DVDRip.By.FreAk.TEAm",
+    "DVDRIP_Xvid",
+    "by_dual34",
+    "WEB_DL_",
+]
+
+
+def _load_clean_terms() -> list:
+    """Diccionario de banned terms (config `clean_terms`, uno por línea en UI).
+    Vacío + primera vez => semilla con los defaults (se persisten)."""
+    try:
+        cfg = _load_config()
+        terms = [str(t) for t in (cfg.get("clean_terms") or []) if str(t or "").strip()]
+        if not terms and "clean_terms" not in cfg:
+            cfg["clean_terms"] = list(_DEFAULT_CLEAN_TERMS)
+            try:
+                _save_config(cfg)
+            except Exception:
+                pass
+            terms = list(_DEFAULT_CLEAN_TERMS)
+        return terms
+    except Exception:
+        return []
+
+
+def _match_clean_term(name: str, term: str):
+    """(pos, len) de coincidencia LITERAL. `!` inicial = case sensitive;
+    `!!` = `!` literal + sensitive. Resto = insensitive."""
+    try:
+        t = str(term or "")
+        if not t:
+            return None
+        sensitive = False
+        if t.startswith("!!"):
+            t = t[1:]
+            sensitive = True
+        elif t.startswith("!"):
+            t = t[1:]
+            sensitive = True
+        if not t:
+            return None
+        hay = str(name or "")
+        i = hay.find(t) if sensitive else hay.lower().find(t.lower())
+        if i < 0:
+            return None
+        return (i, len(t))
+    except Exception:
+        return None
+
+
+def _cleanup_separators(stem: str) -> str:
+    try:
+        import re as _re_c
+        s = _re_c.sub(r"[ _.\-]{2,}", lambda m: m.group(0)[0], stem or "")
+        return s.strip(" _.-")
+    except Exception:
+        return (stem or "").strip()
+
+
+def clean_filename(name: str, title: str = "", season_n=None, ep_n=None) -> str:
+    """Limpia banned terms del nombre (solo rename al subir; origen intacto).
+    Si queda vacío → `{Título} S01E02{ext}` (pelis sin S/E → título+ext)."""
+    import re as _re_e
+    orig = str(name or "")
+    m = _re_e.match(r"^(.*)(\.[A-Za-z0-9]{2,5})$", orig)
+    stem, ext = (m.group(1), m.group(2)) if m else (orig, "")
+    try:
+        if _load_config().get("clean_filenames", True):
+            for term in _load_clean_terms():
+                hit = _match_clean_term(stem, term)
+                if hit:
+                    i, ln = hit
+                    stem = (stem[:i] + stem[i + ln:])
+            stem = _cleanup_separators(stem)
+    except Exception:
+        pass
+    if not stem:
+        try:
+            _t = _re_e.sub(r'[\\/:*?"<>|]', "", str(title or "").strip()).strip()
+        except Exception:
+            _t = ""
+        if not _t:
+            _t = "file"
+        try:
+            _s, _e = int(season_n or 1), int(ep_n or 0)
+        except Exception:
+            _s, _e = 1, 0
+        stem = f"{_t} S{_s:02d}E{_e:02d}" if _e else _t
+    return stem + ext
+
+
+_MOOV_HEAD_BYTES = 5 * 1024 * 1024
+
+
+def _has_moov_head(data: bytes) -> bool:
+    """¿El head trae cabeceras útiles? MKV (EBML) y AVI (RIFF) sí; MP4 solo si
+    el box `moov` está dentro (faststart). Moov-al-final → False (limitación)."""
+    try:
+        if not data or len(data) < 12:
+            return False
+        if data[:4] == b"\x1aE\xdf\xa3" or data[:4] == b"RIFF":
+            return True
+        import struct as _st
+        off, n = 0, len(data)
+        while off + 8 <= n:
+            (sz,) = _st.unpack(">I", data[off:off + 4])
+            if data[off + 4:off + 8] == b"moov":
+                return True
+            if sz == 1:
+                if off + 16 > n:
+                    break
+                sz = _st.unpack(">Q", data[off + 8:off + 16])[0]
+            if sz == 0 or sz < 8:
+                break
+            off += sz
+            if off > _MOOV_HEAD_BYTES:
+                break
+        return False
+    except Exception:
+        return False
+
+
+async def _probe_moov_head(client, episode: dict, source_channel_id) -> dict:
+    """Descarga mínima (head 5MB) del episodio vía file_transfer.download_range
+    y la sondea con ffprobe. Pool prestado (sin conexión nueva). Solo vídeo."""
+    try:
+        if client is None or not isinstance(episode, dict):
+            return {}
+        fn = str(episode.get("file_name") or episode.get("title") or "")
+        if not _is_video_file(fn):
+            return {}
+        chat_id = _extract_channel_id(episode.get("telegram_link", "")) or source_channel_id
+        msg_id = episode.get("telegram_msg_id") or episode.get("msg_id")
+        if not chat_id or not msg_id:
+            return {}
+        try:
+            from tvcat.services import file_transfer as _ft
+        except Exception:
+            try:
+                from services import file_transfer as _ft
+            except Exception:
+                return {}
+        head = await _ft.download_range(client, int(chat_id), int(msg_id), 0, _MOOV_HEAD_BYTES)
+        if not head or not _has_moov_head(head):
+            return {}
+        import tempfile as _tf2
+        fd, tmp = _tf2.mkstemp(suffix="_moov" + os.path.splitext(fn)[1].lower())
+        try:
+            os.write(fd, bytes(head))
+        finally:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        try:
+            from tvcat.services.media_probe import probe_file as _probe
+        except Exception:
+            try:
+                from services.media_probe import probe_file as _probe
+            except Exception:
+                _probe = None
+        try:
+            return (_probe(tmp) or {}) if _probe else {}
+        finally:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[TGHirayi_v2] moov probe error: {e}", flush=True)
+        return {}
+
+
+_LLM_MIN_GAP_S = 20
+_llm_last_ts = 0.0
+
+_LLM_RENAMES_PROMPT = (
+    "Eres un limpiador de nombres de fichero de series y peliculas.\n"
+    "Recibiras una lista JSON de nombres. Devuelve SOLO JSON valido, sin texto "
+    "extra: {\"renames\": {\"original\": \"limpio\", ...}}.\n"
+    "Elimina SOLO tokens de release-group, marketing y webs (@X, [Grupo], "
+    "by_alguien, DVDRip.By.Grupo, WEB_DL_, etc). NUNCA toques: titulo, "
+    "temporada/episodio (S01E02, 1x02...), idioma, calidad (1080p), codec "
+    "(x264), anio ni extension. Si un nombre ya esta limpio, devuelvelo igual.\n"
+    "Nombres: "
+)
+
+_LLM_TERMS_PROMPT = (
+    "Analiza estos nombres de fichero de series/peliculas y extrae tokens "
+    "ELIMINABLES (release-group, marketing, webs, tags de ripeo redundantes).\n"
+    "Devuelve SOLO JSON valido, sin texto extra: {\"terms\": [\"...\", ...]}.\n"
+    "PROHIBIDO proponer: titulo, temporada/episodio, idioma, calidad, codec, "
+    "anio, extensiones o palabras comunes del titulo. Sin duplicados.\n"
+    "Nombres: "
+)
+
+
+async def _llm_ask(prompt: str, timeout: int = 60):
+    """Una llamada IA con guardia de ritmo (≥20s entre llamadas) y fail-open.
+    Devuelve texto o None."""
+    global _llm_last_ts
+    try:
+        import time as _t
+        import asyncio as _aio
+        if _t.time() - _llm_last_ts < _LLM_MIN_GAP_S:
+            print("[TGHirayi_v2] LLM omitido por ritmo (<20s)", flush=True)
+            return None
+        try:
+            from tvcat.services import ai_service as _ai
+        except Exception:
+            from services import ai_service as _ai
+        _llm_last_ts = _t.time()
+        res = await _aio.to_thread(_ai.complete, prompt, 2000, timeout)
+        if not isinstance(res, dict) or not res.get("ok"):
+            print(f"[TGHirayi_v2] LLM fallo: {(res or {}).get('error', '?')}", flush=True)
+            return None
+        return res.get("text") or ""
+    except Exception as e:
+        print(f"[TGHirayi_v2] LLM error: {e}", flush=True)
+        return None
+
+
+def _llm_parse_json(text: str) -> dict:
+    try:
+        import json as _js
+        t = (text or "").strip()
+        if not t:
+            return {}
+        try:
+            d = _js.loads(t)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            i, j = t.find("{"), t.rfind("}")
+            if i >= 0 and j > i:
+                d = _js.loads(t[i:j + 1])
+                return d if isinstance(d, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _llm_sanitize_name(name: str, fallback_ext: str = "") -> str:
+    try:
+        import re as _re_s
+        n = str(name or "").strip().replace("\\", "/").split("/")[-1].strip()
+        n = _re_s.sub(r"\s+", " ", n)
+        if len(n) > 180:
+            return ""
+        if not _re_s.search(r"\.[A-Za-z0-9]{2,5}$", n):
+            if fallback_ext:
+                n = n + fallback_ext
+            else:
+                return ""
+        if _re_s.search(r'[<>:"|?*\x00-\x1f]', n):
+            return ""
+        return n
+    except Exception:
+        return ""
+
+
+async def _ensure_job_llm(job: dict) -> dict:
+    """Sugerencia LLM de nombres limpios (una vez por job, default OFF).
+    Guarda en `job._llm_names` {original: sugerido}. Fail-open total."""
+    try:
+        if not isinstance(job, dict):
+            return {}
+        if job.get("_llm_done"):
+            return job.get("_llm_names") or {}
+        if not _load_config().get("llm_clean"):
+            job["_llm_done"] = True
+            return {}
+        names: list = []
+        try:
+            for e in (_fetch_episodes_sync(job.get("item_id", "")) or [])[:100]:
+                fn = str((e or {}).get("file_name") or "").strip()
+                if fn and fn not in names:
+                    names.append(fn)
+        except Exception:
+            names = []
+        if not names:
+            job["_llm_done"] = True
+            return {}
+        import json as _js2
+        text = await _llm_ask(_LLM_RENAMES_PROMPT + _js2.dumps(names, ensure_ascii=False))
+        mapping: dict = {}
+        if text:
+            for orig, sug in ((_llm_parse_json(text) or {}).get("renames") or {}).items():
+                try:
+                    o = str(orig or "")
+                    if o not in names:
+                        continue
+                    import os as _os2
+                    ext = _os2.path.splitext(o)[1]
+                    s = _llm_sanitize_name(sug, ext)
+                    if s and s != o:
+                        mapping[o] = s
+                except Exception:
+                    continue
+        job["_llm_names"] = mapping
+        job["_llm_done"] = True
+        try:
+            _persist_job(job)
+        except Exception:
+            pass
+        print(f"[TGHirayi_v2] LLM limpieza: {len(mapping)}/{len(names)} sugeridos job={job.get('id')}", flush=True)
+        return mapping
+    except Exception as e:
+        print(f"[TGHirayi_v2] LLM job error: {e}", flush=True)
+        return {}
+
+
+class CleanAnalyzeReq(BaseModel):
+    sample: int = 300
+    group: int = 50
+
+
+@router.post("/api/telegram-copy-v2/clean/analyze")
+async def analyze_clean_patterns(body: CleanAnalyzeReq, request: Request):
+    """Analiza filenames con IA por títulos (grupos): devuelve candidatos a
+    banned terms con conteos. Solo sugiere; el usuario añade al diccionario."""
+    session = _session_user(request)
+    if not session or session["role"] != "admin":
+        raise HTTPException(403, "Solo admin")
+    import sqlite3 as _sq3
+    try:
+        from tvcat.services.userbot_service import DB_PATH as _CDB
+    except Exception:
+        from services.userbot_service import DB_PATH as _CDB
+    sample = max(20, min(2000, int(body.sample or 300)))
+    per = max(10, min(100, int(body.group or 50)))
+    groups: list = []
+    try:
+        _conn = _sq3.connect(_CDB)
+        _conn.row_factory = _sq3.Row
+        _rows = _conn.execute(
+            "SELECT item_id, file_name FROM item_episodes "
+            "WHERE file_name IS NOT NULL AND file_name<>'' LIMIT ?", (sample * 3,)).fetchall()
+        _conn.close()
+        _by_item: dict = {}
+        for _r in _rows:
+            try:
+                _iid = str(_r["item_id"] or "")
+                _fn = str(_r["file_name"] or "").strip()
+                if _iid and _fn:
+                    _by_item.setdefault(_iid, [])
+                    if _fn not in _by_item[_iid] and len(_by_item[_iid]) < per:
+                        _by_item[_iid].append(_fn)
+            except Exception:
+                continue
+        _total = 0
+        for _iid, _names in _by_item.items():
+            if _total >= sample or len(groups) >= 12:
+                break
+            if _names:
+                groups.append(_names)
+                _total += len(_names)
+    except Exception as e:
+        raise HTTPException(500, f"No se pudo muestrear: {e}")
+    if not groups:
+        return {"ok": True, "candidates": [], "calls": 0, "titles": 0}
+    import json as _js3
+    from collections import Counter
+    _cnt: Counter = Counter()
+    _ex: dict = {}
+    _calls = 0
+    for _g in groups:
+        _text = await _llm_ask(_LLM_TERMS_PROMPT + _js3.dumps(_g, ensure_ascii=False))
+        _calls += 1
+        if not _text:
+            continue
+        for _t in ((_llm_parse_json(_text) or {}).get("terms") or []):
+            try:
+                _t = str(_t or "").strip()
+                if not _t or len(_t) > 60:
+                    continue
+                _cnt[_t] += 1
+                _ex.setdefault(_t, _g[0] if _g else "")
+            except Exception:
+                continue
+    cands = [{"term": t, "count": c, "example": _ex.get(t, "")}
+             for t, c in _cnt.most_common() if c >= 2 or sum(_cnt.values()) < 5]
+    cands.sort(key=lambda d: (-d["count"], d["term"].lower()))
+    return {"ok": True, "candidates": cands[:100], "calls": _calls, "titles": len(groups)}
+
+
+async def _ensure_job_media(job: dict, media_data: list, client=None, episode: dict = None, source_channel_id=None) -> dict:
+    """Sonda ffprobe del primer vídeo (first-only, una vez por job):
+    1) fichero real en disco/datos (flujo con descarga), 2) head moov mínimo
+    (copia-Telegram con `media_probe` ON). Guarda en `job._media_info`
+    (+ `files` = vídeos en scope). Sin nada → {} (tags `_*` se omiten)."""
+    try:
+        if not isinstance(job, dict):
+            return {}
+        if job.get("_media_probed"):
+            return job.get("_media_info") or {}
+        if not _load_config().get("media_probe"):
+            job["_media_probed"] = True
+            return {}
+        path, _tmp = "", ""
+        for md in (media_data or []):
+            if not isinstance(md, dict):
+                continue
+            fn = str(md.get("file_name") or "")
+            if not (_is_video_file(fn) or md.get("width") or md.get("height")):
+                continue
+            p = md.get("file_path") or ""
+            if p and os.path.isfile(p):
+                path = p
+                break
+            data = md.get("data") or b""
+            if data:
+                import tempfile as _tf
+                fd, tmp = _tf.mkstemp(suffix="_" + os.path.basename(fn or "media"))
+                try:
+                    os.write(fd, bytes(data))
+                finally:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+                path, _tmp = tmp, tmp
+                break
+        info: dict = {}
+        if path:
+            _probe = None
+            try:
+                from tvcat.services.media_probe import probe_file as _probe
+            except Exception:
+                try:
+                    from services.media_probe import probe_file as _probe
+                except Exception:
+                    _probe = None
+            if _probe:
+                info = _probe(path) or {}
+            if _tmp:
+                try:
+                    os.remove(_tmp)
+                except Exception:
+                    pass
+        if not info and client is not None and episode is not None:
+            # Sin fichero local (copia Telegram): head moov mínimo.
+            try:
+                info = await _probe_moov_head(client, episode, source_channel_id) or {}
+                if info:
+                    print(f"[TGHirayi_v2] moov probe OK job={job.get('id')}", flush=True)
+            except Exception:
+                pass
+        try:
+            info["files"] = str(int(_job_episode_count(job) or 0))
+        except Exception:
+            pass
+        job["_media_info"] = info
+        job["_media_probed"] = True
+        try:
+            _persist_job(job)
+        except Exception:
+            pass
+        if info.get("resolution"):
+            print(f"[TGHirayi_v2] media probe: {info.get('resolution')} "
+                  f"{info.get('vcodec','?')} job={job.get('id')}", flush=True)
+        return info
+    except Exception as e:
+        print(f"[TGHirayi_v2] media probe error: {e}", flush=True)
+        return {}
+
+
+def _resolve_cover_tags(text: str, title: str, total_episodes: int, details: dict = None, media: dict = None) -> str:
     """Resuelve los tags del texto del cover.
 
     Motor unificado CORE (services/enrich_tags): customs + base con
@@ -6328,7 +6978,7 @@ def _resolve_cover_tags(text: str, title: str, total_episodes: int, details: dic
         from services.enrich_tags import resolve_cover as _rc
     except Exception:
         from tvcat.services.enrich_tags import resolve_cover as _rc
-    return _rc(text, title or "", total_episodes or 0, details or {})
+    return _rc(text, title or "", total_episodes or 0, details or {}, media=media)
 
 
 _SIMPLE_TAG_NAMES = (
@@ -6339,7 +6989,10 @@ _SIMPLE_TAG_NAMES = (
     "genres", "generos", "themes", "temas", "author", "autor", "director",
     "directores", "release_date", "fecha", "category", "categoria", "id", "cover",
     "description", "sinopsis", "overview", "episodes", "season", "temporada",
-    "season_episodes", "ext", "extension",
+    "season_episodes", "ext", "extension", "_resolution", "_resolutionx",
+    "_resolutiony", "_vcodec", "_fps", "_acodec", "_audiotracks",
+    "_fullaudiotracks", "_subtitles", "_container", "_extension", "_duration",
+    "_durationm", "_bitrate", "_filesize", "_aspectratio", "_quality", "_files",
 )
 
 
@@ -7197,7 +7850,7 @@ def _upload_name_for(fname, mime, w, h, tmp_path, msg_id):
     return name, False
 
 
-async def _upload_episode_to_destination(client, pyro_client, episode: dict, media_data: list, dest: dict, topic_id, delay: float, progress_callback=None, job: dict = None) -> List[int]:
+async def _upload_episode_to_destination(client, pyro_client, episode: dict, media_data: list, dest: dict, topic_id, delay: float, progress_callback=None, job: dict = None, ep_num: int = None, season_num: int = None) -> List[int]:
     """Sube un episodio (texto + ficheros) a un destino.
     F3: si hay sesión Pyrofork, subida rápida directa desde disco (cualquier tamaño).
     Telethon: >10MB con upload paralelo (upload_threads) y block size (part_size_kb, máx 512KB).
@@ -7270,6 +7923,29 @@ async def _upload_episode_to_destination(client, pyro_client, episode: dict, med
                     _raw_fname, md.get("mime_type"),
                     md.get("width"), md.get("height"), tmp_name,
                     episode.get("telegram_msg_id") or episode.get("msg_id"))
+                # Limpiador de filenames (rename al subir; origen intacto).
+                try:
+                    _se = season_num
+                    if _se is None and isinstance(episode, dict):
+                        _se = episode.get("season_number") or 1
+                    _cf = clean_filename(
+                        fname,
+                        title=((job.get("title") if isinstance(job, dict) else "") or episode.get("title") or ""),
+                        season_n=_se, ep_n=ep_num)
+                    if _cf and _cf != fname:
+                        print(f"[TGHirayi_v2] clean filename: '{fname}' -> '{_cf}'", flush=True)
+                        fname = _cf
+                except Exception:
+                    pass
+                # Sugerencia LLM (una vez por job): override con el nombre sugerido.
+                try:
+                    _lm = (job.get("_llm_names") or {}) if isinstance(job, dict) else {}
+                    _sug = _lm.get(_raw_fname) or _lm.get(fname)
+                    if _sug and _sug != fname:
+                        print(f"[TGHirayi_v2] llm filename: '{fname}' -> '{_sug}'", flush=True)
+                        fname = _sug
+                except Exception:
+                    pass
                 try:
                     # v2: subida centralizada (servicio core) con selección POR
                     # EPISODIO: preferido primero, fallback al otro; si el

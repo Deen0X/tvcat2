@@ -132,6 +132,7 @@ def _load_cfg() -> dict:
         "index_topic": "TVCat-Index",
         "exclude_topics": ["General", "charla"],
         "noletras_mode": "separado",
+        "unify_case": True,
         "norm_capital_first": False,
         "norm_capital_words": False,
         "norm_keep_upper": True,
@@ -168,6 +169,7 @@ class ConfigUpdate(BaseModel):
     index_topic: Optional[str] = None
     exclude_topics: Optional[List[str]] = None
     noletras_mode: Optional[str] = None
+    unify_case: Optional[bool] = None
     norm_capital_first: Optional[bool] = None
     norm_capital_words: Optional[bool] = None
     norm_keep_upper: Optional[bool] = None
@@ -419,6 +421,8 @@ def _letter_key(title: str, cfg: dict) -> str:
     ch = t[0]
     if cfg.get("noletras_mode") == "hash" and not ch.isalpha():
         return "#"
+    if cfg.get("unify_case", True) and ch.isalpha():
+        return ch.upper()
     return ch
 
 
@@ -444,7 +448,11 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
     usable = [t for t in (topics or [])
               if str(t.get("title") or "").strip().lower() not in excl]
     # Orden alfabético por título mostrado en crudo + global_index.
-    usable.sort(key=lambda t: str(t.get("title") or ""))
+    # Con unify_case, sin importar mayúsculas (casefold).
+    if cfg.get("unify_case", True):
+        usable.sort(key=lambda t: str(t.get("title") or "").casefold())
+    else:
+        usable.sort(key=lambda t: str(t.get("title") or ""))
     for gi, t in enumerate(usable, 1):
         t["_gi"] = gi
     # Grupos por letra (primer carácter verbatim).
@@ -512,8 +520,9 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
             rendered = []
             for i, t in enumerate(groups[lk], 1):
                 rendered.append(_render_entry(entries_tpl_use, t, i))
-            # Cabecera de letra: inner hasta el bloque + total (sin duplicar).
-            head = head_src.rstrip("\n")
+            # Cabecera de letra tal cual (sin recortar ni añadir saltos: la
+            # plantilla controla el blanco).
+            head = head_src
             head = head.replace("{letter}", lk).replace("{total}", str(len(groups[lk])))
             for k, v in _ctx_global().items():
                 head = head.replace("{entries}", "").replace("{%s}" % k, v)
@@ -529,7 +538,7 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
             suffix = suffix.replace("{entries}", "").replace("{%s}" % k, v)
         out = []
         for lk, h, r in chunks:
-            out.append((lk, prefix + h + ("\n" if h and r else "") + "\n".join(r) + suffix))
+            out.append((lk, prefix + h + "".join(r) + suffix))
         return out
 
     # Plantilla de entrada: {entries}...{/entries} a nivel de cuerpo.
@@ -556,9 +565,9 @@ def build_parts(channel_id: str, topics: list, cfg: dict, header: str = None,
             for i, t in enumerate(groups[lk], 1):
                 rendered_all.append(_render_entry(entries_tpl, t, i))
         if bem_start is not None:
-            core = (body[:bem_start] + "\n".join(rendered_all) + body[bem_end:]).replace("{entries}", "")
+            core = (body[:bem_start] + "".join(rendered_all) + body[bem_end:]).replace("{entries}", "")
         else:
-            core = body + ("\n" if body and not body.endswith("\n") else "") + "\n".join(rendered_all)
+            core = body + "".join(rendered_all)
         for k, v in _ctx_global().items():
             core = core.replace("{%s}" % k, v)
         letter_chunks = [(None, core)]
@@ -687,12 +696,58 @@ class PreviewReq(BaseModel):
     channel_id: str = ""
     header: Optional[str] = None
     body: Optional[str] = None
+    tg_user_id: Optional[int] = None  # cuenta Telegram a usar (si no, la activa)
 
 
 class GenerateReq(BaseModel):
     channel_id: str = ""
     header: Optional[str] = None
     body: Optional[str] = None
+    tg_user_id: Optional[int] = None  # cuenta Telegram a usar (si no, la activa)
+
+
+def _my_accounts() -> list:
+    """Userbots disponibles [{tg_user_id, name, client_type, is_active}]."""
+    out = []
+    try:
+        import services.userbot_service as _ubs
+    except Exception:
+        try:
+            import tvcat.services.userbot_service as _ubs
+        except Exception:
+            return out
+    try:
+        for r in (_ubs.list_sessions() or []):
+            try:
+                tid = r.get("tg_user_id")
+                if not tid:
+                    continue
+                out.append({"tg_user_id": int(tid),
+                            "name": r.get("name") or "",
+                            "client_type": r.get("client_type") or "telethon",
+                            "is_active": int(r.get("is_active") or 0)})
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+@router.get("/api/indexator/accounts")
+async def list_accounts(request: Request):
+    """Cuentas Telegram seleccionables para operar sobre el canal."""
+    _require_user(request)
+    return {"accounts": _my_accounts()}
+
+
+def _preferred_ctype():
+    """Cliente configurado globalmente (pyro/telethon). Todo el flujo del
+    indexator lo usa: pedir telethon a piñón rompe instancias solo-pyro."""
+    try:
+        from tvcat.services.userbot_service import get_preferred_client_type
+        return get_preferred_client_type() or "telethon"
+    except Exception:
+        return "telethon"
 
 
 @router.post("/api/indexator/preview")
@@ -702,11 +757,18 @@ async def preview_index(request: Request, body: PreviewReq):
         raise HTTPException(400, "channel_id requerido")
     cfg = _load_cfg()
     try:
+        tuid = int(body.tg_user_id) if body.tg_user_id else None
+    except Exception:
+        tuid = None
+    ctype = _preferred_ctype()
+    try:
         from services.telegram_service import get_telegram_service
         svc = get_telegram_service()
-        items = await svc.list_forum_topics(str(body.channel_id))
+        items = await svc.list_forum_topics(str(body.channel_id), tg_user_id=tuid, client_type=ctype)
     except Exception as e:
         raise HTTPException(502, f"No se pudieron listar topics: {e}")
+    if items is None:
+        raise HTTPException(502, f"No se pudieron listar topics (cuenta {tuid or 'auto'}; mira la consola: [TELEGRAM SERVICE] Error en tarea list_topics)")
     topics = [{"id": int(t.get("id")), "title": t.get("title") or ""}
               for t in (items or []) if t.get("id")]
     res = build_parts(str(body.channel_id), topics, cfg,
@@ -728,11 +790,18 @@ async def generate_index(request: Request, body: GenerateReq):
         raise HTTPException(400, "channel_id requerido")
     cfg = _load_cfg()
     try:
+        tuid = int(body.tg_user_id) if body.tg_user_id else None
+    except Exception:
+        tuid = None
+    ctype = _preferred_ctype()
+    try:
         from services.telegram_service import get_telegram_service
         svc = get_telegram_service()
-        items = await svc.list_forum_topics(str(body.channel_id))
+        items = await svc.list_forum_topics(str(body.channel_id), tg_user_id=tuid, client_type=ctype)
     except Exception as e:
         raise HTTPException(502, f"No se pudieron listar topics: {e}")
+    if items is None:
+        raise HTTPException(502, f"No se pudieron listar topics (cuenta {tuid or 'auto'}; mira la consola: [TELEGRAM SERVICE] Error en tarea list_topics)")
     topics = [{"id": int(t.get("id")), "title": t.get("title") or ""}
               for t in (items or []) if t.get("id")]
     res = build_parts(str(body.channel_id), topics, cfg,
@@ -747,24 +816,24 @@ async def generate_index(request: Request, body: GenerateReq):
             break
     try:
         if idx_id is None:
-            idx_id = await svc.create_forum_topic(str(body.channel_id), idx_name)
+            idx_id = await svc.create_forum_topic(str(body.channel_id), idx_name, tg_user_id=tuid, client_type=ctype)
             idx_id = int(idx_id) if idx_id else None
             created = True
     except Exception as e:
         raise HTTPException(502, f"No se pudo crear el topic índice: {e}")
     if not idx_id:
-        raise HTTPException(502, "Sin topic índice (¿permisos?)")
+        raise HTTPException(502, "Sin topic índice (¿la cuenta es admin del canal?)")
     # Vaciar solo si el topic ya existía: recién creado está vacío y el
     # servicio no confirma el vaciado sobre un topic sin historial.
     if not created:
         try:
-            await _clear_topic(svc, str(body.channel_id), int(idx_id))
+            await _clear_topic(svc, str(body.channel_id), int(idx_id), tg_user_id=tuid)
         except Exception as e:
             # DeleteTopicHistory falla también sobre topics VACÍOS (Telegram
             # devuelve error y el worker resuelve None). Verificar contenido
             # antes de abortar: vacío -> seguir; con mensajes -> error real.
             try:
-                _has = await _topic_has_messages(str(body.channel_id), int(idx_id))
+                _has = await _topic_has_messages(str(body.channel_id), int(idx_id), tg_user_id=tuid)
             except Exception:
                 _has = True
             if _has:
@@ -774,7 +843,7 @@ async def generate_index(request: Request, body: GenerateReq):
     posted = []
     try:
         for p in res["parts"]:
-            mid = await _post_part(svc, str(body.channel_id), int(idx_id), p)
+            mid = await _post_part(svc, str(body.channel_id), int(idx_id), p, tg_user_id=tuid, client_type=ctype)
             posted.append(mid)
     except Exception as e:
         raise HTTPException(502, f"Fallo posteando (subidas {len(posted)}): {e}")
@@ -782,7 +851,7 @@ async def generate_index(request: Request, body: GenerateReq):
             "parts": len(res["parts"]), "total_all": res["total_all"]}
 
 
-async def _clear_topic(svc, channel_id: str, topic_id: int):
+async def _clear_topic(svc, channel_id: str, topic_id: int, tg_user_id=None):
     """Vacía un topic vía servicio central (con throttle y cliente único).
     Nunca toca otros topics; el contenedor lo preserva la API."""
     try:
@@ -791,36 +860,32 @@ async def _clear_topic(svc, channel_id: str, topic_id: int):
     except Exception:
         ctype = "telethon"
     ok = await svc.delete_topic_history(str(channel_id), int(topic_id),
-                                        client_type=ctype)
+                                        tg_user_id=tg_user_id, client_type=ctype)
     if not ok:
         raise RuntimeError("El servicio no confirmó el vaciado")
 
 
-async def _topic_has_messages(channel_id: str, topic_id: int) -> bool:
-    """Sonda: ¿el topic tiene mensajes de contenido? Lee como máximo 2
-    mensajes del topic vía el pool (sin desconectar, es compartido).
-    Fail-safe: ante cualquier duda devuelve True (se asume con contenido)."""
+async def _topic_has_messages(channel_id: str, topic_id: int, tg_user_id=None) -> bool:
+    """Sonda vía servicio central (cliente configurado, telethon o pyrogram).
+    Fail-safe: ante cualquier duda (None/excepción) devuelve True, se asume
+    con contenido y el vaciado da error en vez de duplicar el índice."""
     try:
-        from tvcat.services.userbot_service import get_active_client
-        wrapper = await get_active_client("telethon")
-        client = getattr(wrapper, "_client", wrapper)
-        if not client:
+        try:
+            tuid = int(tg_user_id) if tg_user_id else None
+        except Exception:
+            tuid = None
+        from tvcat.services.telegram_service import get_telegram_service
+        svc = get_telegram_service()
+        r = await svc.topic_has_messages(str(channel_id), int(topic_id), tg_user_id=tuid)
+        if r is None:
             return True
-        entity = await client.get_entity(int(channel_id))
-        async for m in client.iter_messages(entity, reply_to=int(topic_id), limit=2):
-            try:
-                if getattr(m, "action", None) is not None:
-                    continue
-                return True
-            except Exception:
-                continue
-        return False
+        return bool(r)
     except Exception as e:
         print(f"[Indexator] sonda topic {topic_id}: {e} -> se asume con contenido", flush=True)
         return True
 
 
-async def _post_part(svc, channel_id: str, topic_id: int, part: dict):
+async def _post_part(svc, channel_id: str, topic_id: int, part: dict, tg_user_id=None, client_type=None):
     """Postea una parte (texto o foto+caption) dentro del topic índice."""
     text = part.get("text") or ""
     images = part.get("images") or []
@@ -836,10 +901,12 @@ async def _post_part(svc, channel_id: str, topic_id: int, part: dict):
         return await svc.send_photo(str(channel_id), photo_bytes=blob,
                                     caption=md[:CAPTION_LIMIT],
                                     reply_to_msg_id=int(topic_id),
+                                    tg_user_id=tg_user_id, client_type=client_type,
                                     parse_mode="md")
     # En topic: reply al id del topic (los topics direccionan por reply).
     return await svc.send_text(str(channel_id), text=md[:TEXT_LIMIT],
                                reply_to_msg_id=int(topic_id),
+                               tg_user_id=tg_user_id, client_type=client_type,
                                parse_mode="md")
 
 

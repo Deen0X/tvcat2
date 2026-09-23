@@ -155,6 +155,10 @@
                 esc(sp.display || sp.name) + ' (' + (sp.channels || 0) + ')</label>';
         }
         h += '</div>';
+        h += '<label>Cuenta Telegram:<br><select id="ix-account" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;">';
+        h += '<option value="">(automática: la activa)</option>';
+        h += '</select></label>';
+        h += '<div style="font-size:0.8rem;color:#a1a1aa;margin:6px 0;">La cuenta debe estar en el canal y ser admin para crear/vaciar el índice.</div>';
         h += '<div style="display:flex;gap:8px;align-items:flex-end;">';
         h += '<label style="flex:1;min-width:0;">Canal: <span id="ix-names-note" style="font-size:0.75rem;color:#a1a1aa;"></span><br><select id="ix-channel" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;">';
         h += channelOptions(channels);
@@ -170,6 +174,7 @@
         h += '<label>Cuerpo (parte repetible, con {letters}/{entries}):<br><textarea id="ix-body" rows="6" style="width:100%;background:#09090b;border:1px solid #3f3f46;color:#f4f4f5;padding:10px;box-sizing:border-box;resize:vertical;font-family:monospace;font-size:0.8rem;"></textarea></label>';
         h += '<div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;align-items:center;">';
         h += '<label style="font-size:0.8rem;"><input type="checkbox" id="ix-noletras" ' + (cfg.noletras_mode === 'hash' ? 'checked' : '') + '> No-letras en #</label>';
+        h += '<label style="font-size:0.8rem;" title="Une mayúsculas y minúsculas en la misma letra y ordena sin distinguirlas"><input type="checkbox" id="ix-unify" ' + (cfg.unify_case === false ? '' : 'checked') + '> Unificar mayús./minús.</label>';
         h += '<button id="ix-help" class="btn-secondary" style="padding:8px 12px;font-size:0.85rem;">Tags ❓</button>';
         h += '<span style="flex:1;"></span>';
         h += '<button id="ix-preview" class="btn-secondary" style="padding:10px 16px;font-size:0.9rem;">Previsualizar</button>';
@@ -183,6 +188,31 @@
         document.body.appendChild(o);
         o.onclick = function(e) { if (e.target === o) closeModal(); };
         box.querySelector('#ix-close').onclick = closeModal;
+        // Cuentas Telegram (la activa por defecto; recordar última).
+        (function() {
+            var sel = box.querySelector('#ix-account');
+            var keep = null;
+            try { keep = localStorage.getItem('ix_account') || null; } catch (e) {}
+            api('/api/indexator/accounts', {}, function(ares) {
+                if (!document.contains(box)) return;
+                var accs = (ares && ares.accounts) || [];
+                var hh = '<option value="">(automática: la activa)</option>';
+                for (var i = 0; i < accs.length; i++) {
+                    var a = accs[i];
+                    var v = String(a.tg_user_id || '');
+                    if (!v) continue;
+                    var lbl = (a.name ? a.name + ' ' : '') + '(' + v + ')' +
+                        (a.client_type ? ' [' + a.client_type + ']' : '') +
+                        (a.is_active ? '' : ' (inactiva)');
+                    var seld = (keep && keep === v) ? ' selected' : '';
+                    hh += '<option value="' + v + '"' + seld + '>' + esc(lbl) + '</option>';
+                }
+                sel.innerHTML = hh;
+                sel.onchange = function() {
+                    try { localStorage.setItem('ix_account', sel.value || ''); } catch (e) {}
+                };
+            });
+        })();
         (function() {
             var b = box.querySelector('#ix-open-tg');
             if (!b) return;
@@ -200,10 +230,13 @@
             box.querySelector('#ix-body').value = cfg.body_template || '';
         } catch (e) {}
         function vals() {
+            var acc = '';
+            try { acc = box.querySelector('#ix-account').value || ''; } catch (e) {}
             return {
                 channel_id: box.querySelector('#ix-channel').value || '',
                 header: box.querySelector('#ix-header').value || '',
-                body: box.querySelector('#ix-body').value || ''
+                body: box.querySelector('#ix-body').value || '',
+                tg_user_id: acc ? parseInt(acc, 10) : null
             };
         }
         function saveCfg(cb) {
@@ -212,6 +245,7 @@
                 index_topic: box.querySelector('#ix-topic').value || 'TVCat-Index',
                 exclude_topics: excl.split(','),
                 noletras_mode: box.querySelector('#ix-noletras').checked ? 'hash' : 'separado',
+                unify_case: !!box.querySelector('#ix-unify').checked,
                 header_template: box.querySelector('#ix-header').value || '',
                 body_template: box.querySelector('#ix-body').value || '',
                 sources: selectedSources(box)

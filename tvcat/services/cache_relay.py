@@ -69,12 +69,16 @@ def _ensure_tables():
 # ─── Resolución de credenciales ────────────────────────────────────
 
 def _resolve_creds():
-    """(api_id, api_hash, session_string) de la cuenta Principal (patrón scanner)."""
+    """(tg_user_id, client_type) de la cuenta Principal vía servicio central
+    (patrón scanner, sin sesión cruda). None si no hay cuenta válida."""
     try:
-        from plugins.tvcat_tgindex.scanner import _resolve_api_creds
-        return _resolve_api_creds()
+        from plugins.tvcat_tgindex.scanner import _resolve_scan_target
+        tg, ctype, _why = _resolve_scan_target(-1)
+        if not tg:
+            return None, None
+        return tg, ctype
     except Exception:
-        return None, None, None
+        return None, None
 
 
 async def _service():
@@ -83,10 +87,10 @@ async def _service():
 
 
 def _cred_kwargs():
-    api_id, api_hash, session_string = _resolve_creds()
-    if not session_string or not api_id or not api_hash:
+    tg, ctype = _resolve_creds()
+    if not tg:
         return {}
-    return {"session_string": session_string, "api_id": int(api_id), "api_hash": api_hash}
+    return {"tg_user_id": tg, "client_type": ctype}
 
 
 # ─── Helpers de config ─────────────────────────────────────────────
@@ -418,9 +422,9 @@ async def _upload_and_pin(svc, creds, chat, bk, channel_id, full, max_msg_id, co
 
 
 def _transfer_creds(creds: dict) -> dict:
-    """Adapta las credenciales (session_string, api_id, api_hash) al formato del TransferService."""
+    """Adapta las credenciales (tg_user_id, client_type) al formato del TransferService."""
     out = {}
-    for k in ("session_string", "api_id", "api_hash"):
+    for k in ("tg_user_id", "client_type"):
         if k in creds:
             out[k] = creds[k]
     return out

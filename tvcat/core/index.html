@@ -274,8 +274,27 @@
                         </select>
                     </div>
 
+                    <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
+                        <label for="screen-hero-scale">Tamaño de botones hero (este dispositivo)</label>
+                        <p class="setting-desc" style="margin-bottom: 12px;">100% = 100×100. Se aplica al instante, sin recargar.</p>
+                        <div style="display:flex;align-items:center;gap:12px;">
+                            <input type="range" id="screen-hero-scale" min="30" max="100" step="5" value="100" style="flex:1;accent-color:#e11d48;" oninput="changeHeroScale(this.value)" onchange="changeHeroScale(this.value)">
+                            <span id="screen-hero-scale-val" style="min-width:44px;text-align:right;font-size:0.85rem;">100%</span>
+                        </div>
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 12px;">
+                            <div>
+                                <label style="margin-bottom: 4px; display: block;">Mostrar como botones</label>
+                                <p class="setting-desc" style="margin-bottom: 0;">Desactívalo para verlos como badges circulares (estilo favorito).</p>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="screen-hero-buttons-toggle" checked onchange="window.UI.toggleHeroButtons(this.checked)">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                    </div>
+
                     <div class="settings-input-group hidden" id="episode-cache-settings-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
-                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <div style="display: flex; align-items:center; justify-content: space-between;">
                             <div>
                                 <label style="margin-bottom: 4px; display: block;">Permitir caché para capítulos</label>
                                 <p class="setting-desc" style="margin-bottom: 0;">Descarga múltiples capítulos de la misma serie y limpia automáticamente los más antiguos.</p>
@@ -285,7 +304,7 @@
                                 <span class="slider round"></span>
                             </label>
                         </div>
-                        <div id="episode-cache-size-container" style="margin-top: 12px; display: flex; align-items: center; justify-content: space-between;" class="hidden">
+                        <div id="episode-cache-size-container" style="margin-top: 12px; display: flex;align-items:center; justify-content: space-between;" class="hidden">
                             <span class="setting-desc">Límite del caché (GB):</span>
                             <select id="screen-episode-cache-size" class="variant-select" style="max-width: 120px;" onchange="window.UI.changeEpisodeCacheSize(this.value)">
                                 <option value="1">1 GB</option>
@@ -293,9 +312,9 @@
                                 <option value="5">5 GB (Predeterminado)</option>
                                 <option value="10">10 GB</option>
                                 <option value="20">20 GB</option>
-                            </select>
-                        </div>
+                        </select>
                     </div>
+                </div>
                     
                     <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
                         <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -851,6 +870,9 @@
                 <label class="filter-checkbox">
                     <input type="checkbox" id="filter-description"> Descripción
                 </label>
+                <label class="filter-checkbox">
+                    <input type="checkbox" id="filter-filename"> Nombre de fichero
+                </label>
             </div>
 
             <div class="filter-section">
@@ -957,6 +979,6 @@
     <script src="js/catalog.js?v=20260922e"></script>
     <script src="js/player.js?v=20260801"></script>
     <script src="js/ui2.js?v=20260910b"></script>
-    <script src="js/app.js?v=20260922f"></script>
+    <script src="js/app.js?v=20260922g"></script>
 </body>
 </html>

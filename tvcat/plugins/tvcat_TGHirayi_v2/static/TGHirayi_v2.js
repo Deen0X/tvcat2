@@ -306,11 +306,18 @@
         api(API + '/destinations', {}, function(res) {
             var dests = (res && res.destinations) || [];
             if (!dests.length) { alert('No hay destinos configurados. Ve a Configuración del plugin TGHirayi v2 para añadir destinos.'); return; }
+            api(API + '/hide-uploaded/scans', {}, function(res2) {
+                openHideModal(dests, (res2 && res2.scans) || [], (res2 && res2.strict_year !== false));
+            });
+        });
+        function openHideModal(dests, scans, strictDefault) {
             var lastSel = {};
             try { lastSel = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch (e) {}
+            var onlyActive = false;
+            try { onlyActive = localStorage.getItem(LS_KEY + '_scans_active') === '1'; } catch (e2) {}
             openModal(showMode ? 'Mostrar subidos' : 'Ocultar subidos', function(content, overlay) {
                 var html = '<div class="muted" style="margin-bottom:8px;font-size:12px;color:#a1a1aa;">' +
-                    'Se comparan los ' + items.length + ' títulos de la sección actual contra los topics de los destinos (asume topo3, unión).</div>';
+                    'Se comparan los ' + items.length + ' títulos de la sección actual contra los topics de los destinos (asume topo3, unión) y los títulos parseados de los orígenes.</div>';
                 if (!showMode) {
                     html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
                         '<input type="checkbox" class="tgcopy-hide-full-cb" style="accent-color:#eab308;">' +
@@ -318,7 +325,11 @@
                     html += '<label style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
                         '<input type="checkbox" class="tgcopy-hide-queue-cb" style="accent-color:#eab308;">' +
                         '<span style="flex:1;font-size:12px;">Ocultar los que estén en la cola de TGHirayi</span></label>';
+                    html += '<label title="Sin año extraíble en algún lado no hay match" style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
+                        '<input type="checkbox" class="tgcopy-hide-strict-cb" ' + (strictDefault ? 'checked' : '') + ' style="accent-color:#eab308;">' +
+                        '<span style="flex:1;font-size:12px;">Comparar estrictamente incluyendo años</span></label>';
                 }
+                html += '<div class="muted" style="margin:6px 0 2px;font-size:11px;color:#a1a1aa;">Destinos (topics, topo3):</div>';
                 for (var i = 0; i < dests.length; i++) {
                     var d = dests[i];
                     var checked = lastSel[d.id] ? 'checked' : '';
@@ -327,7 +338,39 @@
                         '<span style="flex:1;">' + escHtml(d.name) + '</span>' +
                         '<span style="font-size:11px;color:#a1a1aa;">' + escHtml(d.channel_title || '') + '</span></label>';
                 }
+                html += '<div style="display:flex;align-items:center;justify-content:space-between;margin:8px 0 2px;">'
+                    + '<span class="muted" style="font-size:11px;color:#a1a1aa;">Orígenes (scan items, títulos parseados, sin red):</span>'
+                    + '<label style="font-size:11px;color:#a1a1aa;cursor:pointer;"><input type="checkbox" class="tgcopy-hide-scans-active-cb" ' + (onlyActive ? 'checked' : '') + ' style="accent-color:#38bdf8;"> solo activos</label></div>'
+                    + '<div class="tgcopy-hide-scans-list">';
+                for (var s = 0; s < scans.length; s++) {
+                    var sc = scans[s];
+                    var schecked = lastSel[sc.scan_id] ? 'checked' : '';
+                    var dis = sc.enabled ? '' : ' <span style="font-size:10px;color:#fbbf24;white-space:nowrap;" title="Puede estar desactualizado">(desactivado)</span>';
+                    html += '<label data-scan-active="' + (sc.enabled ? '1' : '0') + '" style="display:block;box-sizing:border-box;width:100%;padding:10px;margin:4px 0;background:rgba(56,189,248,0.06);border:1px solid rgba(56,189,248,0.3);border-radius:6px;cursor:pointer;">' +
+                        '<span style="display:flex;align-items:center;gap:8px;width:100%;">' +
+                        '<input type="checkbox" class="tgcopy-hide-scan-cb" value="' + sc.scan_id + '" ' + schecked + ' style="accent-color:#38bdf8;flex:none;">' +
+                        '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escHtml(sc.name) + dis + '</span>' +
+                        '<span style="flex:none;font-size:10px;color:#38bdf8;border:1px solid rgba(56,189,248,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;">origen' + (sc.topo ? ' · topo' + sc.topo : '') + '</span>' +
+                        '</span></label>';
+                }
+                html += '</div>';
                 content.innerHTML = html;
+                var scansActiveBox = content.querySelector('.tgcopy-hide-scans-active-cb');
+                var applyScansFilter = function() {
+                    var only = !!(scansActiveBox && scansActiveBox.checked);
+                    try { localStorage.setItem(LS_KEY + '_scans_active', only ? '1' : '0'); } catch (eF) {}
+                    var rows = content.querySelectorAll('[data-scan-active]');
+                    for (var f = 0; f < rows.length; f++) {
+                        if (only && rows[f].getAttribute('data-scan-active') !== '1') {
+                            rows[f].style.display = 'none';
+                            var cb = rows[f].querySelector('.tgcopy-hide-scan-cb');
+                            if (cb) cb.checked = false;
+                        } else {
+                            rows[f].style.display = '';
+                        }
+                    }
+                };
+                if (scansActiveBox) { scansActiveBox.onchange = applyScansFilter; applyScansFilter(); }
                 var btnRow = document.createElement('div');
                 btnRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
                 var go = document.createElement('button');
@@ -337,9 +380,13 @@
                     var ids = [];
                     var boxes = content.querySelectorAll('.tgcopy-hide-dest-cb:checked');
                     for (var j = 0; j < boxes.length; j++) ids.push(boxes[j].value);
-                    if (!ids.length) { alert('Selecciona al menos un destino.'); return; }
+                    var scanIds = [];
+                    var sboxes = content.querySelectorAll('.tgcopy-hide-scan-cb:checked');
+                    for (var sj = 0; sj < sboxes.length; sj++) scanIds.push(sboxes[sj].value);
+                    if (!ids.length && !scanIds.length) { alert('Selecciona al menos un destino u origen.'); return; }
                     var sel = {};
                     for (var k = 0; k < dests.length; k++) sel[dests[k].id] = ids.indexOf(dests[k].id) >= 0;
+                    for (var sk = 0; sk < scans.length; sk++) sel[scans[sk].scan_id] = scanIds.indexOf(scans[sk].scan_id) >= 0;
                     try { localStorage.setItem(LS_KEY, JSON.stringify(sel)); } catch (e) {}
                     go.textContent = 'Comparando...';
                     go.disabled = true;
@@ -347,7 +394,9 @@
                     var fullMode = !!(fullBox && fullBox.checked);
                     var queueBox = content.querySelector('.tgcopy-hide-queue-cb');
                     var queueMode = !!(queueBox && queueBox.checked);
-                    var payload = { destination_ids: ids, items: [], full_catalog: fullMode, for_hide: !showMode, include_queue: queueMode };
+                    var strictBox = content.querySelector('.tgcopy-hide-strict-cb');
+                    var strictMode = strictBox ? !!strictBox.checked : strictDefault;
+                    var payload = { destination_ids: ids, scan_ids: scanIds, items: [], full_catalog: fullMode, for_hide: !showMode, include_queue: queueMode, strict_year: strictMode };
                     if (!fullMode) {
                         for (var n = 0; n < items.length; n++) {
                             payload.items.push({
@@ -365,7 +414,7 @@
                             alert('Error al comparar: ' + ((r && r.detail) || ('HTTP ' + st)));
                             return;
                         }
-                        if (!r.destinations_checked) {
+                        if (!r.destinations_checked && !(r.scans_checked || 0)) {
                             var det0 = r.detail || [];
                             var lines0 = [];
                             for (var d0 = 0; d0 < det0.length; d0++) {
@@ -373,7 +422,7 @@
                                 if (det0[d0].error) l0 += ' -> ' + det0[d0].error;
                                 lines0.push(l0);
                             }
-                            alert('Ningún destino tiene topics (¿topo1/2 o grupo no-foro?). Nada que comparar.' + (lines0.length ? '\n' + lines0.join('\n') : ''));
+                            alert('Ningún destino tiene topics y no se marcó ningún origen. Nada que comparar.' + (lines0.length ? '\n' + lines0.join('\n') : ''));
                             return;
                         }
                         if (!(r.matched || []).length) {
@@ -386,10 +435,12 @@
                                 if (det[dd].probe_error) dl += ' [' + det[dd].probe_error + ']';
                                 lines.push(dl);
                             }
-                            alert('Ningún título coincide con los destinos (' + (r.topics_count || 0) + ' topics comparados).' + (lines.length ? '\n' + lines.join('\n') : ''));
+                            var scLine = (r.scans_checked || 0) ? '\nOrígenes: ' + r.scans_checked + ' comparados' + (((r.stale_scans || []).length) ? ' (' + r.stale_scans.join(', ') + ')' : '') + '.' : '';
+                            var nyLine = (r.skipped_no_year || 0) ? '\nOmitidos sin año (estricto): ' + r.skipped_no_year + '.' : '';
+                            alert('Ningún título coincide (' + (r.topics_count || 0) + ' topics comparados).' + scLine + nyLine + (lines.length ? '\n' + lines.join('\n') : ''));
                             return;
                         }
-                        showHideUploadedResults(items, r.matched || [], showMode, r.topics_count || 0, r.titles || {}, r.skipped_hidden || 0, r.detail || [], r.matched_queue || []);
+                        showHideUploadedResults(items, r.matched || [], showMode, r.topics_count || 0, r.titles || {}, r.skipped_hidden || 0, r.detail || [], r.matched_queue || [], r.matched_via || {}, r.skipped_no_year || 0, r.scans_checked || 0);
                     });
                 };
                 var cancel = document.createElement('button');
@@ -400,10 +451,10 @@
                 btnRow.appendChild(cancel);
                 content.appendChild(btnRow);
             });
-        });
+        }
     }
 
-    function showHideUploadedResults(items, matchedIds, showMode, topicsCount, titlesMap, skippedHidden, detail, matchedQueue) {
+    function showHideUploadedResults(items, matchedIds, showMode, topicsCount, titlesMap, skippedHidden, detail, matchedQueue, matchedVia, skippedNoYear, scansChecked) {
         var set = {};
         for (var m = 0; m < matchedIds.length; m++) set[String(matchedIds[m])] = true;
         var qset = {};
@@ -431,6 +482,7 @@
                 '<div style="font-size:11px;color:#a1a1aa;margin-bottom:6px;">Comparados ' + topicsCount + ' topics (unión de destinos).' +
                 (skippedHidden ? ' Omitidos ' + skippedHidden + ' ya ocultos.' : '') +
                 ((matchedQueue || []).length ? ' ' + matchedQueue.length + ' en cola.' : '') +
+                (scansChecked ? ' ' + scansChecked + ' orígenes.' : '') +
                 (function() {
                     var dl2 = detail || [];
                     if (!dl2.length) return '';
@@ -447,10 +499,14 @@
                 var iid = _hideItemIdOf(matched[k]);
                 var t = escHtml(matched[k].title || matched[k].name || iid);
                 var qbadge = qset[iid] ? ' <span title="Está en la cola de TGHirayi" style="background:rgba(234,179,8,0.15);color:#eab308;border:1px solid rgba(234,179,8,0.3);border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">en cola</span>' : '';
+                var via = (matchedVia && matchedVia[iid]) || '';
+                var vbadge = via ? ' <span title="Coincide en: ' + escHtml(via) + '" style="background:rgba(56,189,248,0.15);color:#38bdf8;border:1px solid rgba(56,189,248,0.3);border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">' + escHtml(via.length > 28 ? via.slice(0, 27) + '…' : via) + '</span>' : '';
                 html += '<label style="display:flex;align-items:center;gap:8px;padding:6px;margin:3px 0;background:rgba(255,255,255,0.05);border-radius:6px;cursor:pointer;font-size:13px;">' +
                     '<input type="checkbox" class="tgcopy-hide-cb" value="' + iid.replace(/"/g, '&quot;') + '" checked style="accent-color:#eab308;">' +
-                    '<span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + qbadge + '</span></label>';
+                    '<span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + t + qbadge + vbadge + '</span></label>';
             }
+            if (skippedNoYear) html += '<div style="font-size:11px;color:#a1a1aa;margin-top:6px;">Omitidos sin año (estricto): ' + skippedNoYear + '.</div>';
+            if (scansChecked) html += '<div style="font-size:11px;color:#a1a1aa;margin-top:2px;">Orígenes comparados: ' + scansChecked + '.</div>';
             html += '</div>';
             content.innerHTML = html;
             var btnAll = content.querySelector('.tgcopy-hide-all');
@@ -1202,7 +1258,7 @@ html += '</div>';
 
             // Plantilla (editable, con tags)
             html += '<label style="font-size:0.75rem;color:#a1a1aa;margin-top:10px;display:block;">Plantilla</label>';
-            html += '<div style="font-size:0.7rem;color:#71717a;margin:2px 0 4px;">Tags: {title} {tagtitle} {episodes} {season} · f-tags: {ftitle} {ftagtitle} {fyear} {frating} {fgenres} {fsinopsis} {fepisodes} {fseason} (solo si hay dato) · Enter para saltos de l&iacute;nea</div>';
+            html += '<div style="font-size:0.7rem;color:#71717a;margin:2px 0 4px;">Tags: {title} {tagtitle} {episodes} {season} · f-tags: {ftitle} {ftagtitle} {fyear} {frating} {fgenres} {fsinopsis} {fepisodes} {fseason} (solo si hay dato) · Media (solo en copia): {_resolution} → {_fresolution}, {_fullaudiotracks} → {_ffullaudiotracks} · Enter para saltos de l&iacute;nea</div>';
             html += '<textarea id="cover-template" style="width:100%;height:120px;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;resize:vertical;">' + template + '</textarea>';
 
             // Resultado (resuelto en vivo, solo lectura)

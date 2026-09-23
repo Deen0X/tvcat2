@@ -124,9 +124,21 @@ def _foreignnameseason(api_title, api_original, det: dict) -> str:
     return _foreignname(api_title, api_original, det, suffix)
 
 
-def get_base_tags(title: str = "", total_episodes: int = 0, details: dict = None) -> dict:
-    """Mapa completo de tags base (unión de los que usaban v2 y enricher)."""
+def get_base_tags(title: str = "", total_episodes: int = 0, details: dict = None,
+                  media: dict = None) -> dict:
+    """Mapa completo de tags base (unión de los que usaban v2 y enricher).
+    `media` (ffprobe normalizado del primer fichero; ver media_probe.py) alimenta
+    las claves `_*`, que solo tienen sentido al copiar en TGHirayi. También se
+    acepta dentro de `details["_media"]`. Sin media → "" (se omiten)."""
     details = details or {}
+    _md = dict(media or {}) if isinstance(media, dict) else {}
+    try:
+        _dm = details.get("_media")
+        if isinstance(_dm, dict):
+            for _k, _v in _dm.items():
+                _md.setdefault(_k, _v)
+    except Exception:
+        pass
     year = str(details.get("api_year") or details.get("api_release_date") or "")
     rating = _num(details.get("api_rating"))
     rating_line = ("★ " + rating) if rating else ""
@@ -196,6 +208,24 @@ def get_base_tags(title: str = "", total_episodes: int = 0, details: dict = None
                                      details.get("api_original_title"), details),
         "foreignnameseason": _foreignnameseason(details.get("api_title") or title,
                                                 details.get("api_original_title"), details),
+        "_resolution": str(_md.get("resolution") or ""),
+        "_resolutionx": str(_md.get("resolutionx") or ""),
+        "_resolutiony": str(_md.get("resolutiony") or ""),
+        "_vcodec": str(_md.get("vcodec") or ""),
+        "_fps": str(_md.get("fps") or ""),
+        "_acodec": str(_md.get("acodec") or ""),
+        "_audiotracks": str(_md.get("audiotracks") or ""),
+        "_fullaudiotracks": str(_md.get("fullaudiotracks") or ""),
+        "_subtitles": str(_md.get("subtitles") or ""),
+        "_container": str(_md.get("container") or ""),
+        "_extension": str(_md.get("extension") or ""),
+        "_duration": str(_md.get("duration") or ""),
+        "_durationm": str(_md.get("durationm") or ""),
+        "_bitrate": str(_md.get("bitrate") or ""),
+        "_filesize": str(_md.get("filesize") or ""),
+        "_aspectratio": str(_md.get("aspectratio") or ""),
+        "_quality": str(_md.get("quality") or ""),
+        "_files": str(_md.get("files") or ""),
     }
 
 
@@ -210,8 +240,35 @@ def _conn():
     return get_conn()
 
 
+def _custom_name(key: str) -> str:
+    """Nombre del custom para una clave base: `f<key>` normal, `_f<resto>`
+    si la clave empieza por `_` (tags media: `{_fresolution}`, y así se
+    distinguen los que solo resuelven al copiar en TGHirayi)."""
+    k = str(key or "")
+    if k.startswith("_"):
+        return "_f" + k[1:]
+    return "f" + k
+
+
+def _default_customs() -> dict:
+    """Customs equivalentes a _legacy_defaults (sin leer fichero): base para
+    mergear bajo los guardados (así los tags nuevos aparecen en instalaciones
+    viejas sin pisar personalizaciones)."""
+    out = {}
+    for k, tpl in _legacy_defaults().items():
+        if not isinstance(tpl, str):
+            continue
+        body = tpl.replace("{value}", "{" + str(k) + "}")
+        if not body.endswith("\n"):
+            body += "\n"
+        out[_custom_name(k)] = body
+    return out
+
+
 def load_customs() -> dict:
-    """{nombre: plantilla}. Si no hay fila, migra legacy/defaults y la crea."""
+    """{nombre: plantilla}. Mergea defaults bajo lo guardado (lo guardado
+    manda). Si no hay fila, migra legacy/defaults y la crea."""
+    stored = None
     try:
         conn = _conn()
         row = conn.execute("SELECT value FROM tvcat_settings WHERE key=?",
@@ -221,10 +278,17 @@ def load_customs() -> dict:
             v = row[0] if not isinstance(row, dict) else row.get("value")
             d = json.loads(v)
             if isinstance(d.get("custom"), dict):
-                return dict(d["custom"])
+                stored = dict(d["custom"])
     except Exception:
-        pass
-    return _ensure_default_customs()
+        stored = None
+    if stored is None:
+        return _ensure_default_customs()
+    try:
+        merged = _default_customs()
+        merged.update(stored)
+        return merged
+    except Exception:
+        return stored
 
 
 def _ensure_default_customs() -> dict:
@@ -286,6 +350,24 @@ def _legacy_defaults() -> dict:
         "id": "ID: {value}",
         "cover": "Cover: {value}",
         "episodes": "Episodes: {value}",
+        "_resolution": "Resolution: {value}",
+        "_resolutionx": "Resolution X: {value}",
+        "_resolutiony": "Resolution Y: {value}",
+        "_vcodec": "Video: {value}",
+        "_fps": "FPS: {value}",
+        "_acodec": "Audio: {value}",
+        "_audiotracks": "Audio tracks: {value}",
+        "_fullaudiotracks": "Full audio: {value}",
+        "_subtitles": "Subtitles: {value}",
+        "_container": "Container: {value}",
+        "_extension": "Ext: {value}",
+        "_duration": "Duration: {value}",
+        "_durationm": "Duration: {value} min",
+        "_bitrate": "Bitrate: {value} Kbps",
+        "_filesize": "Size: {value}",
+        "_aspectratio": "Aspect: {value}",
+        "_quality": "Quality: {value}",
+        "_files": "Files: {value}",
         "ext": "Ext: {value}",
         "extension": "Ext: {value}",
         "description": "Description:\n{value}",
@@ -318,7 +400,7 @@ def migrate_legacy() -> dict:
         body = tpl.replace("{value}", "{" + str(k) + "}")
         if not body.endswith("\n"):
             body += "\n"
-        out["f" + str(k)] = body
+        out[_custom_name(k)] = body
     return out
 
 
@@ -394,10 +476,10 @@ def resolve(text: str, base: dict, customs: dict) -> str:
 
 
 def resolve_cover(text: str, title: str = "", total_episodes: int = 0,
-                  details: dict = None) -> str:
-    """Atajo: base + customs cargados + resolve."""
+                  details: dict = None, media: dict = None) -> str:
+    """Atajo: base + customs cargados + resolve. `media` alimenta los tags `_*`."""
     try:
-        base = get_base_tags(title, total_episodes, details or {})
+        base = get_base_tags(title, total_episodes, details or {}, media=media)
         customs = load_customs()
         return resolve(text or "", base, customs)
     except Exception:
@@ -405,6 +487,22 @@ def resolve_cover(text: str, title: str = "", total_episodes: int = 0,
 
 
 # ─── Validación (editor) ─────────────────────────────────────────────
+
+_MEDIA_TOKEN_RE = re.compile(r"\{(f)?_[A-Za-z][A-Za-z0-9_]*\}")
+
+
+def strip_media_tags(text: str) -> str:
+    """Quita los tags `_*` (crudos y f-forma) para DISPLAY (hero, etc.).
+    Esos tags solo se resuelven al copiar en TGHirayi; en el resto de
+    sitios saldrían literales."""
+    if not text:
+        return text
+    try:
+        out = _MEDIA_TOKEN_RE.sub("", text)
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        return out.strip()
+    except Exception:
+        return text
 
 def _refs_of(body: str) -> list:
     try:

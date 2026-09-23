@@ -94,7 +94,7 @@
         // Overlay
         var overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:999999;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;';
-        overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
+        overlay.onclick = function (e) { if (e.target === overlay) { try { if (typeof _esClearEditing === 'function') _esClearEditing(); } catch (_eoc) {} overlay.remove(); } };
         var panel = document.createElement('div');
         panel.style.cssText = 'background:#0d0d0f;border:1px solid #3f3f46;border-radius:10px;padding:16px;width:92vw;max-width:720px;max-height:94vh;overflow-y:auto;color:#f4f4f5;box-sizing:border-box;';
         panel.onclick = function (e) { e.stopPropagation(); };
@@ -216,7 +216,7 @@
         panel.innerHTML = html;
         overlay.appendChild(panel);
         document.body.appendChild(overlay);
-        document.getElementById('enricher-close').onclick = function () { overlay.remove(); };
+        document.getElementById('enricher-close').onclick = function () { try { _esClearEditing(); } catch (e) {} overlay.remove(); };
         // Copiar texto al portapapeles (Clipboard API + fallback legacy).
         function copyText(t, okMsg) {
             if (!t) { setStatus('Nada que copiar', true); return; }
@@ -277,6 +277,41 @@
             if (!t.trim()) { setStatus('La caja está vacía', true); return; }
             copyText(t, 'Caption copiado');
         };
+        // EditSync standby: publicar item en edición (debounce) y limpiar al
+        // guardar/cerrar. Servidor guarda por usuario con TTL (import decide).
+        var _esEditTimer = null;
+        function _esPublishEditing() {
+            try {
+                var iid = (typeof itemId !== 'undefined') ? itemId : '';
+                if (!iid) return;
+                fetch('/api/editsync/editing', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_id: iid })
+                }).catch(function() {});
+            } catch (e) {}
+        }
+        function _esClearEditing() {
+            try {
+                if (_esEditTimer) { clearTimeout(_esEditTimer); _esEditTimer = null; }
+                fetch('/api/editsync/editing', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_id: null })
+                }).catch(function() {});
+            } catch (e) {}
+        }
+        try {
+            var _capEdit = document.getElementById('enricher-text');
+            if (_capEdit) {
+                var _onEditInput = function() {
+                    if (_esEditTimer) clearTimeout(_esEditTimer);
+                    _esEditTimer = setTimeout(_esPublishEditing, 1500);
+                };
+                if (_capEdit.addEventListener) _capEdit.addEventListener('input', _onEditInput, false);
+                else _capEdit.oninput = _onEditInput;
+            }
+        } catch (e3) {}
         // Topic en vivo al editar el caption + clic para copiar.
         try {
             var _cap = document.getElementById('enricher-text');
@@ -544,6 +579,9 @@
             var hasTitle = (String(text || '').indexOf('{title}') !== -1) || (String(text || '').indexOf('{ftitle}') !== -1);
             function tokenVal(token, visited) {
                 if (visited.indexOf(token) !== -1) return '';
+                // Tags media (_*): NO se resuelven en el enriquecedor (solo en
+                // la subida del fichero); se dejan literales para la copia.
+                if (token.charAt(0) === '_') return '{' + token + '}';
                 if (token === 'tagtitle' && !hasTitle) return '';
                 if (customs.hasOwnProperty(token)) {
                     var r = expandBody(customs[token] || '', visited.concat([token]));
@@ -555,6 +593,7 @@
             function expandBody(body, visited) {
                 var ok = true;
                 var out = String(body || '').replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, function(m0, token) {
+                    if (token.charAt(0) === '_') return m0;
                     if (customs.hasOwnProperty(token) || base.hasOwnProperty(token) || token === 'tagtitle') {
                         var r = tokenVal(token, visited);
                         if (r === '') ok = false;
@@ -565,6 +604,7 @@
                 return { text: out, ok: ok };
             }
             var result = String(text || '').replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, function(m0, token) {
+                if (token.charAt(0) === '_') return m0;
                 if (customs.hasOwnProperty(token)) {
                     var r = expandBody(customs[token] || '', [token]);
                     return r.ok ? r.text : '';

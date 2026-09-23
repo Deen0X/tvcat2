@@ -163,6 +163,14 @@
       if (err) { toast('No se pudo cargar episodios'); return; }
       var eps = flattenSeasons(seasons);
       if (!eps.length) { toast('Sin episodios'); return; }
+      // Solo el título abierto: el endpoint fusiona variantes hermanas
+      // (mismo group_title_flat) y mezclarlas descuadra cortes, números y Auto.
+      // Si ninguna coincide (fallback de plugins), se conserva la lista completa.
+      var own = [];
+      for (var fi = 0; fi < eps.length; fi++) {
+        if (String(eps[fi].item_id || '') === String(itemId)) own.push(eps[fi]);
+      }
+      if (own.length) eps = own;
       // ¿Es parte de un corte? Línea "Unir con original" sobre el listado.
       ajax(API + '/cut_of?item_id=' + encodeURIComponent(itemId), { method: 'GET' }, function(eCut, cutRes) {
         var cut = (!eCut && cutRes && cutRes.cut) ? cutRes.cut : null;
@@ -196,7 +204,7 @@
       html += '<label style="display:flex;gap:8px;align-items:center;font-size:0.8rem;color:#f4f4f5;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.4);border-radius:8px;padding:8px 10px;margin-bottom:10px;cursor:pointer;">'
         + '<input type="checkbox" class="slicer-use-orig" style="accent-color:#a855f7;">'
         + '<span>Utilizar el nombre del título original para el nuevo título<br><span style="color:#a1a1aa;font-size:0.72rem;">Marcado: «título original_nombre del fichero». Desmarcado: nombre del fichero.</span></span></label>';
-      html += '<p>Episodios: ' + eps.length + '. Marca checks y usa Slice / Season Slicer, o Auto para marcar inicios de temporada:</p>'
+        html += '<p>Episodios: ' + eps.length + '. Marca checks y usa Slice / Season Slicer, o Auto para marcar inicios de temporada:</p>'
         + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.4);border-radius:8px;padding:8px 10px;margin-bottom:10px;">'
         + '<label style="font-size:0.75rem;color:#a1a1aa;">Inicio secuencia:</label>'
         + '<input type="number" class="slicer-offset" value="' + firstSeason + '" min="1" style="width:64px;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:4px 6px;color:#f4f4f5;font-size:0.8rem;">'
@@ -206,29 +214,36 @@
         + '<button class="slicer-goslice" style="background:#22c55e;border:none;border-radius:6px;padding:6px 10px;color:#fff;font-weight:700;font-size:0.75rem;cursor:pointer;">Slice</button>'
         + '<button class="slicer-goseason" style="background:#a855f7;border:none;border-radius:6px;padding:6px 10px;color:#fff;font-weight:700;font-size:0.75rem;cursor:pointer;">Season Slicer</button>'
         + '</div>'
-        + '<div style="display:flex;flex-direction:column;gap:8px;">';
+        // Lista compacta propia (NO .episode-card del reproductor: esa fila
+        // mide ~90px + la fila superior de controles = ~140px por episodio).
+        // Fila única: thumb 70px + título + controles al final.
+        + '<div style="display:flex;flex-direction:column;gap:4px;">';
       for (var i = 0; i < eps.length; i++) {
         var ep = eps[i];
         var n = ep.episode_number || (i + 1);
         var nm = ep.file_name || ep.title || ('E' + n);
-        var title = n + '. ' + nm;
+        // Título como enlace al mensaje original (verificación).
+        var tlink = ep.telegram_link || '';
+        var titleHtml = esc(n + '. ' + nm);
+        if (tlink) {
+          titleHtml = '<a href="' + esc(tlink) + '" target="_blank" rel="noopener noreferrer" title="Abrir en el chat original" style="color:inherit;text-decoration:underline dotted;">' + esc(n + '. ' + nm) + '</a>';
+        }
         var thumbUrl = ep.telegram_msg_id ? ('/api/media/episode/thumbnail/' + ep.telegram_msg_id) : null;
         var coverUrl = '/api/cover/' + encodeURIComponent(itemId);
         var src = (thumbUrl && ep.has_thumb) ? thumbUrl : coverUrl;
-        var cap = ep.caption ? '<p class="episode-overview" title="' + esc(ep.caption) + '">' + esc(ep.caption) + '</p>' : '';
         var ctrls;
         if (i === 0) {
-          ctrls = '<div title="El original siempre conserva el primero" style="opacity:0.3;color:rgba(255,255,255,0.3);">✂️</div>';
+          ctrls = '<span title="El original siempre conserva el primero" style="opacity:0.3;color:rgba(255,255,255,0.3);flex-shrink:0;">✂️</span>';
         } else {
-          ctrls = '<input type="number" class="slicer-season" data-msg="' + ep.telegram_msg_id + '" value="" placeholder="—" title="Temporada de este corte (vacío = sin temporada)" style="width:56px;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:4px 6px;color:#f4f4f5;font-size:0.8rem;flex-shrink:0;">'
-            + '<input type="checkbox" class="slicer-check" data-msg="' + ep.telegram_msg_id + '" style="accent-color:#a855f7;width:18px;height:18px;cursor:pointer;flex-shrink:0;">';
+          ctrls = '<input type="number" class="slicer-season" data-msg="' + ep.telegram_msg_id + '" value="" placeholder="—" title="Temporada de este corte (vacío = sin temporada)" style="width:48px;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:3px 4px;color:#f4f4f5;font-size:0.75rem;flex-shrink:0;">'
+            + '<input type="checkbox" class="slicer-check" data-msg="' + ep.telegram_msg_id + '" style="accent-color:#a855f7;width:16px;height:16px;cursor:pointer;flex-shrink:0;">';
         }
-        html += '<div class="episode-card" style="cursor:default;flex-wrap:wrap;row-gap:8px;">'
-        + '<div style="flex-basis:100%;display:flex;justify-content:flex-end;align-items:center;gap:8px;min-width:0;">' + ctrls + '</div>'
-        + '<div class="episode-thumb-container"><img src="' + src + '" class="episode-thumb" alt="" loading="lazy" '
-        + 'onerror="this.onerror=null;this.src=\'' + coverUrl + '\';" /></div>'
-        + '<div class="episode-info" style="padding-right:0;min-width:0;flex:1;">'
-        + '<h3 class="episode-title" style="font-size:0.9rem;overflow-wrap:anywhere;word-break:break-word;">' + esc(title) + '</h3>' + cap + '</div>'
+        // Fila compacta en UNA línea: thumb + título + controles al final.
+        html += '<div class="slicer-row" style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:6px;padding:4px 8px;min-height:44px;box-sizing:border-box;">'
+        + '<img src="' + src + '" alt="" loading="lazy" style="width:70px;height:40px;object-fit:cover;border-radius:4px;flex-shrink:0;background:#141414;" '
+        + 'onerror="this.onerror=null;this.src=\'' + coverUrl + '\';" />'
+        + '<span style="flex:1;min-width:0;font-size:0.8rem;font-weight:600;color:#f4f4f5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(nm) + '">' + titleHtml + '</span>'
+        + '<span style="display:flex;align-items:center;gap:6px;flex-shrink:0;">' + ctrls + '</span>'
         + '</div>';
       }
       html += '</div>';

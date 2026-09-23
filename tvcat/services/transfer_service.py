@@ -580,8 +580,34 @@ def _pyro_msg_file_size(pmsg) -> int:
 # ─── Cliente ──────────────────────────────────────────────────────
 
 async def _get_raw_client(creds: dict):
-    """Devuelve (client_raw, client_type). Resuelve el cliente activo o uno con credenciales explícitas."""
+    """Devuelve (client_raw, client_type). Vías (en orden):
+    1. tg_user_id + client_type (servicio central): valida sesión y usa el
+       pool; verifica que el wrapper es de ese usuario.
+    2. session_string explícita (legacy): UserbotClient temporal.
+    3. Sin creds: cliente activo por defecto."""
     from services import userbot_service
+    if creds and creds.get("tg_user_id"):
+        ctype = creds.get("client_type") or "telethon"
+        try:
+            ok = userbot_service._get_conn().execute(
+                "SELECT 1 FROM userbot_sessions WHERE tg_user_id=? "
+                "AND client_type=? AND session_string IS NOT NULL "
+                "AND session_string != '' LIMIT 1",
+                (int(creds["tg_user_id"]), ctype)).fetchone()
+        except Exception:
+            ok = None
+        if not ok:
+            raise ValueError(f"Sin sesión {ctype} para tg_user_id={creds['tg_user_id']}")
+        ub = await userbot_service.get_active_client(ctype)
+        if ub is None:
+            return None, None
+        try:
+            _sess_tg = (getattr(ub, "session_data", None) or {}).get("tg_user_id")
+        except Exception:
+            _sess_tg = None
+        if _sess_tg is not None and int(_sess_tg) != int(creds["tg_user_id"]):
+            raise ValueError(f"El pool {ctype} es de otro usuario (tg={_sess_tg})")
+        return ub._client, getattr(ub, "_type", ctype)
     if creds and creds.get("session_string"):
         sess = {
             "session_string": creds["session_string"],

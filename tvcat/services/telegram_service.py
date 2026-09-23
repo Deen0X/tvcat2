@@ -1062,6 +1062,8 @@ class TelegramService:
             await self._do_fetch_messages(task)
         elif action == "fetch_one":
             await self._do_fetch_one(task)
+        elif action == "fetch_many":
+            await self._do_fetch_many(task)
         elif action == "download_media":
             await self._do_download_media(task)
         elif action == "fetch_scan":
@@ -1096,6 +1098,8 @@ class TelegramService:
             await self._do_create_topic(task)
         elif action == "delete_topic_history":
             await self._do_delete_topic_history(task)
+        elif action == "topic_has_messages":
+            await self._do_topic_has_messages(task)
         elif action == "check_owner":
             await self._do_check_owner(task)
         elif action == "fetch_cover_messages":
@@ -1263,6 +1267,81 @@ class TelegramService:
             return None
         return None
 
+    async def _do_fetch_many(self, task: Dict):
+        """Re-fetch de ids exactos: UNA llamada get_messages por chunk de 200,
+        sin precache. Guarda en caché central y retorna nº guardados."""
+        channel_id = task["channel_id"]
+        ids = sorted({int(m) for m in (task.get("msg_ids") or []) if int(m or 0) > 0})
+        tg_user_id = task.get("tg_user_id")
+        client_type = task.get("client_type", "telethon")
+        result_callback = task.get("callback")
+        total = 0
+        if not ids:
+            if result_callback:
+                await result_callback(0)
+            return
+        client, need_disc = None, False
+        try:
+            client, need_disc = await self._get_temp_or_pool_client(task)
+            _uid = self._user_key(task)
+            _is_pyro = self._is_pyro(client, client_type)
+            if _is_pyro:
+                client_type = "pyrogram"
+            for _ci in range(0, len(ids), 200):
+                chunk = ids[_ci:_ci + 200]
+                try:
+                    await self._throttle(_uid)
+                    if _is_pyro:
+                        chat = self._pyro_chat_id(channel_id)
+                        try:
+                            await client.get_chat(chat)
+                        except Exception:
+                            try:
+                                async for _d in client.get_dialogs():
+                                    pass
+                            except Exception:
+                                pass
+                        msgs = await client.get_messages(chat, message_ids=chunk)
+                    else:
+                        entity = await client.get_entity(self._to_entity_id(channel_id))
+                        await self._throttle(_uid)
+                        msgs = await client.get_messages(entity, ids=chunk)
+                    if not isinstance(msgs, (list, tuple)):
+                        msgs = [msgs] if msgs else []
+                    batch = []
+                    for m in msgs:
+                        if m is None:
+                            continue
+                        if getattr(m, "action", None) is not None or getattr(m, "service", False):
+                            continue
+                        try:
+                            mid = int(getattr(m, "id", 0) or 0)
+                        except Exception:
+                            continue
+                        if not mid:
+                            continue
+                        batch.append({
+                            "channel_id": str(channel_id),
+                            "topic_id": None,
+                            "msg_id": mid,
+                            "raw": self._serialize_message(m, client_type)
+                        })
+                    if batch:
+                        self.cache.save_messages(batch)
+                        total += len(batch)
+                except Exception as e:
+                    print(f" [TELEGRAM SERVICE] fetch_many {channel_id} chunk {_ci}: {e}", flush=True)
+        except Exception as e:
+            print(f" [TELEGRAM SERVICE] Error fetch_many: {e}", flush=True)
+        finally:
+            try:
+                if need_disc:
+                    await client.disconnect()
+            except Exception:
+                pass
+        if result_callback:
+            await result_callback(total)
+
     async def _do_download_media(self, task: Dict):
         channel_id = task["channel_id"]
         msg_id = task["msg_id"]
@@ -1327,15 +1406,14 @@ class TelegramService:
         need_disconnect = False
         client = None
         try:
-            if session_string and api_id and api_hash:
-                from telethon import TelegramClient
-                from telethon.sessions import StringSession
-                client = TelegramClient(StringSession(session_string), int(api_id), api_hash,
-                                        device_model="TVCat_Central", app_version="1.0")
-                await client.connect()
-                need_disconnect = True
-            else:
-                client = await self.pool.get_client(tg_user_id, client_type)
+            # Cliente vía pool/temporal compartido (respeta client_type; nada de
+            # TelegramClient directo aquí: una sola vía de creación en todo el
+            # programa). need_disconnect siempre False (ver _get_temp_or_pool_client).
+            client, need_disconnect = await self._get_temp_or_pool_client(task)
+            client_type = task.get("client_type", client_type)
+            _is_pyro = self._is_pyro(client, client_type)
+            if _is_pyro:
+                client_type = "pyrogram"
 
             _uid = self._user_key(task)
             _floor = 0.0
@@ -1344,31 +1422,43 @@ class TelegramService:
             except Exception:
                 _floor = 0.0
             await self._throttle(_uid, floor=_floor)
-            try:
-                entity = await client.get_entity(int(channel_id))
-            except ValueError as _ve:
-                # Sesión fresca con caché de entidades vacía: Telethon no
-                # resuelve IDs de canales que nunca vio. Sincronizar diálogos
-                # una vez y reintentar antes de rendirse.
-                if "Could not find the input entity" not in str(_ve):
-                    raise
-                print(f" [TELEGRAM SERVICE] entidad no cacheada {channel_id}: "
-                      f"sincronizando diálogos y reintentando", flush=True)
+            if _is_pyro:
+                entity = await self._pyro_warm_entity(client, channel_id)
+            else:
                 try:
-                    _dlg = await client.get_dialogs()
-                    print(f" [TELEGRAM SERVICE] diálogos sincronizados: "
-                          f"{len(_dlg or [])} chats visibles para esta sesión", flush=True)
-                except Exception as _de:
-                    print(f" [TELEGRAM SERVICE] fallo sincronizando diálogos: "
-                          f"{type(_de).__name__}: {str(_de)[:150]}", flush=True)
-                entity = await client.get_entity(int(channel_id))
+                    entity = await client.get_entity(int(channel_id))
+                except ValueError as _ve:
+                    # Sesión fresca con caché de entidades vacía: Telethon no
+                    # resuelve IDs de canales que nunca vio. Sincronizar diálogos
+                    # una vez y reintentar antes de rendirse.
+                    if "Could not find the input entity" not in str(_ve):
+                        raise
+                    print(f" [TELEGRAM SERVICE] entidad no cacheada {channel_id}: "
+                          f"sincronizando diálogos y reintentando", flush=True)
+                    try:
+                        _dlg = await client.get_dialogs()
+                        print(f" [TELEGRAM SERVICE] diálogos sincronizados: "
+                              f"{len(_dlg or [])} chats visibles para esta sesión", flush=True)
+                    except Exception as _de:
+                        print(f" [TELEGRAM SERVICE] fallo sincronizando diálogos: "
+                              f"{type(_de).__name__}: {str(_de)[:150]}", flush=True)
+                    entity = await client.get_entity(int(channel_id))
 
             # Mensaje cabecera de topic (para topo 1/2): se cachea con topic_id del topic.
             if header_msg_id:
                 try:
                     await self._throttle(_uid, floor=_floor)
-                    h = await client.get_messages(entity, ids=int(header_msg_id))
-                    if h and getattr(h, 'action', None) is None:
+                    if _is_pyro:
+                        h = await client.get_messages(self._pyro_chat_id(channel_id),
+                                                      message_ids=int(header_msg_id))
+                        try:
+                            if isinstance(h, (list, tuple)):
+                                h = h[0] if h else None
+                        except Exception:
+                            pass
+                    else:
+                        h = await client.get_messages(entity, ids=int(header_msg_id))
+                    if h and getattr(h, 'action', None) is None and not getattr(h, 'service', False):
                         self.cache.save_messages([{
                             "channel_id": str(channel_id),
                             "topic_id": topic_id,
@@ -1378,56 +1468,38 @@ class TelegramService:
                 except Exception:
                     pass
 
-            iter_kwargs = {"reverse": True}  # de antiguo a nuevo (lotes 1-100, 101-200...)
-            if from_id and from_id > 0:
-                iter_kwargs["min_id"] = from_id
-            if to_id:
-                iter_kwargs["max_id"] = to_id + 1  # Telethon max_id es inclusivo
-            if topic_id is not None:
-                iter_kwargs["reply_to"] = int(topic_id)
-
             total = 0
-            batch = []
             _lote = 0
-            # Rango del lote: iter_messages va de nuevo a viejo.
-            async def _flush(_final=False):
-                nonlocal total, batch, _lote
-                if not batch and not _final:
+            # Guardado común a ambas ramas: recibe el lote, lo persiste,
+            # cuenta progreso y loguea. Las ramas acumulan de 100 en 100.
+            async def _save(items):
+                nonlocal total, _lote
+                if not items:
                     return 0, 0
-                _lo = min(int(m["msg_id"]) for m in batch) if batch else 0
-                _hi = max(int(m["msg_id"]) for m in batch) if batch else 0
-                if batch:
-                    self.cache.save_messages(batch)
-                    total += len(batch)
-                    _lote += 1
-                    batch = []
-                    await self._throttle(_uid, floor=_floor)
-                    print(f" [TELEGRAM SERVICE] fetch_scan {channel_id}: "
-                          f"lote {_lote} msgs {_lo}-{_hi} (total {total})", flush=True)
+                _lo = min(int(m["msg_id"]) for m in items)
+                _hi = max(int(m["msg_id"]) for m in items)
+                self.cache.save_messages(items)
+                total += len(items)
+                _lote += 1
+                await self._throttle(_uid, floor=_floor)
+                print(f" [TELEGRAM SERVICE] fetch_scan {channel_id}: "
+                      f"lote {_lote} msgs {_lo}-{_hi} (total {total})", flush=True)
                 if on_batch:
                     try:
                         on_batch(total, _lo, _hi)
                     except TypeError:
                         on_batch(total)
                 return _lo, _hi
-            async for msg in client.iter_messages(entity, **iter_kwargs):
-                if getattr(msg, 'action', None) is not None:
-                    continue
-                t_id = topic_id
-                if t_id is None:
-                    reply = getattr(msg, 'reply_to', None)
-                    if reply is not None and hasattr(reply, 'reply_to_msg_id') and reply.reply_to_msg_id:
-                        t_id = int(reply.reply_to_msg_id)
-                batch.append({
-                    "channel_id": str(channel_id),
-                    "topic_id": t_id,
-                    "msg_id": int(getattr(msg, 'id', 0)),
-                    "raw": self._serialize_message(msg, client_type)
-                })
-                if len(batch) >= 100:
-                    await _flush()
-            if batch:
-                await _flush()
+            if _is_pyro:
+                # Rama Pyrogram: pagina con get_chat_history y filtra en
+                # código (sin min_id/max_id/reply_to de servidor).
+                await self._fetch_scan_pyro(
+                    client, channel_id, from_id, to_id, topic_id,
+                    _uid, _floor, _save)
+            else:
+                await self._fetch_scan_telethon(
+                    client, entity, from_id, to_id, topic_id,
+                    channel_id, client_type, _uid, _floor, _save)
         except Exception as e:
             print(f" [TELEGRAM SERVICE] Error fetch_scan: {e}", flush=True)
             total = 0
@@ -1441,6 +1513,149 @@ class TelegramService:
         result_callback = task.get("callback")
         if result_callback:
             await result_callback(total)
+
+    async def _fetch_scan_telethon(self, client, entity, from_id, to_id,
+                                   topic_id, channel_id, client_type,
+                                   _uid, _floor, _save):
+        """Iteración Telethon del fetch (extraída sin cambios de _do_fetch_scan)."""
+        iter_kwargs = {"reverse": True}  # de antiguo a nuevo (lotes 1-100, 101-200...)
+        if from_id and from_id > 0:
+            iter_kwargs["min_id"] = from_id
+        if to_id:
+            iter_kwargs["max_id"] = to_id + 1  # Telethon max_id es inclusivo
+        if topic_id is not None:
+            iter_kwargs["reply_to"] = int(topic_id)
+        batch = []
+        async for msg in client.iter_messages(entity, **iter_kwargs):
+            if getattr(msg, 'action', None) is not None:
+                continue
+            t_id = topic_id
+            if t_id is None:
+                reply = getattr(msg, 'reply_to', None)
+                if reply is not None and hasattr(reply, 'reply_to_msg_id') and reply.reply_to_msg_id:
+                    t_id = int(reply.reply_to_msg_id)
+            batch.append({
+                "channel_id": str(channel_id),
+                "topic_id": t_id,
+                "msg_id": int(getattr(msg, 'id', 0)),
+                "raw": self._serialize_message(msg, client_type)
+            })
+            if len(batch) >= 100:
+                await _save(batch)
+                batch = []
+        if batch:
+            await _save(batch)
+
+    async def _fetch_scan_pyro(self, client, channel_id, from_id, to_id,
+                               topic_id, _uid, _floor, _save):
+        """Equivalencia Pyrogram del fetch por rango (Telethon iter_messages
+        no existe en pyro): pagina get_chat_history por offset_id (nuevo→viejo)
+        y filtra rango/topic en código. Guarda con el mismo formato."""
+        chat = self._pyro_chat_id(channel_id)
+        try:
+            _from = int(from_id or 0)
+        except Exception:
+            _from = 0
+        try:
+            _to = int(to_id) if to_id else 0
+        except Exception:
+            _to = 0
+        try:
+            _topic = int(topic_id) if topic_id is not None else None
+        except Exception:
+            _topic = None
+        batch = []
+        off = (_to + 1) if _to > 0 else 0
+        _last_off = None
+        while True:
+            await self._throttle(_uid, floor=_floor)
+            try:
+                raw = [m async for m in client.get_chat_history(
+                    chat, limit=100, offset_id=off)]
+            except Exception as e:
+                print(f" [TELEGRAM SERVICE] fetch_scan pyro history: {e}", flush=True)
+                break
+            if not raw:
+                break
+            try:
+                _min_raw = min(int(getattr(m, "id", 0) or 0) for m in raw)
+            except Exception:
+                _min_raw = 0
+            if _last_off is not None and _min_raw >= _last_off:
+                break  # sin avance: evita bucle infinito
+            _last_off = _min_raw
+            for msg in raw:
+                try:
+                    mid = int(getattr(msg, "id", 0) or 0)
+                except Exception:
+                    continue
+                if not mid:
+                    continue
+                if _from and mid <= _from:
+                    continue
+                if _to and mid > _to:
+                    continue
+                if getattr(msg, "service", False):
+                    continue  # sistema/action: igual que Telethon
+                if _topic is not None:
+                    try:
+                        _th = self._pyro_thread_id(msg)
+                    except Exception:
+                        _th = None
+                    if _th != _topic:
+                        continue
+                    t_id = _topic
+                else:
+                    try:
+                        t_id = self._pyro_thread_id(msg)
+                    except Exception:
+                        t_id = None
+                batch.append({
+                    "channel_id": str(channel_id),
+                    "topic_id": t_id,
+                    "msg_id": mid,
+                    "raw": self._serialize_message(msg, "pyrogram")
+                })
+                if len(batch) >= 100:
+                    await _save(batch)
+                    batch = []
+            if _to and _min_raw > _to:
+                # Lote entero por encima del rango (canal con huecos): seguir.
+                off = _min_raw
+                continue
+            if _min_raw <= _from:
+                break  # ya se cubrió el inicio del rango
+            off = _min_raw
+        if batch:
+            await _save(batch)
+
+    async def _pyro_warm_entity(self, client, channel_id):
+        """Resuelve el chat en Pyrogram; si falla, sincroniza diálogos y reintenta
+        (equivalente al warm-up de Telethon en _do_fetch_scan)."""
+        chat = self._pyro_chat_id(channel_id)
+        try:
+            try:
+                return await client.get_chat(chat)
+            except Exception:
+                pass
+            print(f" [TELEGRAM SERVICE] entidad pyro no cacheada {channel_id}: "
+                  f"sincronizando diálogos y reintentando", flush=True)
+            try:
+                _n = 0
+                async for _d in client.get_dialogs():
+                    _n += 1
+                print(f" [TELEGRAM SERVICE] diálogos pyro sincronizados: "
+                      f"{_n} chats visibles", flush=True)
+            except Exception as _de:
+                print(f" [TELEGRAM SERVICE] fallo diálogos pyro: "
+                      f"{type(_de).__name__}: {str(_de)[:150]}", flush=True)
+            return await client.get_chat(chat)
+        except Exception:
+            # Último recurso: el peer crudo (los métodos raw lo aceptan).
+            try:
+                return await client.resolve_peer(chat)
+            except Exception:
+                return chat
 
     async def scan_messages(self, channel_id: str, from_id: int, to_id: int = None,
                             topic_id: int = None, tg_user_id: int = None,
@@ -1468,6 +1683,27 @@ class TelegramService:
             "header_msg_id": header_msg_id,
             "client_type": client_type,
             "on_batch": on_batch,
+            "callback": callback
+        }, priority=PRIORITY_NORMAL)
+        return await fut
+
+    async def fetch_many(self, channel_id: str, msg_ids: list,
+                         tg_user_id: int = None,
+                         client_type: str = "telethon") -> int:
+        """Re-fetch de ids exactos en UNA llamada (get_messages por lista),
+        sin precache de rangos. Para reparaciones puntuales (evita el coste
+        de fetch_one × N con su ventana ±50). Retorna nº guardados."""
+        fut = asyncio.get_event_loop().create_future()
+
+        async def callback(total):
+            if not fut.done():
+                fut.set_result(total)
+        await self.queue.put({
+            "action": "fetch_many",
+            "channel_id": channel_id,
+            "msg_ids": [int(m) for m in (msg_ids or []) if int(m or 0) > 0],
+            "tg_user_id": tg_user_id,
+            "client_type": client_type,
             "callback": callback
         }, priority=PRIORITY_NORMAL)
         return await fut
@@ -1832,8 +2068,13 @@ class TelegramService:
     def _serialize_message(self, msg, client_type: str) -> dict:
         """Serializa un mensaje de Telegram al formato que consume el parser de tgindex
         (dict completo tipo `Message.to_dict()`: id, message, media con `_` discriminador,
-        document/photo, action, reply_to, chat_id)."""
+        document/photo, action, reply_to, chat_id). Soporta Telethon y Pyrogram."""
         try:
+            if self._looks_pyro_message(msg) or client_type == "pyrogram":
+                try:
+                    return self._serialize_pyro_message(msg)
+                except Exception:
+                    pass
             if client_type == "telethon":
                 try:
                     d = msg.to_dict()
@@ -1865,6 +2106,91 @@ class TelegramService:
             return base
         except Exception:
             return {"id": 0, "message": ""}
+
+    @staticmethod
+    def _looks_pyro_message(msg) -> bool:
+        """True si el objeto parece mensaje Pyrogram (no Telethon)."""
+        try:
+            if msg is None:
+                return False
+            if hasattr(msg, "message_thread_id") or hasattr(msg, "media_group_id"):
+                return True
+            # Telethon siempre expone .to_dict con peer_id; pyro no.
+            if hasattr(msg, "reply_to_top_message_id") and not hasattr(msg, "to_dict"):
+                return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _pyro_thread_id(msg):
+        """Topic/foro al que pertenece un mensaje Pyrogram (o None)."""
+        try:
+            tid = getattr(msg, "reply_to_top_message_id", None)
+            if tid:
+                return int(tid)
+            tid = getattr(msg, "message_thread_id", None)
+            if tid and int(tid) != 1:
+                return int(tid)
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def _serialize_pyro_message(cls, msg) -> dict:
+        """Mapea un Message de Pyrogram al formato del parser tgindex
+        (mismo contrato que la rama Telethon de _serialize_message)."""
+        from services.userbot_service import pyro_media
+        base = {
+            "id": int(getattr(msg, "id", 0) or 0),
+            "date": str(getattr(msg, "date", "")) if hasattr(msg, "date") else "",
+            "message": getattr(msg, "text", None) or getattr(msg, "caption", None) or "",
+            "media": None,
+            "grouped_id": getattr(msg, "media_group_id", None),
+            "reply_to": getattr(msg, "reply_to_message_id", None),
+            "chat_id": str(getattr(getattr(msg, "chat", None), "id", "") or ""),
+        }
+        try:
+            medium = pyro_media(msg)
+        except Exception:
+            medium = None
+        if medium is not None:
+            try:
+                kind = type(medium).__name__.lower()
+                if "photo" in kind:
+                    base["media"] = {"_": "MessageMediaPhoto",
+                                     "photo": {"_": "Photo"}}
+                else:
+                    fname = str(getattr(medium, "file_name", "") or "")
+                    mime = str(getattr(medium, "mime_type", "") or "").lower()
+                    size = getattr(medium, "file_size", None)
+                    attrs = [{"_": "DocumentAttributeFilename",
+                              "file_name": fname}]
+                    try:
+                        dur = getattr(medium, "duration", None)
+                        if dur:
+                            attrs.append({"_": "DocumentAttributeVideo",
+                                          "duration": int(dur),
+                                          "supports_streaming": True})
+                    except Exception:
+                        pass
+                    doc = {"_": "Document", "mime_type": mime,
+                           "attributes": attrs}
+                    try:
+                        if size:
+                            doc["size"] = int(size)
+                    except Exception:
+                        pass
+                    base["media"] = {"_": "MessageMediaDocument",
+                                     "document": doc}
+            except Exception:
+                base["media"] = {"_": "MessageMediaUnknown"}
+        try:
+            if getattr(msg, "service", False):
+                base["action"] = {"_": "MessageService"}
+        except Exception:
+            pass
+        return base
 
     async def fetch_messages(self, channel_id: str, from_id: int, to_id: int = None,
                              topic_id: int = None, tg_user_id: int = None,
@@ -2174,6 +2500,32 @@ class TelegramService:
 
         try:
             await self._throttle(_uid)
+            if self._is_pyro(client, task.get("client_type")):
+                # Rama Pyrogram (el cuerpo anterior era solo-Telethon).
+                try:
+                    _chat = self._pyro_chat_id(chat)
+                    try:
+                        await client.get_chat(_chat)
+                    except Exception:
+                        try:
+                            async for _d in client.get_dialogs():
+                                pass
+                        except Exception:
+                            pass
+                    _lm = None
+                    try:
+                        async for _m in client.get_chat_history(_chat, limit=1):
+                            _lm = _m
+                            break
+                    except Exception as _e_h:
+                        print(f" [TELEGRAM SERVICE] channel_last pyro sin acceso a {chat}: "
+                              f"{type(_e_h).__name__}", flush=True)
+                        await _done(0)
+                        return
+                    await _done(int(getattr(_lm, "id", 0) or 0))
+                except Exception:
+                    await _done(0)
+                return
             try:
                 entity = await client.get_entity(self._to_entity_id(chat))
             except ValueError as _ve:
@@ -2585,6 +2937,71 @@ class TelegramService:
                 except Exception:
                     pass
 
+    async def _do_topic_has_messages(self, task: Dict):
+        """¿El topic tiene mensajes de contenido? Telethon: iter_messages con
+        reply_to (exacto). Pyro: barrido de las 300 recientes filtrando por
+        reply_to_top_message_id (ventana reciente; un topic con contenido solo
+        antiguo puede dar False). En ambos se saltan mensajes de servicio."""
+        chat = task["chat"]
+        topic_id = int(task.get("topic_id") or 0)
+        callback = task.get("callback")
+        ctype = _preferred_client_type(task.get("client_type"))
+        task = dict(task, client_type=ctype)
+        client, need_disc = await self._get_temp_or_pool_client(task)
+        _uid = self._user_key(task)
+        try:
+            if self._is_pyro(client, ctype):
+                await self._throttle(_uid)
+                found = False
+                try:
+                    n = 0
+                    async for m in client.get_chat_history(
+                            self._pyro_chat_id(chat), limit=500):
+                        n += 1
+                        try:
+                            if getattr(m, "service", None) is not None:
+                                continue
+                            # OJO pyrofork: en forum_topic NO rellena
+                            # reply_to_top_message_id (solo message_thread_id).
+                            top = getattr(m, "reply_to_top_message_id", None)
+                            if top is None:
+                                top = getattr(m, "message_thread_id", None)
+                            if top is None:
+                                rt = getattr(m, "reply_to_message", None)
+                                top = getattr(rt, "reply_to_top_message_id", None) if rt else None
+                            if top is not None and int(top) == int(topic_id):
+                                found = True
+                                break
+                        except Exception:
+                            continue
+                        if n >= 500:
+                            break
+                except Exception as e:
+                    print(f" [TELEGRAM SERVICE] Error en tarea topic_has_messages (pyro) : {e}", flush=True)
+                    raise
+                if callback:
+                    await callback(found)
+                return
+            await self._throttle(_uid)
+            entity = await client.get_entity(self._to_entity_id(chat))
+            found = False
+            async for m in client.iter_messages(entity, reply_to=int(topic_id), limit=2):
+                try:
+                    if getattr(m, "action", None) is not None:
+                        continue
+                    found = True
+                    break
+                except Exception:
+                    continue
+            if callback:
+                await callback(found)
+        finally:
+            if need_disc:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
     async def delete_topic_history(self, chat, topic_id: int, tg_user_id=None,
                                    client_type="telethon",
                                    session_string=None, api_id=None, api_hash=None) -> bool:
@@ -2595,6 +3012,24 @@ class TelegramService:
                 fut.set_result(result)
         await self.queue.put({
             "action": "delete_topic_history", "chat": chat, "topic_id": int(topic_id),
+            "tg_user_id": tg_user_id, "client_type": client_type,
+            "session_string": session_string, "api_id": api_id, "api_hash": api_hash,
+            "callback": callback
+        }, priority=PRIORITY_NORMAL)
+        return await fut
+
+    async def topic_has_messages(self, chat, topic_id: int, tg_user_id=None,
+                                 client_type=None, session_string=None,
+                                 api_id=None, api_hash=None) -> Optional[bool]:
+        """¿El topic tiene mensajes? True/False, o None si no se pudo
+        determinar (el worker resuelve None ante excepción)."""
+        fut = asyncio.get_event_loop().create_future()
+
+        async def callback(result):
+            if not fut.done():
+                fut.set_result(result)
+        await self.queue.put({
+            "action": "topic_has_messages", "chat": chat, "topic_id": int(topic_id),
             "tg_user_id": tg_user_id, "client_type": client_type,
             "session_string": session_string, "api_id": api_id, "api_hash": api_hash,
             "callback": callback

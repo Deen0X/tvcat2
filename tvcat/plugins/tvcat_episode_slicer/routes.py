@@ -443,6 +443,9 @@ async def batch(body: BatchReq, request: Request):
             # Avanzar: el resto queda como vigente para el siguiente corte.
             eps = [e for e in eps if int(e.get("telegram_msg_id") or 0) < _mid]
             # Releer catálogo no cambia (mismo item_id del resto); eps ya filtrados.
+        _resubcat_item(conn, cat.get("item_id"))
+        for _p in parts:
+            _resubcat_item(conn, _p["new_item_id"])
         conn.commit()
         parts.sort(key=lambda p: p["from_msg_id"])
         central_ok, central_detail = _refresh_central(
@@ -458,6 +461,25 @@ async def batch(body: BatchReq, request: Request):
             conn.close()
         except Exception:
             pass
+
+
+def _resubcat_item(conn, item_id: str):
+    """Recalcula la subcategoría de un título (el nº de episodios cambió).
+    Usa texto efectivo (enriched local > raw en caché) + config del scan.
+    Best-effort, sin commit (lo hace el llamante)."""
+    try:
+        try:
+            from plugins.tvcat_tgindex.scanner import resolve_item_subcat as _ris
+        except Exception:
+            from tvcat.plugins.tvcat_tgindex.scanner import resolve_item_subcat as _ris
+        row = conn.execute("SELECT * FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+        if not row:
+            return
+        new_sub = _ris(conn, dict(row))
+        if new_sub:
+            conn.execute("UPDATE unified_catalog SET subcategory=? WHERE item_id=?", (new_sub, item_id))
+    except Exception:
+        pass
 
 
 @router.post("/api/slicer/preview")
@@ -621,6 +643,8 @@ async def split(body: SplitReq, request: Request):
         conn.execute(
             "INSERT INTO slicer_cuts (source, orig_item_id, new_item_id, cut_msg_id, created) VALUES (?,?,?,?,?)",
             (source, cat.get("item_id"), new_item_id, int(body.from_msg_id), now))
+        _resubcat_item(conn, cat.get("item_id"))
+        _resubcat_item(conn, new_item_id)
         conn.commit()
 
         # Refresca export + central (igual que toggle: sync + sync_plugin_cache).
@@ -720,6 +744,7 @@ async def unsplit(body: UnsplitReq, request: Request):
                     _ec.close()
         except Exception:
             pass
+        _resubcat_item(conn, orig.get("item_id"))
         conn.commit()
         central_ok, central_detail = _refresh_central(
             f"slicer unsplit {body.new_item_id}",

@@ -639,6 +639,42 @@ async def save_enriched(item_id: str, body: SaveReq, request: Request):
     _title_applied = bool(_ap.get("title_applied"))
     _c_title = _ap.get("catalog_title") or ""
     _alts_applied = _ap.get("alts_applied") or []
+    # EditSync: la edición local manda (purga pendientes de la key), limpia la
+    # marca de edición y notifica peers si auto_export (fire-and-forget).
+    try:
+        import importlib as _il
+        _es = _il.import_module("tvcat.plugins.tvcat_editsync.routes")
+        try:
+            _es.discard_pending_for_key(key)
+        except Exception:
+            pass
+        try:
+            _es.notify_local_save(created_by, key)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # Subcategoría auto: recalcular con el texto efectivo nuevo (Type del
+    # cover manda; si no, nº de episodios). Best-effort, no bloquea el save.
+    try:
+        import importlib as _il3
+        _tg = _il3.import_module("tvcat.plugins.tvcat_tgindex.scanner")
+        from services.catalog_service import get_conn as _gcc
+        _cc = _gcc()
+        try:
+            _row = _cc.execute("SELECT * FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+            if _row:
+                _new_sub = _tg.resolve_item_subcat(_cc, dict(_row), body.cover_text or "")
+                if _new_sub:
+                    _cc.execute("UPDATE unified_catalog SET subcategory=? WHERE item_id=?", (_new_sub, item_id))
+                    _cc.commit()
+        finally:
+            try:
+                _cc.close()
+            except Exception:
+                pass
+    except Exception as _e_sub:
+        print(f" [Enricher] subcat recalc: {_e_sub}")
     return {"ok": True, "channelid_msgid": key, "title_applied": _title_applied, "catalog_title": _c_title if _title_applied else "", "alts_applied": _alts_applied}
 
 
