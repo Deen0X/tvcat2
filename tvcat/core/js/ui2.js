@@ -306,7 +306,7 @@ var UI = {
         if (tabName === 'covers' && !isAdmin) {
             tabName = 'profile';
         }
-        var tabs = ['profile', 'security', 'screen', 'cache', 'categories', 'remote', 'admin', 'plugins', 'version', 'userbot', 'mobile', 'contents', 'administration', 'logs', 'enricher', 'covers'];
+        var tabs = ['profile', 'security', 'screen', 'cache', 'categories', 'remote', 'admin', 'plugins', 'version', 'userbot', 'mobile', 'contents', 'administration', 'logs', 'enricher', 'covers', 'about'];
         for (var ti = 0; ti < tabs.length; ti++) {
             var t = tabs[ti];
             var btn = document.getElementById('tab-btn-' + t);
@@ -350,7 +350,8 @@ var UI = {
             'administration': 'Mantenimiento',
             'logs': 'Logs',
             'enricher': 'Enriquecedor',
-            'covers': 'Customización'
+            'covers': 'Customización',
+            'about': 'Acerca de'
         };
         var titleTextEl = document.getElementById('settings-title-text');
         if (titleTextEl) {
@@ -372,6 +373,12 @@ var UI = {
         // Si entramos en la pestaña version, cargamos la información de versión
         if (tabName === 'version') {
             this.loadVersionInfo();
+        }
+
+        // Si entramos en la pestaña about, versión + contenido.
+        if (tabName === 'about') {
+            try { if (window.loadAboutVersion) window.loadAboutVersion(); } catch (e) {}
+            try { if (window.loadAboutContent) window.loadAboutContent(); } catch (e2) {}
         }
 
         // Si entramos en la pestaña userbot, cargamos la configuración global de userbot

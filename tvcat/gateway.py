@@ -391,8 +391,8 @@ CORE_DIR = os.path.join(BASE_DIR, "core")
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
 DB_PATH = os.path.join(BASE_DIR, "data", "tvcat.db")
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "tvcat_config.json")
-__version__ = "2.1"
-__codename__ = "Soul Blade"
+__version__ = "2.2"
+__codename__ = "SoulCalibur DC"
 
 from services.translate_service import xTranslate, load_translations
 load_translations()
@@ -8236,6 +8236,39 @@ async def admin_restart_custom(request: Request):
         return {"success": True, "message": f"Comando lanzado: {cmd}"}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+@app.get(api_url("/api/update/check"))
+async def update_check(request: Request, channel: str = "stable"):
+    from services import update_service
+    return update_service.check(channel)
+
+
+@app.post(api_url("/api/update/apply"))
+async def update_apply(request: Request):
+    from services.auth_service import get_session
+    import sys
+    session = get_session(request.cookies.get("tvcat_session",""))
+    if not session or session.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    channel = (body.get("channel") or "stable")
+    from services import update_service
+    res = await asyncio.to_thread(update_service.apply_update, channel)
+    if not res.get("ok"):
+        return res
+    print(" [UPDATE] Aplicado (%s). Reiniciando en 2s..." % (res.get("version") or channel))
+
+    async def _do_restart():
+        await asyncio.sleep(2)
+        try:
+            os.execv(sys.executable, [sys.executable, "gateway.py"] + sys.argv[1:])
+        except Exception:
+            sys.exit(1)
+    asyncio.create_task(_do_restart())
+    return res
 
 @app.get(api_url("/api/cache/rebuild-status"))
 async def rebuild_status():

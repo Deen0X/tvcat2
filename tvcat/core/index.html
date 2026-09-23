@@ -198,6 +198,10 @@
                     <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
                     <span class="tab-btn-text">Customización</span>
                 </button>
+                <button class="tab-btn" id="tab-btn-about" onclick="switchSettingsTab('about')">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor;vertical-align:middle;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+                    <span class="tab-btn-text">Acerca de</span>
+                </button>
             </div>
             <div class="settings-tab-container">
                 <div class="tab-pane" id="pane-profile">
@@ -844,6 +848,30 @@
                         <div style="font-size:0.75rem;color:#888;">Genérico final: si nada matchea se usa el fallback de media. Logo TVCat para el skeleton y carga inicial.</div>
                     </div>
                 </div>
+                <div class="tab-pane hidden" id="pane-about">
+                    <div style="display:flex;flex-direction:column;gap:12px;padding:8px 0;">
+                        <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
+                            <img src="/static/dnx.project.gif" id="about-blessing" alt="dnx.projects" style="flex:1 1 200px;max-width:50%;max-height:220px;object-fit:contain;border-radius:12px;" onerror="this.style.display='none'">
+                            <div style="flex:1 1 200px;display:flex;flex-direction:column;align-items:flex-start;gap:10px;min-width:200px;">
+                                <div style="font-size:1.1rem;font-weight:700;">TVCat2 — Telegram Visual Catalog</div>
+                                <a href="https://github.com/Deen0X/tvcat2" target="_blank" rel="noopener" style="font-size:0.85rem;color:var(--accent);text-decoration:none;">dnx.projects</a>
+                                <button id="about-version-btn" class="btn-secondary" onclick="toggleAboutUpdate()" title="Pulsa para ver opciones de actualización" style="padding:8px 18px;font-size:0.85rem;">v…</button>
+                                <div id="about-update-box" style="display:none;width:100%;border:1px solid var(--border-color);border-radius:8px;padding:12px;box-sizing:border-box;">
+                                    <div id="about-update-info" style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:10px;">Comprobando versión…</div>
+                                    <label style="display:flex;align-items:center;gap:8px;font-size:0.8rem;cursor:pointer;margin-bottom:10px;">
+                                        <input type="checkbox" id="about-update-dev" style="accent-color:var(--accent);"> Descargar versión en desarrollo (rama main)
+                                    </label>
+                                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                        <button class="btn-secondary" onclick="checkAboutUpdate()" style="padding:6px 12px;font-size:0.8rem;">Comprobar actualización</button>
+                                        <button class="btn-primary" onclick="applyAboutUpdate()" style="padding:6px 12px;font-size:0.8rem;" disabled>Descargar y actualizar</button>
+                                    </div>
+                                    <div id="about-update-status" style="font-size:0.75rem;color:var(--text-secondary);margin-top:8px;"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="about-md-box" style="width:100%;max-height:300px;overflow-y:auto;text-align:left;font-size:0.8rem;line-height:1.5;color:var(--text-secondary);border:1px solid var(--border-color);border-radius:8px;padding:12px 14px;box-sizing:border-box;background:rgba(0,0,0,0.2);"></div>
+                    </div>
+                </div>
             </div>
             <div class="settings-footer" style="display:flex;justify-content:flex-end;gap:8px;margin-top:0;padding:12px 20px;border-top:1px solid var(--border-color);align-items:center;flex-shrink:0;">
                 <button class="btn-primary" onclick="saveGlobalSettings()" style="padding:10px 20px;">Guardar Cambios</button>
@@ -979,6 +1007,6 @@
     <script src="js/catalog.js?v=20260922e"></script>
     <script src="js/player.js?v=20260801"></script>
     <script src="js/ui2.js?v=20260910b"></script>
-    <script src="js/app.js?v=20260922g"></script>
+    <script src="js/app.js?v=20260923b"></script>
 </body>
 </html>

@@ -528,6 +528,7 @@ function switchSettingsTab(tab) {
     if (tab === 'contents') loadContentsTrees();
     if (tab === 'administration') window.adminLoadLog();
     if (tab === 'enricher') { window.loadEnrichConfig(); if (window.loadFtags) window.loadFtags(); }
+    if (tab === 'about') { try { window.loadAboutVersion(); } catch (e) {} try { window.loadAboutContent(); } catch (e2) {} }
     if (tab === 'ai') { try { window.loadAiConfig(); } catch (e) {} }
     if (tab === 'userbot') {
         // asegurar colapsables inicializados aunque config aún no haya vuelto
@@ -1013,6 +1014,144 @@ function loadUserbotConfig() {
             error: function() { gotBase = []; done(); }
         });
     };
+    window.loadAboutVersion = function() {
+        var btn = document.getElementById('about-version-btn');
+        if (!btn) return;
+        window.API.ajax({
+            url: '/api/server/info',
+            success: function(r) {
+                var v = (r && r.version) || '?';
+                var c = (r && r.codename) || '';
+                btn.textContent = 'v' + v + (c ? ' ' + c : '');
+            },
+            error: function() { btn.textContent = 'v?'; }
+        });
+    };
+    window.toggleAboutUpdate = function() {
+        var box = document.getElementById('about-update-box');
+        if (!box) return;
+        var show = box.style.display === 'none' || !box.style.display;
+        box.style.display = show ? 'block' : 'none';
+        if (show) window.checkAboutUpdate();
+    };
+    window.checkAboutUpdate = function() {
+        var info = document.getElementById('about-update-info');
+        var dev = document.getElementById('about-update-dev');
+        var applyBtn = document.querySelector('#about-update-box .btn-primary');
+        if (info) info.textContent = 'Comprobando versión…';
+        if (applyBtn) applyBtn.disabled = true;
+        var channel = (dev && dev.checked) ? 'dev' : 'stable';
+        window.API.ajax({
+            url: '/api/update/check?channel=' + channel,
+            success: function(r) {
+                if (!r) return;
+                var txt = 'Actual: v' + (r.current || '?') + ' · ' +
+                    (channel === 'dev' ? ('Rama main @' + (r.remote || '?')) : ('Última release: ' + (r.remote || '?')));
+                if (r.update) txt += ' — HAY ACTUALIZACIÓN';
+                else txt += ' — estás al día';
+                if (info) info.textContent = txt;
+                if (applyBtn) applyBtn.disabled = !r.update;
+            },
+            error: function() { if (info) info.textContent = 'No se pudo comprobar (¿sin internet?).'; }
+        });
+    };
+    window.applyAboutUpdate = function() {
+        var st = document.getElementById('about-update-status');
+        var dev = document.getElementById('about-update-dev');
+        if (!confirm('Descargar y aplicar la actualización? El servidor se reiniciará.')) return;
+        if (st) st.textContent = 'Descargando…';
+        window.API.ajax({
+            method: 'POST', url: '/api/update/apply',
+            data: { channel: (dev && dev.checked) ? 'dev' : 'stable' },
+            success: function(r) {
+                if (st) st.textContent = (r && r.ok) ? 'Actualizado. Reiniciando…' : ('Error: ' + ((r && r.error) || '?'));
+                if (r && r.ok) setTimeout(function() { location.reload(); }, 8000);
+            },
+            error: function() { if (st) st.textContent = 'Error de red.'; }
+        });
+    };
+    window.renderMarkdown = function(src) {
+        var esc = function(s) {
+            return String(s == null ? '' : s).replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        };
+        var inline = function(s) {
+            s = esc(s);
+            s = s.replace(/`([^`]+)`/g, '<code style="background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px;">$1</code>');
+            s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" style="color:var(--accent);">$1</a>');
+            s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+            return s;
+        };
+        var lines = String(src || '').replace(/\r/g, '').split('\n');
+        var html = '', inList = false, inCode = false;
+        for (var i = 0; i < lines.length; i++) {
+            var ln = lines[i];
+            if (/^```/.test(ln)) {
+                html += inCode ? '</pre>' : '<pre style="background:rgba(0,0,0,0.35);padding:8px;border-radius:6px;overflow-x:auto;font-size:0.75rem;">';
+                inCode = !inCode;
+                continue;
+            }
+            if (inCode) { html += esc(ln) + '\n'; continue; }
+            var m;
+            if ((m = ln.match(/^(#{1,3})\s+(.*)$/))) {
+                if (inList) { html += '</ul>'; inList = false; }
+                var lv = m[1].length;
+                html += '<h' + (lv + 2) + ' style="margin:12px 0 6px;font-size:' + (lv === 1 ? '1rem' : '0.85rem') + ';">' + inline(m[2]) + '</h' + (lv + 2) + '>';
+            } else if (/^\s*---+\s*$/.test(ln)) {
+                if (inList) { html += '</ul>'; inList = false; }
+                html += '<hr style="border:none;border-top:1px solid var(--border-color);margin:10px 0;">';
+            } else if (/^\s*[-*]\s+/.test(ln)) {
+                if (!inList) { html += '<ul style="margin:4px 0;padding-left:20px;">'; inList = true; }
+                html += '<li>' + inline(ln.replace(/^\s*[-*]\s+/, '')) + '</li>';
+            } else if (/^\s*\d+\.\s+/.test(ln)) {
+                if (!inList) { html += '<ul style="margin:4px 0;padding-left:20px;">'; inList = true; }
+                html += '<li>' + inline(ln.replace(/^\s*\d+\.\s+/, '')) + '</li>';
+            } else if (/^\s*$/.test(ln)) {
+                if (inList) { html += '</ul>'; inList = false; }
+            } else {
+                if (inList) { html += '</ul>'; inList = false; }
+                html += '<p style="margin:6px 0;">' + inline(ln) + '</p>';
+            }
+        }
+        if (inList) html += '</ul>';
+        if (inCode) html += '</pre>';
+        return html;
+    };
+    window.loadAboutContent = function() {
+        var box = document.getElementById('about-md-box');
+        if (!box) return;
+        box.innerHTML = '<span style="font-size:0.8rem;">Cargando…</span>';
+        window.API.ajax({
+            url: '/static/tvcat.md',
+            success: function(t) {
+                try { box.innerHTML = window.renderMarkdown(typeof t === 'string' ? t : ''); }
+                catch (e) { box.textContent = typeof t === 'string' ? t : ''; }
+            },
+            error: function() { box.textContent = 'No se pudo cargar la información.'; }
+        });
+    };
+    window._initSettingsTabsWheel = function() {
+        var bar = document.getElementById('settings-tabs-container');
+        if (!bar || bar.getAttribute('data-wheel') === '1') return;
+        bar.setAttribute('data-wheel', '1');
+        var onWheel = function(e) {
+            try {
+                var d = e.deltaY || 0;
+                if (!d) return;
+                var max = bar.scrollWidth - bar.clientWidth;
+                if (max <= 0) return;
+                var before = bar.scrollLeft;
+                bar.scrollLeft += d;
+                if (bar.scrollLeft !== before && e.preventDefault) e.preventDefault();
+            } catch (err) {}
+        };
+        if (bar.addEventListener) {
+            bar.addEventListener('wheel', onWheel, { passive: false });
+        } else if (bar.attachEvent) {
+            bar.attachEvent('onmousewheel', onWheel);
+        }
+    };
+    try { window._initSettingsTabsWheel(); } catch (e0) {}
     window.loadFtags = window.loadCustomTags;
     window.onCustomTagSelect = function() {
         var sel = document.getElementById('ctag-select');
