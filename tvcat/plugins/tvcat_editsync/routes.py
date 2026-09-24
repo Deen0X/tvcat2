@@ -718,8 +718,12 @@ def build_package(since: int = 0, instance_id: str = "") -> bytes:
                         fn = "col-" + _safe_cover_name(serial)
                         cover_files[fn] = bytes(_cb)
                         counts_covers += 1
-                except Exception:
+                except Exception as _e_cb:
+                    print(f"[EditSync] export collection '{col.get('name') or '?'}': cover error {_e_cb}", flush=True)
                     fn = ""
+                print(f"[EditSync] export collection '{col.get('name') or '?'}'"
+                      f" serial={serial or '-'} cover={'%d bytes' % len(cover_files.get(fn) or b'') if fn else 'SIN COVER'}",
+                      flush=True)
                 collections.append({
                     "name": col.get("name") or "",
                     "serial": serial,
@@ -1058,10 +1062,17 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None, progr
             except Exception:
                 list_local_collections = create_local_collection = None
         if list_local_collections and create_local_collection:
+            # Emparejado POR NOMBRE (las colecciones son locales: no hay clave
+            # física; el serial puede colisionar por DB clonada). Mismo nombre
+            # normalizado => misma colección.
             try:
-                existing = {str(c.get("serial") or ""): c for c in (list_local_collections() or [])}
+                _existing_by_name = {}
+                for _c in (list_local_collections() or []):
+                    _nm = _norm_name(_c.get("name"))
+                    if _nm and _nm not in _existing_by_name:
+                        _existing_by_name[_nm] = _c
             except Exception:
-                existing = {}
+                _existing_by_name = {}
             for col in (pkg.get("collections") or []):
                 try:
                     if not isinstance(col, dict):
@@ -1070,8 +1081,8 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None, progr
                     name = str(col.get("name") or "")
                     if not serial and not name:
                         continue
-                    if serial and serial in existing:
-                        _loc_c = existing[serial]
+                    _loc_c = _existing_by_name.get(_norm_name(name)) if _norm_name(name) else None
+                    if _loc_c is not None:
                         _cposter = (pkg.get("covers") or {}).get(str(col.get("cover_file") or "")) or b""
                         # Idéntica (texto + descripción + entries + imagen):
                         # sincronizada, ni se lista.
@@ -1079,22 +1090,25 @@ async def apply_package(pkg: dict, session: dict, access=None, owner=None, progr
                             _same_txt = ((col.get("cover_text") or "") == (_loc_c.get("cover_text") or "")
                                          and (col.get("description") or "") == (_loc_c.get("description") or "")
                                          and _as_entry_list(col.get("entries")) == _as_entry_list(_loc_c.get("entries", _loc_c.get("entries_json"))))
-                            _lb, _ = _local_cover_by_serial(serial)
+                            _lb, _ = _local_cover_by_serial(str(_loc_c.get("serial") or ""))
                             if _same_txt and bytes(_lb or b"") == bytes(_cposter or b""):
                                 res["skipped"] += 1
                                 continue
                         except Exception:
                             pass
-                        _pending_add("collection", serial, {}, dict(col), dict(existing[serial]), state="pending")
+                        _incc = dict(col)
+                        _incc["staged"] = _stage_cover("col-" + str(_loc_c.get("serial") or serial), _cposter) if _cposter else ""
+                        _pending_add("collection", str(_loc_c.get("serial") or serial or name),
+                                     {}, _incc, dict(_loc_c), state="pending")
                         res["pending"] += 1
                         continue
-                    # Nueva: también a pendientes (nada se crea sin aceptar).
-                    # El cover entrante queda en staging para el apply.
+                    # Nueva (sin colección con ese nombre): también a pendientes
+                    # (nada se crea sin aceptar). El cover entrante queda en staging.
                     try:
                         _cposter2 = (pkg.get("covers") or {}).get(str(col.get("cover_file") or "")) or b""
                         _incc = dict(col)
                         _incc["staged"] = _stage_cover("col-" + (serial or name), _cposter2) if _cposter2 else ""
-                        _pending_add("collection", serial or name, {}, _incc, {}, state="pending")
+                        _pending_add("collection", "new:" + (serial or name), {}, _incc, {}, state="pending")
                         res["pending"] += 1
                     except Exception as e:
                         res["errors"].append(f"colección {name}: {str(e)[:120]}")
@@ -1407,21 +1421,10 @@ async def pending_list(request: Request):
                     has_local = bool(loc)
                     auto = bool(differs) or not has_local
                     try:
-                        _lb, _lm = _local_cover_by_serial(key)
+                        _lb, _lm = _local_cover_by_serial(str((loc.get("serial") if isinstance(loc, dict) else "") or ""))
                         local_poster = bool(_lb)
                     except Exception:
                         local_poster = False
-                    # Colisión de serial (uid duplicado por DB clonada): mismo
-                    # serial, colecciones distintas. No fusionar a ciegas.
-                    conflict = False
-                    try:
-                        if has_local:
-                            _ln, _rn = _norm_name(loc.get("name")), _norm_name(inc.get("name"))
-                            if _ln and _rn and _ln != _rn and _ln not in _rn and _rn not in _ln:
-                                conflict = True
-                                auto = False
-                    except Exception:
-                        pass
                 else:
                     differs = inc_text != loc_text
                     has_local = bool(loc_text or loc_upd)
@@ -1496,24 +1499,45 @@ def _apply_pending_row(row: dict):
             from services.catalog_service import list_local_collections, update_local_collection, create_local_collection
         except Exception:
             from tvcat.services.catalog_service import list_local_collections, update_local_collection, create_local_collection
+        # El emparejado es por NOMBRE (ver apply): buscar el destino por
+        # snapshot (item_id), luego por nombre, luego por serial.
         target = None
         try:
-            for c in (list_local_collections() or []):
+            _all = list_local_collections() or []
+        except Exception:
+            _all = []
+        try:
+            _snap = json.loads(row.get("local_json") or "{}") or {}
+            _snap_iid = str(_snap.get("item_id") or "")
+            if _snap_iid:
+                for c in _all:
+                    if str(c.get("item_id") or "") == _snap_iid:
+                        target = c
+                        break
+        except Exception:
+            pass
+        if target is None:
+            _nm = _norm_name(inc.get("name"))
+            if _nm:
+                for c in _all:
+                    if _norm_name(c.get("name")) == _nm:
+                        target = c
+                        break
+        if target is None:
+            for c in _all:
                 if str(c.get("serial") or "") == str(row.get("key") or ""):
                     target = c
                     break
-        except Exception:
-            target = None
         if target:
             update_local_collection(target["item_id"], name=inc.get("name") or None,
                                     entries=_as_entry_list(inc.get("entries")),
                                     description=inc.get("description"),
                                     cover_text=inc.get("cover_text"))
         else:
-            # Nueva aceptada: crear local + cover si venía. Si el serial
-            # colisionó mientras tanto con otra colección distinta, serial
-            # fresco para no fusionarlas.
-            _use_serial = str(row.get("key") or "")
+            # Nueva aceptada: recrear en local. Serial fresco si el entrante
+            # está ocupado por otra colección distinta.
+            _want_serial = str(inc.get("serial") or "")
+            _use_serial = _want_serial
             try:
                 from services.catalog_service import next_collection_serial
             except Exception:
@@ -1521,10 +1545,10 @@ def _apply_pending_row(row: dict):
                     from tvcat.services.catalog_service import next_collection_serial
                 except Exception:
                     next_collection_serial = None
-            if next_collection_serial:
+            if next_collection_serial and _want_serial:
                 try:
-                    for c in (list_local_collections() or []):
-                        if str(c.get("serial") or "") == _use_serial:
+                    for c in _all:
+                        if str(c.get("serial") or "") == _want_serial:
                             _ln2, _rn2 = _norm_name(c.get("name")), _norm_name(inc.get("name"))
                             if _ln2 and _rn2 and _ln2 != _rn2 and _ln2 not in _rn2 and _rn2 not in _ln2:
                                 _use_serial = next_collection_serial()
@@ -1544,7 +1568,7 @@ def _apply_pending_row(row: dict):
                     _blob = f.read()
                 if _blob:
                     _save_local_cover_by_serial(
-                        str(target.get("serial") or row.get("key") or ""), _blob, "image/jpeg")
+                        str(target.get("serial") or ""), _blob, "image/jpeg")
         except Exception:
             pass
         _staged_delete(inc.get("staged") or "")
