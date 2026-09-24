@@ -20,8 +20,29 @@
     pre { background:#09090b; border:1px solid #27272a; border-radius:4px; padding:6px; max-height:120px; overflow:auto; font-size:11px; white-space:pre-wrap; margin:4px 0 0; }
     #status { margin-left:8px; font-size:12px; }
     .standby { opacity:0.55; }
+    .tg-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:10px 0; }
+    .tg-row .tg-txt { font-size:13px; }
+    .switch { position:relative; display:inline-block; width:52px; height:28px; flex-shrink:0; }
+    .switch input { opacity:0; width:0; height:0; }
+    .slider { position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background-color:#27272a; transition:.4s; border:1px solid rgba(255,255,255,0.05); }
+    .slider:before { position:absolute; content:""; height:20px; width:20px; left:3px; bottom:3px; background-color:#a1a1aa; transition:.4s; }
+    input:checked + .slider { background-color:var(--accent, #22c55e); }
+    input:checked + .slider:before { transform:translateX(24px); background-color:var(--text-primary, #f4f4f5); }
+    .slider.round { border-radius:34px; }
+    .slider.round:before { border-radius:50%; }
     @keyframes esslide { 0% { margin-left:0; } 50% { margin-left:80%; } 100% { margin-left:0; } }
     #syncprog-fill.marquee { animation:esslide 1.2s linear infinite; }
+    #peers, #pending { overflow-x:auto; }
+    #peers table, #pending table { min-width:520px; }
+    #peers td:last-child { white-space:normal !important; }
+    #peers td:last-child button { margin:2px 2px 2px 0; padding:4px 8px; font-size:12px; }
+    .peer-form { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+    .peer-form input { flex:1; min-width:90px; }
+    @media (max-width:640px) {
+        .peer-form input, .peer-form button { flex:1 1 100%; min-width:0; }
+        #peers td:last-child button { display:inline-block; }
+        td, th { padding:5px 3px; font-size:11px; }
+    }
 </style>
 </head>
 <body>
@@ -37,7 +58,7 @@
         </div>
         <div id="syncprog-text" class="muted" style="margin-top:4px;"></div>
     </div>
-    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
+    <div class="peer-form">
         <input type="text" id="peer-name" placeholder="Nombre" style="flex:1;min-width:90px;">
         <input type="text" id="peer-url" placeholder="http://IP:puerto" style="flex:2;min-width:140px;">
         <input type="text" id="peer-token" placeholder="Token" style="flex:2;min-width:140px;">
@@ -45,9 +66,11 @@
     </div>
 </div>
 <div class="card">
-    <label><input type="checkbox" id="cfg-auto"> <span><b>Auto-export</b> (avisar a peers al guardar un cover)</span></label>
-    <label><input type="checkbox" id="cfg-logical"> <span><b>Modo lógico</b> (match por título+año además del físico)</span></label>
-    <label><input type="checkbox" id="cfg-notify"> <span><b>Notificar a peers</b></span></label>
+    <div class="tg-row"><span class="tg-txt"><b>Auto-export</b> (avisar a peers al guardar un cover)</span><label class="switch"><input type="checkbox" id="cfg-auto"><span class="slider round"></span></label></div>
+    <div class="tg-row"><span class="tg-txt"><b>Modo lógico</b> (match por título+año además del físico)</span><label class="switch"><input type="checkbox" id="cfg-logical"><span class="slider round"></span></label></div>
+    <div class="tg-row"><span class="tg-txt"><b>Notificar a peers</b></span><label class="switch"><input type="checkbox" id="cfg-notify"><span class="slider round"></span></label></div>
+    <div class="tg-row"><span class="tg-txt"><b>Auto-aceptar</b> (al sincronizar, importar directo lo más nuevo que lo local)</span><label class="switch"><input type="checkbox" id="cfg-accept"><span class="slider round"></span></label></div>
+    <div class="tg-row"><span class="tg-txt"><b>Botón en accesos rápidos</b> (panel lateral)</span><label class="switch"><input type="checkbox" id="cfg-tray"><span class="slider round"></span></label></div>
     <div style="margin-top:8px;"><button class="btn" onclick="saveCfg()">💾 Guardar</button><span id="status"></span></div>
 </div>
 <div class="card">
@@ -185,7 +208,11 @@ function pullPeer(i) {
         .then(function(w) {
             syncProgressStop();
             var j = w.body || {};
-            if (w.status === 200 && j) setStatus('Aplicados ' + (j.applied || 0) + ', pendientes ' + (j.pending || 0) + ', omitidos ' + (j.skipped || 0) + ', bypass ' + (j.bypassed || 0));
+            if (w.status === 200 && j) {
+                var t = 'Aplicados ' + (j.applied || 0) + ', pendientes ' + (j.pending || 0) + ', omitidos ' + (j.skipped || 0) + ', bypass ' + (j.bypassed || 0);
+                if (j.auto_applied) t += ' (auto: ' + j.auto_applied + ')';
+                setStatus(t);
+            }
             else setStatus('Error: ' + ((j && j.detail) || ('HTTP ' + w.status)));
             loadPending();
         }).catch(function() { syncProgressStop(); setStatus('Error de red'); });
@@ -198,6 +225,8 @@ function loadCfg() {
         document.getElementById('cfg-auto').checked = !!cfg.auto_export;
         document.getElementById('cfg-logical').checked = !!cfg.logical_mode;
         document.getElementById('cfg-notify').checked = cfg.notify_peers !== false;
+        document.getElementById('cfg-accept').checked = !!cfg.auto_accept;
+        document.getElementById('cfg-tray').checked = cfg.show_tray !== false;
         paintPeers();
         var pb = document.getElementById('pullbanner');
         if (cfg.pull_pending && cfg.pull_pending.from) {
@@ -220,7 +249,9 @@ function saveCfg(silent) {
         peers: PEERS.map(function(p) { return { name: p.name, base_url: p.base_url, token: p.token || undefined, has_token: !!((p.has_token || p.keep_token) && !p.token) }; }),
         auto_export: !!document.getElementById('cfg-auto').checked,
         logical_mode: !!document.getElementById('cfg-logical').checked,
-        notify_peers: !!document.getElementById('cfg-notify').checked
+        notify_peers: !!document.getElementById('cfg-notify').checked,
+        auto_accept: !!document.getElementById('cfg-accept').checked,
+        show_tray: !!document.getElementById('cfg-tray').checked
     };
     fetch('/api/editsync/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
         .then(function(r) { return r.json(); })

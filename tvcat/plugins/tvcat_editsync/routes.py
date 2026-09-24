@@ -141,12 +141,13 @@ def _need_admin(request: Request):
 
 def _cfg_all() -> dict:
     cfg = {"peers": [], "auto_export": False, "logical_mode": False,
-           "notify_peers": True, "pull_pending": {}, "instance_id": ""}
+           "notify_peers": True, "auto_accept": False, "show_tray": True,
+           "pull_pending": {}, "instance_id": ""}
     try:
         c = _pconn()
         for r in c.execute("SELECT key, value FROM editsync_config").fetchall():
             k = r["key"]
-            if k in ("auto_export", "logical_mode", "notify_peers"):
+            if k in ("auto_export", "logical_mode", "notify_peers", "auto_accept", "show_tray"):
                 cfg[k] = str(r["value"]) == "1"
             elif k == "peers":
                 try:
@@ -1385,6 +1386,39 @@ def _local_poster(key: str):
     return b"", ""
 
 
+def _pending_auto(kind: str, inc: dict, loc: dict, row_updated: int = 0) -> bool:
+    """¿Este pendiente se auto-selecciona / auto-acepta? Misma regla en la
+    lista y en el sync: entrante más nuevo que el local (o sin local).
+    En colecciones: cualquier diferencia (o sin local)."""
+    try:
+        inc = inc or {}
+        loc = loc if isinstance(loc, dict) else {}
+        if kind == "collection":
+            differs = (json.dumps(_as_entry_list(inc.get("entries")), sort_keys=True, ensure_ascii=False)
+                       != json.dumps(_as_entry_list(loc.get("entries", loc.get("entries_json")) if loc else []), sort_keys=True, ensure_ascii=False)
+                       or (inc.get("cover_text") or "") != (loc.get("cover_text") or "")
+                       or (inc.get("description") or "") != (loc.get("description") or ""))
+            return bool(differs) or not loc
+        inc_text = inc.get("cover_text") or ""
+        loc_text = loc.get("cover_text") or ""
+        if inc_text != loc_text:
+            try:
+                _iu = int(inc.get("updated_at") or row_updated or 0)
+                _lu = int(loc.get("updated_at") or 0)
+            except Exception:
+                return True
+            return (not (loc_text or _lu)) or (_iu >= _lu)
+        try:
+            _iu = int(inc.get("updated_at") or row_updated or 0)
+            _lu = int(loc.get("updated_at") or 0)
+        except Exception:
+            return False
+        has_local = bool(loc_text or _lu)
+        return (not has_local) or (_iu >= _lu)
+    except Exception:
+        return False
+
+
 @router.get("/api/editsync/pending")
 async def pending_list(request: Request):
     _need_session(request)
@@ -1419,7 +1453,7 @@ async def pending_list(request: Request):
                                or (inc.get("cover_text") or "") != (loc.get("cover_text") or "")
                                or (inc.get("description") or "") != (loc.get("description") or ""))
                     has_local = bool(loc)
-                    auto = bool(differs) or not has_local
+                    auto = _pending_auto(kind, inc, loc, int(d.get("updated_at") or 0))
                     try:
                         _lb, _lm = _local_cover_by_serial(str((loc.get("serial") if isinstance(loc, dict) else "") or ""))
                         local_poster = bool(_lb)
@@ -1428,7 +1462,7 @@ async def pending_list(request: Request):
                 else:
                     differs = inc_text != loc_text
                     has_local = bool(loc_text or loc_upd)
-                    auto = (not has_local) or (inc_upd >= loc_upd)
+                    auto = _pending_auto(kind, inc, loc, int(d.get("updated_at") or 0))
                     _lb, _lm = _local_poster(key)
                     local_poster = bool(_lb)
                 out.append({
@@ -1789,11 +1823,44 @@ async def pull_now(request: Request):
     res = await apply_package(
         pkg, sess,
         progress=lambda d, t, ph: _pull_set(ph, d, t, True))
+    # Auto-aceptar: si está activo, se aplican directo los pendientes que
+    # cumplan la misma regla de la lista (más nuevos que el local). Solo
+    # state 'pending' (nunca standby: el usuario puede estar editando).
+    _auto_n = 0
+    try:
+        if _cfg_all().get("auto_accept"):
+            c = _pconn()
+            try:
+                _rows = [dict(r) for r in c.execute(
+                    "SELECT * FROM editsync_pending WHERE state='pending'").fetchall()]
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            for _pr in _rows:
+                try:
+                    _pinc = json.loads(_pr.get("incoming_json") or "{}")
+                    _ploc = json.loads(_pr.get("local_json") or "{}")
+                    if _pending_auto(_pr.get("kind") or "title", _pinc, _ploc,
+                                     int(_pr.get("updated_at") or 0)):
+                        _apply_pending_row(_pr)
+                        _auto_n += 1
+                except Exception:
+                    continue
+    except Exception:
+        pass
     try:
         _cfg_set("pull_pending", {})
     except Exception:
         pass
     _pull_set(running=False)
+    try:
+        res["pending"] = max(0, int(res.get("pending") or 0) - _auto_n)
+        res["applied"] = int(res.get("applied") or 0) + _auto_n
+    except Exception:
+        pass
+    res["auto_applied"] = _auto_n
     return res
 
 
@@ -1810,6 +1877,8 @@ async def config_get(request: Request):
     return {"peers": peers, "auto_export": bool(cfg.get("auto_export")),
             "logical_mode": bool(cfg.get("logical_mode")),
             "notify_peers": bool(cfg.get("notify_peers", True)),
+            "auto_accept": bool(cfg.get("auto_accept")),
+            "show_tray": bool(cfg.get("show_tray", True)),
             "pull_pending": cfg.get("pull_pending") or {},
             "instance_id": cfg.get("instance_id") or "",
             "is_admin": (sess.get("role") == "admin")}
@@ -1844,7 +1913,7 @@ async def config_put(request: Request):
                     pass
             clean.append({"name": name, "base_url": base, "token": token})
         _cfg_set("peers", clean)
-    for k in ("auto_export", "logical_mode", "notify_peers"):
+    for k in ("auto_export", "logical_mode", "notify_peers", "auto_accept", "show_tray"):
         if k in body:
             _cfg_set(k, bool(body.get(k)))
     return {"ok": True}
