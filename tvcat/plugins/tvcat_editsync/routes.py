@@ -1245,7 +1245,7 @@ async def hello(request: Request):
 
 @router.post("/api/editsync/notify")
 async def notify(request: Request):
-    _need_peer(request)
+    peer = _need_peer(request)
     try:
         body = await request.json()
     except Exception:
@@ -1255,6 +1255,20 @@ async def notify(request: Request):
     _cfg_set("pull_pending", {"from": str(body.get("origen") or "?"),
                               "at": int(time.time()),
                               "since": int(body.get("since") or 0)})
+    # Auto-sync: con auto-aceptar, traer+importar solos al recibir el aviso.
+    # El import nunca notifica (va directo a DB), así no hay ping-pong.
+    try:
+        if _cfg_all().get("auto_accept"):
+            _peer_name = str((peer or {}).get("name") or "")
+            if _peer_name:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(_auto_pull_from(_peer_name))
+                except Exception:
+                    pass
+    except Exception:
+        pass
     return {"ok": True}
 
 
@@ -1769,6 +1783,45 @@ async def pull_now(request: Request):
             break
     if not peer:
         raise HTTPException(404, "Peer no encontrado")
+    try:
+        if _PULL.get("running"):
+            raise HTTPException(409, "Ya hay un pull en curso")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return await _do_pull_now(peer, sess)
+
+
+async def _auto_pull_from(peer_name: str):
+    """Pull automático al recibir notify (solo con auto-aceptar)."""
+    try:
+        peer = None
+        for p in (_cfg_all().get("peers") or []):
+            if isinstance(p, dict) and str(p.get("name") or "") == peer_name:
+                peer = p
+                break
+        if not peer:
+            print(f"[EditSync] auto-pull: peer '{peer_name}' ya no existe", flush=True)
+            return
+        try:
+            if _PULL.get("running"):
+                print("[EditSync] auto-pull: ya hay un pull en curso, se omite", flush=True)
+                return
+        except Exception:
+            pass
+        res = await _do_pull_now(peer, {"user_id": 0})
+        print(f"[EditSync] auto-pull de '{peer_name}': aplicados {res.get('applied', 0)},"
+              f" pendientes {res.get('pending', 0)}, omitidos {res.get('skipped', 0)}", flush=True)
+    except Exception as e:
+        print(f"[EditSync] auto-pull error: {type(e).__name__}: {str(e)[:160]}", flush=True)
+    finally:
+        _pull_set(running=False)
+
+
+async def _do_pull_now(peer: dict, sess: dict):
+    """Trae el ZIP del peer, limpia pendientes, importa y auto-acepta.
+    Lanza HTTPException. Usado por pull-now manual y por auto-pull."""
     url = _peer_base(peer.get("base_url")) + "/api/editsync/pull"
     _pull_set("descargando", 0, 0, True)
     try:
