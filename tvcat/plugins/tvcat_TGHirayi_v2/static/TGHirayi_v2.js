@@ -579,6 +579,24 @@
         });
 
         _queue_modal = { content: content, overlay: overlay };
+        window._queue_filter = '';
+        window._queueFilterInput = function(el) {
+            // Filtrado en vivo solo-visual: oculta filas sin recargar del servidor.
+            window._queue_filter = el ? el.value : '';
+            var q = String(window._queue_filter || '').toLowerCase();
+            var scope = (_queue_modal && _queue_modal.content) || document;
+            var rows = scope.querySelectorAll ? scope.querySelectorAll('.tgcopy2-jobrow') : [];
+            var n = 0;
+            for (var i = 0; i < rows.length; i++) {
+                var t = '';
+                try { t = String(rows[i].getAttribute('data-qtitle') || ''); } catch (e) {}
+                var show = !q || t.indexOf(q) !== -1;
+                rows[i].style.display = show ? '' : 'none';
+                if (show) n++;
+            }
+            var lab = scope.querySelector ? scope.querySelector('#tgcopy2-pend-label') : null;
+            if (lab) lab.textContent = 'Pendientes (' + n + (q ? ' de ' + rows.length : '') + ')';
+        };
         window._tgcopy2RefreshQueue = function() {
             if (_queue_modal && _queue_modal.overlay && _queue_modal.overlay.parentNode) {
                 refreshQueue2(_queue_modal.content, _queue_modal.overlay);
@@ -603,8 +621,17 @@
 
     function refreshQueue2(content, overlay) {
         api(API + '/queue', {}, function(res) {
-            // Si el usuario está editando campos (siguiente episodio, audio/subs), posponer el render
-            // para no pisar su escritura (el refresh cada 2.5s reconstruiría el input).
+            // Si el usuario está editando campos (siguiente episodio, audio/subs) o
+            // arrastrando una fila, posponer el render para no pisar su gesto
+            // (el refresh cada 2.5s reconstruiría el DOM).
+            var activeEl = document.activeElement;
+            if (window._queue_dragging) {
+                if (overlay && overlay.parentNode) {
+                    try { if (_queue_modal && _queue_modal._t) clearTimeout(_queue_modal._t); } catch (_eT) {}
+                    _queue_modal._t = setTimeout(function() { if (_queue_modal) _queue_modal._t = null; refreshQueue2(content, overlay); }, 2500);
+                }
+                return;
+            }
             var activeEl = document.activeElement;
             if (activeEl && activeEl.classList &&
                 (activeEl.classList.contains('tgcopy2-next-input') || activeEl.classList.contains('tgcopy2-norm-input'))) {
@@ -790,9 +817,22 @@ html += '</div>';
             }
 
             if (active.length > 0) {
-                html += '<div style="font-size:12px;color:#a1a1aa;margin-bottom:4px;">Pendientes (' + active.length + ')</div>';
-                for (var i = 0; i < active.length; i++) {
-                    html += renderJobRow(active[i], current);
+                // Filtro de visualización (solo cliente): no toca la cola.
+                var _qf = String(window._queue_filter || '').toLowerCase();
+                var shown = active;
+                if (_qf) {
+                    shown = [];
+                    for (var _fi = 0; _fi < active.length; _fi++) {
+                        var _ft = String(active[_fi].title || '').toLowerCase();
+                        if (_ft.indexOf(_qf) !== -1) shown.push(active[_fi]);
+                    }
+                }
+                html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">';
+                html += '<span id="tgcopy2-pend-label" style="font-size:12px;color:#a1a1aa;white-space:nowrap;">Pendientes (' + shown.length + (_qf ? ' de ' + active.length : '') + ')</span>';
+                html += '<input class="tgcopy2-filter-input" placeholder="Filtrar…" value="' + escHtml(window._queue_filter || '') + '" oninput="window._queueFilterInput(this)" style="flex:1;min-width:60px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:3px 8px;font-size:12px;">';
+                html += '</div>';
+                for (var i = 0; i < shown.length; i++) {
+                    html += renderJobRow(shown[i], current);
                 }
             } else {
                 html += '<div style="color:#a1a1aa;text-align:center;padding:12px;font-size:13px;">No hay trabajos pendientes.</div>';
@@ -814,8 +854,17 @@ html += '</div>';
 
             var _panelEl = content.parentNode;
             var _st = _panelEl ? _panelEl.scrollTop : 0;
+            // Si se estaba escribiendo en el filtro, no perder foco/caret con el repintado.
+            var _refocusFilter = !!(document.activeElement && document.activeElement.classList &&
+                document.activeElement.classList.contains('tgcopy2-filter-input'));
             content.innerHTML = html;
             if (_panelEl) _panelEl.scrollTop = _st;
+            if (_refocusFilter) {
+                try {
+                    var _fi2 = content.querySelector('.tgcopy2-filter-input');
+                    if (_fi2) { _fi2.focus(); var _vl = String(_fi2.value || '').length; _fi2.setSelectionRange(_vl, _vl); }
+                } catch (_eF) {}
+            }
             if (overlay && overlay.parentNode) {
                 try { if (_queue_modal && _queue_modal._t) clearTimeout(_queue_modal._t); } catch (_eT2) {}
                 _queue_modal._t = setTimeout(function() { if (_queue_modal) _queue_modal._t = null; refreshQueue2(content, overlay); }, 2500);
@@ -843,14 +892,19 @@ html += '</div>';
         if (j.status === 'error') bgCls += 'border-left:3px solid #ef4444;';
 
         var h = '';
-        h += '<div style="display:flex;align-items:center;gap:6px;padding:8px;margin:3px 0;border-radius:6px;' + bgCls + pausedCls + '">';
+        h += '<div class="tgcopy2-jobrow" data-qid="' + j.id + '" data-qtitle="' + escHtml(String(j.title || '').toLowerCase()) + '" style="display:flex;align-items:center;gap:6px;padding:8px;margin:3px 0;border-radius:6px;' + bgCls + pausedCls + '">';
 
         if (!isDone) {
-            h += '<div style="display:flex;flex-direction:column;gap:1px;flex-shrink:0;">';
-            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'top\')" title="Al inicio" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9650;&#9650;</button>';
-            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'up\')" title="Subir" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9650;</button>';
-            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'down\')" title="Bajar" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9660;</button>';
-            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'bottom\')" title="Al final" style="background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:9px;padding:0;line-height:1;">&#9660;&#9660;</button>';
+            // Controles de prioridad: 2 columnas (izq: mover 1 en blanco;
+            // der: al tope en amarillo, un pelín más grandes) + asa de arrastre.
+            h += '<div style="display:flex;align-items:stretch;gap:3px;flex-shrink:0;">';
+            h += '<span class="tgcopy2-draghandle" title="Arrastrar para reordenar" onpointerdown="window._tgcopy2DragStart(event,\'' + j.id + '\',this)" style="display:flex;align-items:center;color:#71717a;cursor:grab;font-size:18px;letter-spacing:-5px;padding:6px 4px;touch-action:none;user-select:none;-webkit-user-select:none;">&#8942;&#8942;</span>';
+            h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:3px;align-content:center;">';
+            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'up\')" title="Subir uno" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:13px;padding:8px 9px;min-width:40px;line-height:1;">&#9650;</button>';
+            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'top\')" title="Al inicio" style="background:none;border:1px solid #eab308;color:#eab308;border-radius:4px;cursor:pointer;font-size:15px;font-weight:700;padding:8px 9px;min-width:40px;line-height:1;">&#9650;&#9650;</button>';
+            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'down\')" title="Bajar uno" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:13px;padding:8px 9px;min-width:40px;line-height:1;">&#9660;</button>';
+            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'bottom\')" title="Al final" style="background:none;border:1px solid #eab308;color:#eab308;border-radius:4px;cursor:pointer;font-size:15px;font-weight:700;padding:8px 9px;min-width:40px;line-height:1;">&#9660;&#9660;</button>';
+            h += '</div>';
             h += '</div>';
         }
 
@@ -1017,6 +1071,99 @@ html += '</div>';
     window._tgcopy2Move = function(jobId, dir) {
         api(API + '/queue/' + jobId + '/move', { method: 'PUT', data: { direction: dir } }, function() {});
     };
+
+    // ─── Reordenar por arrastre (asa ⋮⋮; táctil + ratón vía Pointer Events) ───
+    var _qdrag = null;
+    function _qdragVisibleRows() {
+        var out = [];
+        try {
+            var scope = (_queue_modal && _queue_modal.content) || document;
+            var rows = scope.querySelectorAll ? scope.querySelectorAll('.tgcopy2-jobrow') : [];
+            for (var i = 0; i < rows.length; i++) {
+                if (rows[i].style.display !== 'none') out.push(rows[i]);
+            }
+        } catch (e) {}
+        return out;
+    }
+    function _qdragRowFromPoint(x, y) {
+        try {
+            var el = document.elementFromPoint(x, y);
+            while (el && el !== document.body) {
+                if (el.classList && el.classList.contains('tgcopy2-jobrow') && el.style.display !== 'none') return el;
+                el = el.parentNode;
+            }
+        } catch (e) {}
+        return null;
+    }
+    window._tgcopy2DragStart = function(e, jobId, handleEl) {
+        try { if (e && e.preventDefault) e.preventDefault(); } catch (_e0) {}
+        var row = handleEl;
+        while (row && !(row.classList && row.classList.contains('tgcopy2-jobrow'))) row = row.parentNode;
+        _qdrag = { jobId: String(jobId), row: row, marked: null, after: false, beforeId: null,
+                   mv: null, up: null, pid: (e && e.pointerId !== undefined) ? e.pointerId : 'mouse' };
+        window._queue_dragging = true;
+        try { if (row) row.style.opacity = '0.55'; } catch (_e1) {}
+        _qdrag.mv = function(ev) { _qdragMove(ev); };
+        _qdrag.up = function(ev) { _qdragEnd(ev); };
+        try {
+            document.addEventListener('pointermove', _qdrag.mv);
+            document.addEventListener('pointerup', _qdrag.up);
+            document.addEventListener('pointercancel', _qdrag.up);
+        } catch (_e2) {}
+    };
+    function _qdragMove(e) {
+        if (!_qdrag) return;
+        var pid = (e && e.pointerId !== undefined) ? e.pointerId : 'mouse';
+        if (pid !== _qdrag.pid) return;
+        try { if (e && e.preventDefault) e.preventDefault(); } catch (_e0) {}
+        var row = _qdragRowFromPoint(e.clientX, e.clientY);
+        try { if (_qdrag.marked) _qdrag.marked.style.boxShadow = ''; } catch (_e1) {}
+        _qdrag.marked = null; _qdrag.after = false; _qdrag.beforeId = null;
+        if (row && row !== _qdrag.row) {
+            var qid = null;
+            try { qid = row.getAttribute('data-qid'); } catch (_e2) {}
+            if (qid && qid !== _qdrag.jobId) {
+                var r = row.getBoundingClientRect();
+                _qdrag.after = e.clientY > r.top + r.height / 2;
+                try { row.style.boxShadow = _qdrag.after ? '0 3px 0 0 #eab308' : '0 -3px 0 0 #eab308'; } catch (_e3) {}
+                _qdrag.marked = row; _qdrag.beforeId = String(qid);
+            }
+        }
+    }
+    function _qdragEnd(e) {
+        var d = _qdrag; _qdrag = null;
+        window._queue_dragging = false;
+        try {
+            if (d) {
+                document.removeEventListener('pointermove', d.mv);
+                document.removeEventListener('pointerup', d.up);
+                document.removeEventListener('pointercancel', d.up);
+            }
+        } catch (_e0) {}
+        try { if (d && d.row) d.row.style.opacity = ''; } catch (_e1) {}
+        try { if (d && d.marked) d.marked.style.boxShadow = ''; } catch (_e2) {}
+        if (!d || !d.marked || !d.beforeId) return;
+        // Mitad inferior = insertar DESPUÉS de la fila destino (= delante de la siguiente visible).
+        var target = d.beforeId;
+        if (d.after) {
+            var rows = _qdragVisibleRows();
+            for (var i = 0; i < rows.length; i++) {
+                var qid = null;
+                try { qid = rows[i].getAttribute('data-qid'); } catch (_e3) {}
+                if (String(qid) === String(d.beforeId)) {
+                    var nx = rows[i + 1];
+                    var nqid = null;
+                    try { nqid = nx ? nx.getAttribute('data-qid') : null; } catch (_e4) {}
+                    target = nqid ? String(nqid) : null;
+                    break;
+                }
+            }
+        }
+        if (!target || target === d.jobId) return;
+        api(API + '/queue/' + d.jobId + '/move', { method: 'PUT', data: { direction: 'before', before_id: target } }, function() {
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
+        });
+    }
 
     window._tgcopy2TogglePause = function(jobId, paused) {
         api(API + '/queue/' + jobId + '/pause', { method: 'PUT', data: { paused: paused } }, function() {});

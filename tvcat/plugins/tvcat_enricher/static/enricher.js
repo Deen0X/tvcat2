@@ -1364,12 +1364,14 @@
                     }, 300);
                 }
             } catch (e3) {}
-            // Romper caché del cover en hero y grid (el blob cambió con la misma URL).
+            // Romper caché del cover en hero (carrusel + backdrop) y grid
+            // (el blob cambió con la misma URL).
             setTimeout(function () {
                 try {
+                    if (window.Catalog && typeof window.Catalog.refreshHeroCover === 'function') window.Catalog.refreshHeroCover(itemId);
+                } catch (e2) {}
+                try {
                     var v = Date.now();
-                    var bg = document.getElementById('detail-backdrop');
-                    if (bg) bg.style.backgroundImage = "url('/api/cover/" + encodeURIComponent(itemId) + "?v=" + v + "')";
                     var gridImg = document.querySelector('.grid-item[data-id="' + itemId + '"] img');
                     if (gridImg) gridImg.src = '/api/cover/' + encodeURIComponent(itemId) + '?v=' + v;
                 } catch (e3) {}

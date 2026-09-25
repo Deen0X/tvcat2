@@ -90,6 +90,11 @@ function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').repla
 function jget(url, cb) {
     fetch(url).then(function(r) { return r.json(); }).then(function(j) { cb(j); }).catch(function() { cb(null); });
 }
+function jput(url, body, cb) {
+    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
+        .then(function(r) { return r.json(); }).then(function(j) { if (cb) cb(j); })
+        .catch(function() { if (cb) cb(null); });
+}
 function paintPeers() {
     var box = document.getElementById('peers');
     if (!PEERS.length) { box.innerHTML = '<span class="muted">Sin peers.</span>'; return; }

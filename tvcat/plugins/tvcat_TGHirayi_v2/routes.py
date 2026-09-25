@@ -256,7 +256,8 @@ class QueueNormUpdate(BaseModel):
 
 
 class QueueReorder(BaseModel):
-    direction: str  # 'up', 'down', 'top', 'bottom'
+    direction: str  # 'up', 'down', 'top', 'bottom', 'before'
+    before_id: Optional[str] = None  # solo con direction='before' (None = tras el último pendiente)
 
 
 class QueuePauseToggle(BaseModel):
@@ -1864,6 +1865,23 @@ async def reorder_job(job_id: str, body: QueueReorder, request: Request):
         queue.insert(0, job)
     elif body.direction == "bottom":
         queue.append(job)
+    elif body.direction == "before":
+        # Arrastre a posición arbitraria: insertar delante de before_id.
+        # Sin before_id (o inexistente): tras el último no-terminal para no
+        # enterrar el job entre finalizados.
+        _term = ("completed", "error", "skipped")
+        dest = None
+        if body.before_id:
+            for i, j in enumerate(queue):
+                if str(j.get("id")) == str(body.before_id):
+                    dest = i
+                    break
+        if dest is None:
+            dest = 0
+            for i, j in enumerate(queue):
+                if str(j.get("status")) not in _term:
+                    dest = i + 1
+        queue.insert(dest, job)
     else:
         queue.insert(idx, job)
     db["queue"] = queue
@@ -2417,7 +2435,12 @@ async def update_job_cover(job_id: str, body: dict, request: Request):
                 except Exception:
                     pass
             if "title" in body:
-                j["title"] = (body.get("title") or "").strip()
+                _nt = (body.get("title") or "").strip()
+                # Solo es título manual si el usuario lo cambió: el modal
+                # pre-rellena con el derivado y lo reenvía igual al guardar.
+                if _nt and _nt != str(j.get("title") or ""):
+                    j["title_manual"] = True
+                j["title"] = _nt
             if "template" in body:
                 j["cover_template"] = (body.get("template") or "")
             if "details" in body and isinstance(body.get("details"), dict):
@@ -4787,10 +4810,16 @@ def _bridge_enricher_cover(job) -> tuple:
 
 def _seed_job_cover_from_local(job) -> bool:
     """2026-09-04: si el job no tiene cover manual y el item tiene edición local,
-    la siembra (cover_text + enrich_details). Idempotente. Devuelve True si sembró.
-    El TÍTULO no se toca: manda el del catálogo (vía Tag), que es posterior al
-    api_title guardado del enriquecedor (TMDB). Reescribirlo revertía ediciones
-    del usuario (p. ej. 'Vaiana (Live Action)' -> 'Vaiana')."""
+    la siembra (cover_text + enrich_details). Idempotente. Devuelve True si sembró
+    o refrescó el título.
+    El TÍTULO SÍ se refresca desde el cover propio (tags editados por el usuario):
+    si el job nació con el título crudo (registry miss al encolar, reescaneo con
+    item_id cambiado, edición posterior al envío...), el nombre editado se recupera
+    solo al abrir el modal o al procesar. Nunca si el usuario fijó el título a mano
+    en el modal (title_manual) ni con cover propio de partido (cover_local) o
+    manual (cover_manual). Derivar desde los tags del cover no revierte ediciones:
+    el nombre sale de la propia edición del usuario (placeholders y textos sin
+    tags se ignoran, con fallback al título actual)."""
     try:
         if not isinstance(job, dict):
             return False
@@ -4798,22 +4827,34 @@ def _seed_job_cover_from_local(job) -> bool:
             return False
         if job.get("cover_manual"):
             return False
+        seeded = False
         if (job.get("cover_text") or "").strip() and not job.get("cover_from_local"):
-            return False
-        from services.cover_override_registry import get_enriched_by_item_id as _gebi2
-        _enr = _gebi2(str(job.get("item_id") or ""))
-        if not _enr:
-            return False
-        _det = _enr.get("enrich_details") or {}
-        if (_enr.get("cover_text") or "").strip():
-            job["cover_text"] = _enr["cover_text"]
-            if _det:
-                job["enrich_details"] = _det
-            job["cover_from_local"] = True
-            return True
-        if _det and not job.get("enrich_details"):
-            job["enrich_details"] = _det
-            return True
+            pass  # cover propio del job (modal): no resembrar, pero sí refrescar título abajo
+        else:
+            from services.cover_override_registry import get_enriched_by_item_id as _gebi2
+            _enr = _gebi2(str(job.get("item_id") or ""))
+            if _enr:
+                _det = _enr.get("enrich_details") or {}
+                if (_enr.get("cover_text") or "").strip():
+                    job["cover_text"] = _enr["cover_text"]
+                    if _det:
+                        job["enrich_details"] = _det
+                    job["cover_from_local"] = True
+                    seeded = True
+                elif _det and not job.get("enrich_details"):
+                    job["enrich_details"] = _det
+                    seeded = True
+        if not job.get("title_manual"):
+            try:
+                _dn = _display_name_from_details(
+                    job.get("enrich_details") or {}, job.get("cover_text") or "",
+                    str(job.get("title") or ""))
+                if _dn and _dn != str(job.get("title") or ""):
+                    job["title"] = _dn
+                    seeded = True
+            except Exception:
+                pass
+        return seeded
     except Exception:
         pass
     return False

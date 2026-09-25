@@ -258,23 +258,27 @@
             return;
         }
 
-        if (window.UI && window.UI.getMaxElements) {
-            var maxEl = window.UI.getMaxElements();
-            if (items.length > maxEl) {
-                items = items.slice(0, maxEl);
-            }
-        }
-
         // Orden alfabético por título (opción del filtro de búsqueda).
+        // Se ordena el array in situ (no una copia): así el grid y los
+        // modales que usan currentItems (p. ej. "Enviar todos") ven el
+        // mismo orden. Antes del recorte maxEl para que el grid muestre
+        // los primeros N en alfabético y el modal el total ordenado.
         try {
             if (window._activeFilters && window._activeFilters.sort_alpha && items && items.length > 1) {
-                items = items.slice().sort(function(a, b) {
+                items.sort(function(a, b) {
                     var ta = ((a && a.title) || '').toString();
                     var tb = ((b && b.title) || '').toString();
                     return ta.localeCompare(tb, 'es', { sensitivity: 'base' });
                 });
             }
         } catch (e) {}
+
+        if (window.UI && window.UI.getMaxElements) {
+            var maxEl = window.UI.getMaxElements();
+            if (items.length > maxEl) {
+                items = items.slice(0, maxEl);
+            }
+        }
 
         var html = '';
         for (var i = 0; i < items.length; i++) {
@@ -943,6 +947,44 @@
                     break;
                 }
             }
+        } catch (e) {}
+    };
+
+    // Tras editar el póster: revienta la caché del carrusel de la hero
+    // (los slides se construyeron con la URL sin versión y el navegador
+    // serviría la imagen vieja) y repinta el backdrop activo.
+    Catalog.refreshHeroCover = function(itemId) {
+        try {
+            if (!itemId) return;
+            var v = Date.now();
+            var bust = function(u) {
+                if (!u || u.indexOf('/api/cover/') !== 0) return u;
+                return '/api/cover/' + encodeURIComponent(itemId) + '?v=' + v;
+            };
+            if (typeof _heroCoverZoom !== 'undefined' && _heroCoverZoom) _heroCoverZoom.url = bust(_heroCoverZoom.url);
+            if (typeof _heroCoverFull !== 'undefined' && _heroCoverFull) _heroCoverFull.url = bust(_heroCoverFull.url);
+            try { heroRebuildCycle(); } catch (e0) {}
+            // Repintar el slide visible ahora mismo (el ciclo seguirá solo).
+            try {
+                var cur = (_slideshowImages && _slideshowImages.length) ? _slideshowImages[Math.max(0, _currentSlideIndex)] : null;
+                if (cur && _activeBackdropEl) {
+                    _activeBackdropEl.style.transition = 'none';
+                    _activeBackdropEl.style.opacity = '1';
+                    _activeBackdropEl.style.backgroundImage = "url('" + cur.url + "')";
+                    if (cur.mode) _activeBackdropEl.style.backgroundSize = cur.mode;
+                    if (cur.align) _activeBackdropEl.style.backgroundPosition = cur.align;
+                    void _activeBackdropEl.offsetWidth;
+                    _activeBackdropEl.style.transition = '';
+                }
+            } catch (e1) {}
+            // Respaldo: los dos slots del backdrop por si el activo no se detectó.
+            try {
+                var u2 = '/api/cover/' + encodeURIComponent(itemId) + '?v=' + v;
+                var b1 = document.getElementById('detail-backdrop');
+                var b2 = document.getElementById('detail-backdrop-next');
+                if (b1 && (b1.style.backgroundImage || '').indexOf('/api/cover/') !== -1) b1.style.backgroundImage = "url('" + u2 + "')";
+                if (b2 && (b2.style.backgroundImage || '').indexOf('/api/cover/') !== -1) b2.style.backgroundImage = "url('" + u2 + "')";
+            } catch (e2) {}
         } catch (e) {}
     };
 
