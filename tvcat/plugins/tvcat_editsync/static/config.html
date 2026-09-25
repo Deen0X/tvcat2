@@ -231,7 +231,7 @@ function loadCfg() {
         var pb = document.getElementById('pullbanner');
         if (cfg.pull_pending && cfg.pull_pending.from) {
             pb.style.display = '';
-            pb.innerHTML = '📥 Aviso de <b>' + esc(cfg.pull_pending.from) + '</b> pendiente de pull. <button class="btn sec" style="padding:4px 10px;" onclick="pullBanner()">Sincronizar ahora</button>';
+            pb.innerHTML = '📥 Aviso de <b>' + esc(cfg.pull_pending.from) + '</b> pendiente de pull. <button class="btn sec" style="padding:4px 10px;" onclick="pullBanner()">Sincronizar ahora</button> <button class="btn sec" style="padding:4px 10px; border-color:#ef4444; color:#ef4444;" onclick="discardBanner()">Descartar</button>';
             pb.dataset.peer = cfg.pull_pending.from;
         } else { pb.style.display = 'none'; }
     });
@@ -243,6 +243,13 @@ function pullBanner() {
         if (PEERS[i].name === from) { pullPeer(i); return; }
     }
     setStatus('Ese peer ya no está en la lista; añádelo para sincronizar.');
+}
+function discardBanner() {
+    jput('/api/editsync/discard-pending', {}, function() {
+        var pb = document.getElementById('pullbanner');
+        if (pb) pb.style.display = 'none';
+        setStatus('Aviso descartado.');
+    });
 }
 function saveCfg(silent) {
     var body = {

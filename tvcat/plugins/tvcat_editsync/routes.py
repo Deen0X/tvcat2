@@ -1272,6 +1272,13 @@ async def notify(request: Request):
     return {"ok": True}
 
 
+@router.post("/api/editsync/discard-pending")
+async def discard_pending(request: Request):
+    _need_admin(request)
+    _cfg_set("pull_pending", {})
+    return {"ok": True}
+
+
 @router.get("/api/editsync/pull")
 async def pull(request: Request, since: int = 0):
     _need_peer(request)
