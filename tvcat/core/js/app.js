@@ -278,6 +278,7 @@ function loadSearchState() {
             _activeFilters.categories = {};
             _activeFilters.year_from = state.filters.year_from || null;
             _activeFilters.year_to = state.filters.year_to || null;
+            _activeFilters.sort_alpha = state.filters.sort_alpha === true;
             // Actualizar checkboxes del modal si existen
             var titleChk = document.getElementById('filter-title');
             var altChk = document.getElementById('filter-alt-titles');
@@ -287,6 +288,8 @@ function loadSearchState() {
             if (altChk) altChk.checked = _activeFilters.fields.alt_titles === true;
             if (descChk) descChk.checked = _activeFilters.fields.description === true;
             if (fileChk) fileChk.checked = _activeFilters.fields.file_name === true;
+            var sortChk = document.getElementById('filter-sort-alpha');
+            if (sortChk) sortChk.checked = _activeFilters.sort_alpha === true;
             var yearFrom = document.getElementById('filter-year-from');
             var yearTo = document.getElementById('filter-year-to');
             if (yearFrom) yearFrom.value = _activeFilters.year_from || '';
@@ -309,7 +312,8 @@ var _activeFilters = {
     fields: { title: true, alt_titles: false, description: false, file_name: false },
     categories: {},
     year_from: null,
-    year_to: null
+    year_to: null,
+    sort_alpha: false
 };
 
 window.toggleFilterModal = function() {
@@ -408,6 +412,8 @@ window.applyFilters = function() {
     _activeFilters.fields.alt_titles = document.getElementById('filter-alt-titles').checked;
     _activeFilters.fields.description = document.getElementById('filter-description').checked;
     _activeFilters.fields.file_name = document.getElementById('filter-filename').checked;
+    var sortEl = document.getElementById('filter-sort-alpha');
+    _activeFilters.sort_alpha = !!(sortEl && sortEl.checked);
 
     var yearFrom = document.getElementById('filter-year-from').value;
     var yearTo = document.getElementById('filter-year-to').value;
@@ -420,7 +426,7 @@ window.applyFilters = function() {
         if (_activeFilters.categories[g] === false) { hasGenreFilter = true; break; }
     }
     var hasFilters = !_activeFilters.fields.title || _activeFilters.fields.alt_titles ||
-        _activeFilters.fields.description || _activeFilters.fields.file_name || _activeFilters.year_from || _activeFilters.year_to || hasGenreFilter;
+        _activeFilters.fields.description || _activeFilters.fields.file_name || _activeFilters.year_from || _activeFilters.year_to || _activeFilters.sort_alpha || hasGenreFilter;
     if (filterBtn) filterBtn.classList.toggle('active', hasFilters);
 
     saveSearchState();

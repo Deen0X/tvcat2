@@ -153,23 +153,10 @@ async def _telethon_parallel_download(client, chat_id, msg_id, file_path: str,
 
     threads = max(1, min(int(threads or 8), 16))
 
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    session_string = client.session.save() if hasattr(client, 'session') else ''
+    # Sin conexiones secundarias: un segundo TelegramClient con el mismo
+    # session_string (misma auth_key) convive con el del pool y Telegram lo
+    # quema como duplicado. Solo el cliente principal (1 conexión).
     secondary = []
-    for _ in range(max(0, threads - 1)):
-        if not session_string:
-            break
-        c = TelegramClient(StringSession(session_string), client.api_id, client.api_hash)
-        try:
-            await asyncio.wait_for(c.connect(), timeout=CONNECT_TIMEOUT)
-        except Exception:
-            try:
-                await c.disconnect()
-            except Exception:
-                pass
-            continue
-        secondary.append(c)
 
     chunk_total = (file_size + CHUNK - 1) // CHUNK
     chunks_side = file_path + ".chunks"
@@ -423,16 +410,10 @@ async def _telethon_parallel_upload(client, file_path, file_size, threads, part_
     file_id = generate_random_long()
     threads = max(1, min(int(threads), 16))
 
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    session_string = client.session.save() if hasattr(client, 'session') else ''
+    # Sin conexiones secundarias: un segundo TelegramClient con el mismo
+    # session_string (misma auth_key) convive con el del pool y Telegram lo
+    # quema como duplicado. Solo el cliente principal (1 conexión).
     secondary = []
-    for _ in range(max(0, threads - 1)):
-        if not session_string:
-            break
-        c = TelegramClient(StringSession(session_string), client.api_id, client.api_hash)
-        await c.connect()
-        secondary.append(c)
 
     last_ul = [0.0]
     pos = [0]

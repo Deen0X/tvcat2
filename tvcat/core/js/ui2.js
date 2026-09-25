@@ -1364,10 +1364,10 @@ var UI = {
     // Se aplica por variable CSS y clase en body: efecto inmediato, sin
     // recargar (el hero se re-renderiza solo al abrir otro título).
     applyHeroButtons: function() {
-        var scale = 100;
+        var scale = 60;
         try {
-            scale = parseInt(localStorage.getItem('tvcat_hero_btn_scale') || '100', 10);
-            if (!(scale >= 30 && scale <= 100)) scale = 100;
+            scale = parseInt(localStorage.getItem('tvcat_hero_btn_scale') || '60', 10);
+            if (!(scale >= 30 && scale <= 100)) scale = 60;
         } catch (e) {}
         var asButtons = true;
         try { asButtons = localStorage.getItem('tvcat_hero_btn_badges') !== '1'; } catch (e2) {}

@@ -3706,7 +3706,9 @@ async def _hls_download_pyrogram(ubot, msg, file_path, dc_id, offset, length) ->
 
 
 async def _hls_parallel_download(client, msg, file_path, offset, length, threads: int) -> bool:
-    """Descarga [offset, offset+length) del documento con N conexiones paralelas (512KB cada una).
+    """Descarga [offset, offset+length) del documento con el cliente principal
+    (1 conexión, sin secundarias: un segundo TelegramClient con la misma
+    auth_key quemaría la sesión como duplicada).
     Devuelve True si se escribió el rango completo en file_path (abierto en r+b, seek + write)."""
     from telethon.tl.functions.upload import GetFileRequest
     from telethon.tl.types import InputDocumentFileLocation
@@ -3735,21 +3737,8 @@ async def _hls_parallel_download(client, msg, file_path, offset, length, threads
     threads = max(1, min(int(threads), 16))
     CHUNK = 512 * 1024  # límite Telegram
 
-    # Clonar sesión para abrir conexiones secundarias al mismo DC
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    session_string = client.session.save() if hasattr(client, 'session') else ''
+    # Sin conexiones secundarias (ver docstring): solo cliente principal.
     secondary = []
-    for _ in range(max(0, threads - 1)):
-        if not session_string:
-            break
-        try:
-            c = TelegramClient(StringSession(session_string), client.api_id, client.api_hash)
-            await c.connect()
-            secondary.append(c)
-        except Exception as e:
-            print(f" [HLS-PDL] No se pudo abrir conexión secundaria: {e}")
-            break
 
     # Preasignar el fichero a 'length' bytes
     with open(file_path, 'wb') as f:
@@ -3805,23 +3794,12 @@ async def _hls_parallel_download(client, msg, file_path, offset, length, threads
 
 
 async def _hls_open_secondary(client, threads):
-    """Abre conexiones secundarias (clonando la sesión, mismo DC) para descargas
-    multi-conexión. Devuelve la lista de clientes secundarios conectados.
-    El llamador es responsable de cerrarlas. Se abre UNA vez por episodio para evitar
-    el churn de handshakes que dispara el flood 429 de Telegram."""
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    session_string = client.session.save() if hasattr(client, 'session') else ''
-    secondary = []
-    if session_string:
-        for _ in range(max(0, threads - 1)):
-            try:
-                c = TelegramClient(StringSession(session_string), client.api_id, client.api_hash)
-                await asyncio.wait_for(c.connect(), timeout=15)
-                secondary.append(c)
-            except Exception:
-                break
-    return secondary
+    """Sin conexiones secundarias: un segundo TelegramClient con el mismo
+    session_string (misma auth_key) convive con el del pool y Telegram lo
+    quema como duplicado. Devuelve siempre [] (el llamador usa solo el
+    cliente principal, 1 conexión). Se mantiene la firma para no tocar a
+    los llamadores ni los cierres."""
+    return []
 
 
 async def _hls_close_secondary(secondary):

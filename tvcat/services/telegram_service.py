@@ -79,27 +79,17 @@ class PriorityQueue:
         return sum(len(q) for q in self._queues)
 
 
-def _sess_key(session_string, api_id, ctype):
-    import hashlib
-    try:
-        return hashlib.sha256(
-            f"{ctype}|{api_id}|{session_string or ''}".encode()).hexdigest()[:16]
-    except Exception:
-        return "x"
-
-
-_TEMP_SHARED = {}   # key -> {"client": Client}
-_TEMP_LOCKS = {}    # key -> asyncio.Lock
+# NOTA: no existen clientes temporales ni secundarios en este servicio.
+# Dueño único de conexiones: userbot_service (pool). Crear aquí un segundo
+# Client con la misma auth_key quemaría la sesión (AUTH_KEY_DUPLICATED).
 
 
 async def _shared_temp_client(session_string, api_id, api_hash, ctype):
-    """Un SOLO cliente vivo por credencial en todo el proceso (single-flight).
-    Antes cada tarea creaba+conectaba+destruía un Client con la MISMA auth_key
-    (decenas/min en ráfagas de covers): Telegram lo interpreta como la clave
-    usada en varios sitios a la vez y la quema (AUTH_KEY_DUPLICATED).
-    Salud por get_me (barato); ante muerte de auth se desaloja y se propaga
-    el error SIN recrear en caliente (no aporrear una clave muerta)."""
-    import asyncio as _aio
+    """DUEÑO ÚNICO: userbot_service. Esta función SOLO toma prestado el raw
+    del wrapper activo del pool cuando las credenciales coinciden (misma
+    auth_key). NUNCA crea un segundo Client: dos vivos con la misma clave =
+    Telegram la quema (AUTH_KEY_DUPLICATED / "two different IP").
+    Si no hay préstamo posible, lanza ConnectionError (sin crear nada)."""
     # DUEÑO ÚNICO: si las credenciales explícitas son las del wrapper activo
     # del userbot, se toma prestado su raw (sin crear segundo Client con la
     # misma auth_key). Solo se mira el pool, sin crearlo (sin efectos).
@@ -115,72 +105,11 @@ async def _shared_temp_client(session_string, api_id, api_hash, ctype):
                     return _wraw
             except Exception:
                 pass
-            # Misma auth_key pero wrapper muerto: desconectarlo (best-effort)
-            # ANTES de crear el temporal con la misma clave. Un zombi con el
-            # TCP aún registrado + un connect nuevo = AUTH_KEY_DUPLICATED.
-            try:
-                await _wraw.disconnect()
-            except Exception:
-                pass
     except Exception:
         pass
-    key = _sess_key(session_string, api_id, ctype)
-    lk = _TEMP_LOCKS.get(key)
-    if lk is None:
-        lk = _aio.Lock()
-        _TEMP_LOCKS[key] = lk
-    async with lk:
-        ent = _TEMP_SHARED.get(key) or {}
-        cli = ent.get("client")
-        if cli is not None:
-            try:
-                if ctype == "pyrogram":
-                    await asyncio.wait_for(cli.get_me(), timeout=10)
-                elif not cli.is_connected():
-                    raise ConnectionError("telethon desconectado")
-                return cli
-            except Exception as e:
-                _tn = type(e).__name__
-                if "AuthKey" in _tn or "Duplicated" in str(e) or "Unregistered" in str(e):
-                    try:
-                        await cli.disconnect()
-                    except Exception:
-                        pass
-                    _TEMP_SHARED.pop(key, None)
-                    raise
-                try:
-                    await cli.disconnect()
-                except Exception:
-                    pass
-                _TEMP_SHARED.pop(key, None)
-        if ctype == "pyrogram":
-            from pyrogram import Client as _Pyro
-            import tempfile as _tf
-            cli = _Pyro(
-                name=f"tvcat_shared_{key}",
-                session_string=session_string,
-                api_id=int(api_id), api_hash=api_hash,
-                device_model="TVCat2", system_version="TVCat2",
-                in_memory=True, workdir=_tf.gettempdir())
-        else:
-            from telethon import TelegramClient
-            from telethon.sessions import StringSession
-            cli = TelegramClient(StringSession(session_string), int(api_id), api_hash,
-                                 device_model="TVCat2", system_version="TVCat2",
-                                 app_version="2.0", lang_code="es")
-        await cli.connect()
-        if ctype == "pyrogram":
-            try:
-                _me = await cli.get_me()
-                try:
-                    cli.me = _me
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        _TEMP_SHARED[key] = {"client": cli}
-        print(f" [TELEGRAM SERVICE] temporal compartido creado ({ctype} {key})", flush=True)
-        return cli
+    raise ConnectionError(
+        f"Sin cliente {ctype} prestable en el pool central "
+        f"(no se crean temporales: dueño único userbot_service)")
 
 
 def _preferred_client_type(explicit=None):
@@ -228,14 +157,12 @@ class TelegramClientPool:
                 self._clients[key] = await self._create_client(tg_user_id, client_type)
             return self._clients[key]
 
-    async def create_temp_client(self, tg_user_id: int, client_type: str = "telethon"):
-        return await self._create_client(tg_user_id, client_type)
-
     async def _create_client(self, tg_user_id: int, client_type: str):
-        """DUEÑO ÚNICO: userbot_service. Este pool NO crea un segundo Client con
-        la misma session_string (dos vivos = AUTH_KEY_DUPLICATED): toma prestado
-        el raw del wrapper activo. Solo si la sesión pedida es OTRA cuenta
-        distinta (auth_key diferente, sin conflicto) se crea cliente propio."""
+        """DUEÑO ÚNICO: userbot_service. Este pool SOLO toma prestado el raw
+        del wrapper activo con la MISMA session_string (nunca desconectar
+        desde aquí). NO crea clientes propios: un segundo Client vivo con la
+        misma auth_key = Telegram la quema (AUTH_KEY_DUPLICATED). Si no hay
+        préstamo posible, lanza (sin crear nada)."""
         from services.userbot_service import (get_active_client, get_session_for_user,
                                               get_default_telegram_user)
         if tg_user_id is None:
@@ -293,68 +220,13 @@ class TelegramClientPool:
                 except Exception:
                     pass
             return _wraw
-        # Otra cuenta distinta (o wrapper sin raw): cliente propio con OTRA
-        # auth_key — sin conflicto de duplicado. in_memory para no ensuciar
-        # el workdir con temp_*.session.
-        if client_type == "telethon":
-            from telethon import TelegramClient
-            from telethon.sessions import StringSession
-            client = TelegramClient(
-                StringSession(sess.get("session_string", "")),
-                api_id=sess.get("api_id", 0),
-                api_hash=sess.get("api_hash", ""),
-                device_model="TVCat2", system_version="TVCat2",
-                app_version="2.0", lang_code="es"
-            )
-        else:
-            from pyrogram import Client
-            import tempfile as _tf
-            client = Client(
-                name=f"temp_{tg_user_id}_{int(time.time())}",
-                session_string=sess.get("session_string", ""),
-                api_id=sess.get("api_id", 0),
-                api_hash=sess.get("api_hash", ""),
-                device_model="TVCat2", system_version="TVCat2",
-                in_memory=True,
-                workdir=_tf.gettempdir()
-            )
-        await client.connect()
-        # Pyrogram: send_photo/edit consultan client.me.is_premium; con solo
-        # connect() me es None → AttributeError. Se fija aquí una vez.
-        if client_type != "telethon":
-            try:
-                _me = await client.get_me()
-                try:
-                    client.me = _me
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        # Validación inmediata con clave real (solo sesiones guardadas, no
-        # temporales vacías): una auth_key quemada (AuthKeyDuplicated) se
-        # detecta AQUÍ una vez y se pone en cuarentena, en vez de tormenta
-        # de reconnects en cada cover/stream que la pida.
-        if sess.get("session_string"):
-            try:
-                await client.get_me()
-            except Exception as e:
-                _tn = type(e).__name__
-                if "AuthKeyDuplicated" in _tn or "AuthKeyUnregistered" in _tn:
-                    try:
-                        from services.userbot_service import quarantine_session
-                        quarantine_session(tg_user_id, client_type, _tn)
-                    except Exception:
-                        pass
-                    try:
-                        self._burned.add((tg_user_id, client_type))
-                    except Exception:
-                        pass
-                    try:
-                        await client.disconnect()
-                    except Exception:
-                        pass
-                    raise
-        return client
+        # Sin préstamo posible (otra cuenta o wrapper sin raw): NO se crea
+        # cliente propio. Dueño único userbot_service: crear aquí un segundo
+        # Client con la misma auth_key quemaría la sesión. El llamador debe
+        # usar el pool central (get_active_client) o fallar.
+        raise ConnectionError(
+            f"Sin cliente {client_type} prestable para tg_user_id={tg_user_id} "
+            f"(no se crean clientes fuera del pool central)")
 
     async def disconnect_all(self):
         async with self._lock:
@@ -1748,8 +1620,10 @@ class TelegramService:
             return str(chat).strip()
 
     async def _get_temp_or_pool_client(self, task):
-        """Devuelve (client, need_disconnect) según credenciales explícitas o pool.
-        El temporal respeta client_type (antes siempre era Telethon)."""
+        """Devuelve (client, need_disconnect=False) desde el pool central.
+        Con credenciales explícitas solo se toma prestado si coinciden con
+        el wrapper activo (misma auth_key); si no, lanza (sin temporales).
+        El caller NUNCA desconecta: el dueño es userbot_service."""
         session_string = task.get("session_string")
         api_id = task.get("api_id")
         api_hash = task.get("api_hash")

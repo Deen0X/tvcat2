@@ -583,8 +583,11 @@ async def _get_raw_client(creds: dict):
     """Devuelve (client_raw, client_type). Vías (en orden):
     1. tg_user_id + client_type (servicio central): valida sesión y usa el
        pool; verifica que el wrapper es de ese usuario.
-    2. session_string explícita (legacy): UserbotClient temporal.
-    3. Sin creds: cliente activo por defecto."""
+    2. session_string explícita (legacy): SOLO reutiliza el raw del pool si
+       coincide la sesión (sin crear nada). Si no coincide, falla.
+    3. Sin creds: cliente activo por defecto.
+    NUNCA crea clientes: dueño único userbot_service (un segundo Client con
+    la misma auth_key = sesión quemada)."""
     from services import userbot_service
     if creds and creds.get("tg_user_id"):
         ctype = creds.get("client_type") or "telethon"
@@ -609,16 +612,24 @@ async def _get_raw_client(creds: dict):
             raise ValueError(f"El pool {ctype} es de otro usuario (tg={_sess_tg})")
         return ub._client, getattr(ub, "_type", ctype)
     if creds and creds.get("session_string"):
-        sess = {
-            "session_string": creds["session_string"],
-            "api_id": creds.get("api_id"),
-            "api_hash": creds.get("api_hash"),
-            "client_type": creds.get("client_type", "telethon"),
-            "workers": creds.get("pyro_workers") or 16,
-        }
-        ub = userbot_service.UserbotClient(sess)
-        await ub.connect()
-        return ub._client, sess["client_type"]
+        # Legacy: reutilizar el raw del pool si coincide la sesión.
+        # NUNCA crear un UserbotClient propio: conviviría con el del pool
+        # usando la misma auth_key y Telegram la quemaría como duplicada.
+        _want = str(creds.get("session_string") or "")
+        try:
+            _pool = userbot_service._client_pool or {}
+        except Exception:
+            _pool = {}
+        for _w in list(_pool.values()):
+            try:
+                _wss = str((getattr(_w, "session_data", None) or {}).get("session_string") or "")
+                _wraw = getattr(_w, "_client", None)
+                if _wss and _wss == _want and _wraw is not None:
+                    if userbot_service.client_is_alive(_wraw):
+                        return _wraw, getattr(_w, "_type", creds.get("client_type", "telethon"))
+            except Exception:
+                pass
+        raise ValueError("Sin cliente en el pool para esa sesión (no se crean temporales)")
 
     ub = await userbot_service.get_active_client()
     if ub is None:
@@ -657,18 +668,10 @@ async def _parallel_download(client, msg, file_path: str, threads: int, progress
 
     threads = max(1, min(threads, 16))
 
-    # Clonar la sesión del cliente principal para abrir conexiones secundarias
-    # al mismo DC (mismo auth_key/dc_id) sin re-login.
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    session_string = client.session.save() if hasattr(client, 'session') else ''
+    # Sin conexiones secundarias: un segundo TelegramClient con el mismo
+    # session_string (misma auth_key) convive con el del pool y Telegram lo
+    # quema como duplicado. Solo el cliente principal (1 conexión).
     secondary = []
-    for _ in range(max(0, threads - 1)):
-        if not session_string:
-            break
-        c = TelegramClient(StringSession(session_string), client.api_id, client.api_hash)
-        await c.connect()
-        secondary.append(c)
 
     # Preasignar el fichero y mantener un único handle abierto en r+b.
     helpers_dir = os.path.dirname(file_path)
@@ -761,18 +764,10 @@ async def _parallel_upload(client, file_path, file_size, threads, part_size_kb, 
 
     threads = max(1, min(int(threads), 16))
 
-    # Clonar la sesión del cliente principal para abrir conexiones secundarias
-    # al mismo DC (mismo auth_key/dc_id) sin re-login.
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    session_string = client.session.save() if hasattr(client, 'session') else ''
+    # Sin conexiones secundarias: un segundo TelegramClient con el mismo
+    # session_string (misma auth_key) convive con el del pool y Telegram lo
+    # quema como duplicado. Solo el cliente principal (1 conexión).
     secondary = []
-    for _ in range(max(0, threads - 1)):
-        if not session_string:
-            break
-        c = TelegramClient(StringSession(session_string), client.api_id, client.api_hash)
-        await c.connect()
-        secondary.append(c)
 
     last_ul = [0.0]
     pos = [0]

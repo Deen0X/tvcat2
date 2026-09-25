@@ -265,6 +265,17 @@
             }
         }
 
+        // Orden alfabético por título (opción del filtro de búsqueda).
+        try {
+            if (window._activeFilters && window._activeFilters.sort_alpha && items && items.length > 1) {
+                items = items.slice().sort(function(a, b) {
+                    var ta = ((a && a.title) || '').toString();
+                    var tb = ((b && b.title) || '').toString();
+                    return ta.localeCompare(tb, 'es', { sensitivity: 'base' });
+                });
+            }
+        } catch (e) {}
+
         var html = '';
         for (var i = 0; i < items.length; i++) {
             var item = items[i];

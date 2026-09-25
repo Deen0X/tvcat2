@@ -329,16 +329,14 @@ async def test_session_string(payload: TestSessionRequest):
         return {"success": False, "error": "api_id y api_hash no configurados en la aplicación"}
         
     try:
-        # Verificación puntual vía servicio central (temporal compartido del
-        # tipo preferido; NO desconectar: es compartido).
-        from services.telegram_service import _shared_temp_client
-        from services.userbot_service import get_preferred_client_type
+        # Verificación puntual vía servicio central (dueño único de
+        # conexiones): valida contra el pool si coincide, o conexión
+        # secuencial con desconexión inmediata. Nunca deja temporales.
+        from services.userbot_service import test_session_string, get_preferred_client_type
         ctype = get_preferred_client_type()
-        client = await _shared_temp_client(session_str, int(api_id), api_hash, ctype)
-        try:
-            me = await client.get_me()
-        except Exception:
-            return {"success": False, "error": "La cadena de sesión no es válida o ha caducado"}
+        ok, me = await test_session_string(session_str, int(api_id), api_hash, ctype)
+        if not ok:
+            return {"success": False, "error": me if isinstance(me, str) else "La cadena de sesión no es válida o ha caducado"}
 
         username = getattr(me, "username", None) or f"{getattr(me, 'first_name', '') or ''} {getattr(me, 'last_name', '') or ''}".strip()
         phone = getattr(me, "phone", "") or ""
@@ -428,13 +426,16 @@ async def test_userbot_connection():
         return {"success": False, "error": "Credenciales no configuradas"}
 
     try:
-        # Vía servicio central (temporal compartido del tipo preferido).
-        from services.telegram_service import _shared_temp_client
-        from services.userbot_service import get_preferred_client_type
-        client = await _shared_temp_client(
-            session_string, int(api_id), api_hash, get_preferred_client_type())
+        # Vía servicio central: el pool conecta SU único cliente del tipo
+        # preferido (dueño único, sin temporales ni segundos clientes).
+        from services.userbot_service import get_active_client, get_preferred_client_type
+        ctype = get_preferred_client_type()
+        wrapper = await get_active_client(ctype)
+        raw = getattr(wrapper, "_client", None) if wrapper else None
+        if raw is None:
+            return {"success": False, "error": f"Sin cliente {ctype} en el pool central"}
         try:
-            me = await client.get_me()
+            me = await raw.get_me()
         except Exception:
             return {"success": False, "error": "Sesión no autorizada o caducada"}
         username = getattr(me, "username", None) or f"{getattr(me, 'first_name', '') or ''} {getattr(me, 'last_name', '') or ''}".strip()

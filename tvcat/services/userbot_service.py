@@ -630,11 +630,21 @@ async def get_active_client(client_type: str = None) -> 'UserbotClient':
             _client_pool[key] = client
             print(f" [USERBOT] Cliente {client_type} creado para {sess.get('name','?')}")
             return client
-        # Buscar cualquier sesión de ese tipo
+        # Solo sesión de ESE TIPO para el usuario activo. Sin fallback al
+        # otro tipo ni a otra cuenta: cada cliente funciona sin necesitar
+        # del otro, y el pool no cruza tipos (evita segundos clientes con
+        # la misma auth_key, que Telegram quema como duplicada).
+        try:
+            _du = get_default_telegram_user()
+            _duid = (_du or {}).get("tg_user_id")
+        except Exception:
+            _duid = None
+        if _duid is None:
+            return None
         conn = _get_conn()
         row = conn.execute(
-            "SELECT * FROM userbot_sessions WHERE client_type=? LIMIT 1",
-            (client_type,)
+            "SELECT * FROM userbot_sessions WHERE tg_user_id=? AND client_type=? AND is_active=1 LIMIT 1",
+            (_duid, client_type)
         ).fetchone()
         conn.close()
         if row:
@@ -646,7 +656,8 @@ async def get_active_client(client_type: str = None) -> 'UserbotClient':
             return client
         return None
 
-    # Sin client_type: usar el tipo de la sesión activa primero
+    # Sin client_type: SOLO el tipo de la sesión activa. Sin fallback al
+    # otro tipo: cada cliente funciona sin necesitar del otro.
     sess = get_active_session()
     if sess:
         ct = sess.get("client_type")
@@ -654,11 +665,6 @@ async def get_active_client(client_type: str = None) -> 'UserbotClient':
             c = await get_active_client(ct)
             if c:
                 return c
-    # Fallback a cualquier tipo disponible
-    for ct in ["telethon", "pyrogram"]:
-        c = await get_active_client(ct)
-        if c:
-            return c
     return None
 
 async def disconnect_all():
@@ -683,6 +689,50 @@ async def force_reconnect_all():
             pass
         _client_pool.pop(key, None)
     print(f" [USERBOT] force_reconnect_all ejecutado (pool limpiado)")
+
+async def test_session_string(session_string: str, api_id, api_hash, client_type: str = None):
+    """Valida unas credenciales SIN tocar el pool (nunca se guarda nada).
+    Si coinciden con la sesión del wrapper activo del mismo tipo, valida
+    contra el pool (sin segundo cliente). Si no, conexión puntual
+    secuencial con desconexión inmediata en finally (nunca convive con otro
+    cliente de la misma clave). Devuelve (ok, me_or_error)."""
+    ctype = client_type if client_type in ("telethon", "pyrogram") else None
+    if not ctype:
+        try:
+            ctype = get_preferred_client_type()
+        except Exception:
+            ctype = "telethon"
+    want = str(session_string or "")
+    if want:
+        try:
+            w = (_client_pool or {}).get(f"active_{ctype}")
+            wraw = getattr(w, "_client", None) if w else None
+            wss = str(((getattr(w, "session_data", None) or {}).get("session_string")) or "")
+            if wraw is not None and wss and wss == want:
+                try:
+                    if client_is_alive(wraw):
+                        me = await wraw.get_me()
+                        return True, me
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    cli = UserbotClient({"session_string": want, "api_id": api_id,
+                         "api_hash": api_hash, "client_type": ctype})
+    try:
+        await cli.connect()
+        try:
+            me = await cli.get_me()
+        except Exception:
+            return False, "La cadena de sesión no es válida o ha caducado"
+        return True, me
+    except Exception as e:
+        return False, str(e)
+    finally:
+        try:
+            await cli.disconnect()
+        except Exception:
+            pass
 
 class UserbotClient:
     """Wrapper que abstrae Telethon y Pyrogram."""
