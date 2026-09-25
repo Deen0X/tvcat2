@@ -1034,6 +1034,7 @@ class HideUploadedCheck(BaseModel):
     for_hide: bool = True  # False: modo mostrar (no excluye ya-ocultos)
     include_queue: bool = False  # True: además oculta los que estén en la cola (no terminales)
     strict_year: bool = None  # None: usar config hide_strict_year
+    use_alt_titles: bool = False  # Activa alt titles en scans (_hide_scan_union)
 
 
 def _hide_skip_sets(session: dict) -> set:
@@ -1104,44 +1105,116 @@ def _hide_full_catalog_items() -> list:
     return [d for d in out if d.get("item_id")]
 
 
-def _hide_candidate_topic_name(title: str = "", year: str = "", description: str = "", cover_text: str = "", item_id: str = "") -> str:
-    """Genera el nombre de topic candidato igual que al crear el topic.
-    Prioridad: a) cover local guardado (registry por item_id: el topic se
-    generó con el nombre enriquecido) o cover_text explícito, b) tags del
-    mensaje original (description), c) año entre paréntesis en el título
-    (se quita del título base), d) campo year del catálogo.
-    Sin año -> solo título."""
+def _parse_cover_alt_tags(text: str, known_year: str = "") -> list:
+    """Extrae todas las variantes de título del cover: [(candidate, via_tag, year)].
+    Tags: Title/Título/Nombre, Original title/Título original, Title Alt/Alt1/Alt2,
+    Título Alt, Alt Titles (string completo, no split).
+    via_tag es None para el título principal, str para variantes alt."""
+    out = []
+    main_title = ""
+    main_year = known_year
     try:
-        _cover = (cover_text or "").strip()
-        if not _cover and item_id:
-            try:
-                from tvcat.services.cover_override_registry import get_enriched_by_item_id as _gebi
-                _enr = _gebi(str(item_id))
-                if _enr and _enr.get("cover_text"):
-                    _cover = str(_enr.get("cover_text") or "").strip()
-            except Exception:
-                pass
-        if not _cover:
-            _cover = description or ""
-        _t, _y = _title_year_from_cover_tags(_cover) if _cover else ("", "")
-        if not _t:
-            _t = (title or "").strip()
-        if not _y:
-            _clean = bool(_load_config().get("clean_year_from_title", True))
-            if _clean and _t:
-                import re as _re_y
-                _m = _re_y.search(r"\((?:19|20)\d{2}\)", _t)
-                if _m:
-                    _y = _m.group(0)[1:-1]
-                    _t = _re_y.sub(r"\((?:19|20)\d{2}\)", "", _t).strip()
-                    _t = _re_y.sub(r"\s{2,}", " ", _t).strip()
-            if not _y:
-                _y = (year or "").strip()
-        if not _t:
-            return ""
-        return "%s🗓%s" % (_t, _y) if _y else _t
+        import re as _re_a
+        for _ln in (text or "").split("\n"):
+            _l = _ln.strip()
+            if not _l or len(_l) < 2:
+                continue
+            # Year
+            _m = _re_a.match(r"(?i)^(year|a[ñn]o|anno|release)\s*[:=\-]?\s*(\d{4})", _l)
+            if _m and not main_year:
+                main_year = _m.group(2)
+                continue
+            # Original title
+            _mo = _re_a.match(r"(?i)^(original\s+title|t[ií]tulo\s+original|titulo\s+original)\s*[:=\-]?\s*(.*?)\s*$", _l)
+            if _mo:
+                _v = (_mo.group(2) or "").strip()
+                if _v and len(_v) >= 2 and "{" not in _v and "}" not in _v:
+                    out.append((_v[:200], "Original title", main_year))
+                continue
+            # Title Alt (incl. Alt1/Alt2)
+            _ma = _re_a.match(r"(?i)^(title\s+alt\d*|t[ií]tulo\s+alt\d*|titulo\s+alt\d*|alt\s+title\d*)\s*[:=\-]?\s*(.*?)\s*$", _l)
+            if _ma:
+                _tag = (_ma.group(1) or "").strip()
+                _v2 = (_ma.group(2) or "").strip()
+                if _v2 and len(_v2) >= 2 and "{" not in _v2 and "}" not in _v2:
+                    out.append((_v2[:200], "alt:" + _tag, main_year))
+                continue
+            # Alt Titles (string completo, sin split — puede tener comas ambiguas)
+            _mat = _re_a.match(r"(?i)^(?:alt\s+titles|t[ií]tulos\s+alt)\s*[:=\-]?\s*(.*?)\s*$", _l)
+            if _mat:
+                _v3 = (_mat.group(1) or "").strip()
+                if _v3 and len(_v3) >= 2 and "{" not in _v3 and "}" not in _v3:
+                    out.append((_v3[:400], "alt", main_year))
+                continue
+            # Main title (excluye variantes Alt/ES/Latam...)
+            _mt = _re_a.match(r"(?i)^(t[ií]tulo|titulo|title|nombre)(?!\s+(?:alt\d*|es(?:pa[ñn]a)?|latam|latin[oa]|mx|m[ée]xico|original)\b)\s*[:=\-]?\s*(.*?)\s*$", _l)
+            if _mt:
+                _v4 = (_mt.group(2) or "").strip()
+                if _v4 and len(_v4) >= 2 and "{" not in _v4 and "}" not in _v4 and not main_title:
+                    main_title = _v4[:200]
     except Exception:
-        return (title or "").strip()
+        pass
+    return [(main_title or "", None, main_year)] + out
+
+
+def _hide_candidate_variants(item: dict) -> list:
+    """Devuelve [(candidate, via_tag, year), ...] para un item.
+    Prioridad: cover_text proporcionado > cover_override_registry (local) >
+    description > fallback título+año del catálogo. Cada tag del cover genera
+    una variante. via_tag=None para el título principal."""
+    variants = []
+    seen = set()
+    def add(candidate, via=None, year=""):
+        norm = str(candidate or "").strip().lower()
+        y = str(year or "").strip()
+        key = (norm, y)
+        if key not in seen and norm:
+            seen.add(key)
+            variants.append((norm, via, y))
+    title = str(item.get("title") or "").strip()
+    year = str(item.get("year") or "").strip()
+    cover_text = str(item.get("cover_text") or "").strip()
+    description = str(item.get("description") or "").strip()
+    item_id = str(item.get("item_id") or "")
+    # 1. Cover local (registry, prioridad 1)
+    _local_cover = ""
+    if not cover_text and item_id:
+        try:
+            from tvcat.services.cover_override_registry import get_enriched_by_item_id as _gebi
+            _enr = _gebi(item_id)
+            if _enr and _enr.get("cover_text"):
+                _local_cover = str(_enr.get("cover_text") or "").strip()
+        except Exception:
+            pass
+    _cover = cover_text or _local_cover or description or ""
+    if _cover:
+        for _t, _via, _yr in _parse_cover_alt_tags(_cover, year):
+            if _t:
+                _y = _yr or year
+                _full = "%s%s%s" % (_t, "🗓" + _y if _y else "", "")
+                add(_full, _via, _y)
+                if _y and (year or _via):
+                    add(_t, _via, _y)
+    # 2. Fallback: título+año del catálogo
+    if title:
+        _ct, _cy = _split_union_key(title)
+        _y = _cy or year
+        _cand = "%s%s%s" % (_ct, "🗓" + _y if _y else "", "")
+        add(_cand, None, _y)
+        if _y and (year or _cy):
+            add(_ct, None, _y)
+    # 3. Variante de temporada para cada candidato principal (sin via)
+    if item_id:
+        for _v, _via, _yr in list(variants):
+            if _via:
+                continue
+            _sv = _hide_season_variant(item_id, _v)
+            if _sv:
+                key2 = (_sv.strip().lower(), _yr)
+                if key2 not in seen:
+                    seen.add(key2)
+                    variants.append((_sv, None, _yr))
+    return variants
 
 
 def _split_union_key(norm: str) -> tuple:
@@ -1165,10 +1238,11 @@ def _split_union_key(norm: str) -> tuple:
         return (norm or "").strip().lower(), ""
 
 
-def _hide_scan_union(scan_ids: list) -> tuple:
+def _hide_scan_union(scan_ids: list, use_alt_titles: bool = False) -> tuple:
     """{(title_lower, year): label} desde parseados de scans (topo1 OK).
     Sin red: lectura directa de la DB del plugin tgindex. Devuelve
-    (unión, stale_labels)."""
+    (unión, stale_labels).
+    use_alt_titles: también indexa alt_titles y tags del description del scan."""
     union = {}
     stale = set()
     try:
@@ -1195,7 +1269,7 @@ def _hide_scan_union(scan_ids: list) -> tuple:
                 _d = dict(_r)
                 _nm = _d.get("display_name") or _d.get("title") or _d.get("name") or "?"
                 _scans["scan_%s" % _d.get("id")] = (_nm, bool(_d.get("enabled")),
-                                                   _d.get("topology_type"))
+                                                    _d.get("topology_type"))
             _g.close()
         except Exception:
             pass
@@ -1208,8 +1282,17 @@ def _hide_scan_union(scan_ids: list) -> tuple:
             if not _en:
                 stale.add(_lbl)
             try:
+                _cols = [r[1] for r in _c.execute("PRAGMA table_info(unified_catalog)").fetchall()]
+                _use_alt = use_alt_titles and "alt_titles" in _cols
+                _has_desc = "description" in _cols
+                _sel = ["title", "year"]
+                if _has_desc:
+                    _sel.append("description")
+                if _use_alt:
+                    _sel.append("alt_titles")
                 _rows = _c.execute(
-                    "SELECT title, year FROM unified_catalog WHERE source=?", (_sid,)).fetchall()
+                    "SELECT %s FROM unified_catalog WHERE source=?" % ", ".join(_sel),
+                    (_sid,)).fetchall()
             except Exception:
                 continue
             for _r in _rows:
@@ -1222,6 +1305,33 @@ def _hide_scan_union(scan_ids: list) -> tuple:
                         pass
                     if _t and (_t, _y) not in union:
                         union[(_t, _y)] = _lbl
+                    # Alt titles del scan
+                    if _use_alt:
+                        _seen_y = _y
+                        try:
+                            import json as _js2
+                            _alt_raw = str(_r.get("alt_titles") or "").strip()
+                            if _alt_raw and _alt_raw not in ("", "[]"):
+                                _alts = _js2.loads(_alt_raw)
+                                if isinstance(_alts, list):
+                                    for _a in _alts:
+                                        _at = str(_a or "").strip().lower()
+                                        if _at and len(_at) >= 2 and (_at, _seen_y) not in union:
+                                            union[(_at, _seen_y)] = _lbl + " | alt"
+                        except Exception:
+                            pass
+                        # Descripción del scan (puede contener tags de cover)
+                        if _has_desc:
+                            _desc = str(_r.get("description") or "").strip()
+                            if _desc:
+                                try:
+                                    for _ct, _via, _yr in _parse_cover_alt_tags(_desc, _seen_y):
+                                        if _ct and len(_ct) >= 2:
+                                            _cand_y = _yr or _seen_y
+                                            if (_ct, _cand_y) not in union:
+                                                union[(_ct, _cand_y)] = _lbl + " | alt"
+                                except Exception:
+                                    pass
                 except Exception:
                     continue
         _c.close()
@@ -1387,7 +1497,7 @@ async def check_hide_uploaded(body: HideUploadedCheck, request: Request):
     _stale_lbls = set()
     if body.scan_ids:
         try:
-            _sunion, _stale_lbls = _hide_scan_union(body.scan_ids)
+            _sunion, _stale_lbls = _hide_scan_union(body.scan_ids, bool(body.use_alt_titles))
             for _k, _lbl in _sunion.items():
                 if _k not in _union:
                     _union[_k] = "origen:" + _lbl
@@ -1420,44 +1530,29 @@ async def check_hide_uploaded(body: HideUploadedCheck, request: Request):
                 if _iid not in _matched:
                     _matched.append(_iid)
                 continue
-            _cand = _hide_candidate_topic_name(
-                title=_it.get("title") or "",
-                year=_it.get("year") or "",
-                description=_it.get("description") or "",
-                cover_text=_it.get("cover_text") or "",
-                item_id=_it.get("item_id") or "",
-            )
-            if not _cand:
-                continue
-            _ct, _cy = _split_union_key(_cand.strip().lower())
-            if _strict:
-                if not _cy:
-                    _no_year += 1
+            _variants = _hide_candidate_variants(_it)
+            _has_year = False
+            for _cand, _via_tag, _vyr in _variants:
+                if not _cand:
                     continue
-                if (_ct, _cy) in _union:
-                    _matched.append(_it["item_id"])
-                    _via[_it["item_id"]] = _union[(_ct, _cy)]
-                    continue
-            else:
-                if _cand.strip().lower() in _union or (_ct, _cy) in _union:
-                    _matched.append(_it["item_id"])
-                    _via[_it["item_id"]] = _union.get((_ct, _cy)) or _union.get(_cand.strip().lower()) or ""
-                    continue
-            # Variante con sufijo de temporada (topics manuales TitleSeason).
-            try:
-                _v = _hide_season_variant(_it.get("item_id") or "", _cand)
-                if not _v:
-                    continue
-                _vt, _vy = _split_union_key(_v.strip().lower())
+                _ct, _cy = _split_union_key(_cand)
+                _match_yr = _vyr or _cy
+                if _match_yr:
+                    _has_year = True
                 if _strict:
-                    if _vy and (_vt, _vy) in _union:
+                    if not _match_yr:
+                        continue
+                    if (_ct, _match_yr) in _union:
                         _matched.append(_it["item_id"])
-                        _via[_it["item_id"]] = _union[(_vt, _vy)]
-                elif _v.strip().lower() in _union or (_vt, _vy) in _union:
-                    _matched.append(_it["item_id"])
-                    _via[_it["item_id"]] = _union.get((_vt, _vy)) or _union.get(_v.strip().lower()) or ""
-            except Exception:
-                pass
+                        _via[_it["item_id"]] = _union[(_ct, _match_yr)] + (_via_tag and (" | " + _via_tag) or "")
+                        break
+                else:
+                    if _cand in _union or (_ct, _match_yr) in _union:
+                        _matched.append(_it["item_id"])
+                        _via[_it["item_id"]] = (_union.get((_ct, _match_yr)) or _union.get(_cand) or "") + (_via_tag and (" | " + _via_tag) or "")
+                        break
+            if _strict and not _has_year and _it["item_id"] not in _matched:
+                _no_year += 1
         except Exception:
             continue
     _matched_queue = [i for i in _matched if i in _in_queue]
@@ -3627,6 +3722,19 @@ async def _process_job(job: dict, db: dict):
             job["error"] = str(e)[:300]
             _persist_job(job)
         elif _is_auth_dead(str(e)):
+            # No pausar de golpe: puede ser una caída momentánea. Respiros de
+            # 30s y 90s con revalidación; solo pausar si sigue muerto.
+            try:
+                _rec = await _recover_pool_after_auth_error(job)
+            except Exception:
+                _rec = False
+            if _rec:
+                job["status"] = "queued"
+                job["status_text"] = "Cliente recuperado tras espera, reencolado"
+                job.pop("next_episode", None)
+                _persist_job(job)
+                print(f"[TGHirayi_v2] Job {job['id']} recuperado tras reintento, reencolado sin pausar", flush=True)
+                return
             job["status"] = "error"
             job["error"] = ("Sesión de Telegram invalidada o cliente caído "
                             "(¿dos gateways a la vez? ¿cambio de IP/VPN?). Regenera la sesión del userbot "
@@ -7727,44 +7835,92 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
 # Ver download_file / upload_file.
 
 
+# Respiros ante un error con firma de sesión muerta: puede ser una caída
+# momentánea, no una sesión quemada. Se revalida el pool tras cada espera;
+# solo si sigue muerto después de todos los intentos se pausa la cola.
+_AUTH_RECOVER_DELAYS = (30, 90)
+
+
+async def _recover_pool_after_auth_error(job):
+    """Espera 30s y revalida el pool; si sigue mal, 90s y revalida.
+    Devuelve True si el cliente volvió (el job se reencola sin pausar)."""
+    from tvcat.services.userbot_service import get_active_client, get_preferred_client_type
+    try:
+        preferred = get_preferred_client_type()
+    except Exception:
+        preferred = "pyrogram"
+    for _wait in _AUTH_RECOVER_DELAYS:
+        try:
+            job["status_text"] = f"Cliente caído: reintentando en {_wait}s…"
+            _persist_job(job)
+        except Exception:
+            pass
+        print(f"[TGHirayi_v2] Error de cliente, respiro de {_wait}s antes de revalidar", flush=True)
+        await asyncio.sleep(_wait)
+        try:
+            wrapper = await asyncio.wait_for(get_active_client(preferred), timeout=15)
+            raw = getattr(wrapper, "_client", None)
+            if raw is None:
+                continue
+            await asyncio.wait_for(raw.get_me(), timeout=15)
+            print("[TGHirayi_v2] Cliente recuperado tras espera", flush=True)
+            return True
+        except Exception as e2:
+            print(f"[TGHirayi_v2] Revalidación tras {_wait}s falló: {e2}", flush=True)
+            continue
+    return False
+
+
 async def _preferred_uploader(job, timeout=8):
-    """(raw, kind) para subir UN episodio: preferido primero (Comportamiento),
-    fallback al otro. Se llama POR EPISODIO: si el preferido vuelve, se vuelve
-    a él (sin quedarse clavado en el fallback todo el job). Valida con get_me
-    y pone en cuarentena la sesión quemada para no aporrear Telegram."""
+    """(raw, kind) para subir UN episodio: SOLO el tipo preferido
+    (Comportamiento). Sin fallback al otro tipo: cada cliente funciona sin
+    necesitar del otro, y abrir el otro con la misma cuenta crea segundos
+    clientes que Telegram quema como duplicados. Se llama POR EPISODIO: si
+    el preferido vuelve, se vuelve a él. Valida con get_me y pone en
+    cuarentena la sesión SOLO si el pool central también la da por muerta
+    (un duplicado aislado puede ser un zombi ya desconectado, no una
+    sesión quemada: no desactivar en BD a la ligera)."""
     from tvcat.services.userbot_service import (
         get_active_client, get_preferred_client_type, quarantine_session)
     try:
         preferred = get_preferred_client_type()
     except Exception:
         preferred = "pyrogram"
-    order = [preferred] + (["telethon"] if preferred == "pyrogram" else ["pyrogram"])
     last_err = None
-    for ctype in order:
+    try:
+        wrapper = await asyncio.wait_for(get_active_client(preferred), timeout=timeout)
+        raw = getattr(wrapper, "_client", None)
+        if raw is None:
+            raise ConnectionError(f"pool sin cliente {preferred}")
         try:
-            wrapper = await asyncio.wait_for(get_active_client(ctype), timeout=timeout)
-            raw = getattr(wrapper, "_client", None)
-            if raw is None:
-                continue
-            try:
-                await asyncio.wait_for(raw.get_me(), timeout=timeout)
-            except Exception as e:
-                last_err = e
-                _tn = type(e).__name__
-                if "AuthKeyDuplicated" in _tn or "AuthKeyUnregistered" in _tn:
-                    try:
-                        _sd = getattr(wrapper, "session_data", None) or {}
-                        quarantine_session(_sd.get("tg_user_id"), ctype, _tn)
-                    except Exception:
-                        pass
-                continue
-            if ctype != preferred:
-                print(f"[TGHirayi_v2] Subida con {ctype} (preferido {preferred} no disponible)", flush=True)
-            return raw, ctype
+            await asyncio.wait_for(raw.get_me(), timeout=timeout)
         except Exception as e:
             last_err = e
-            continue
-    raise ValueError(f"Sin cliente Telegram disponible ({last_err})")
+            _tn = type(e).__name__
+            if "AuthKeyDuplicated" in _tn or "AuthKeyUnregistered" in _tn:
+                # Revalidar contra el pool antes de cuarentenar: si el pool
+                # responde, fue un fallo aislado (no quemar en BD).
+                try:
+                    _w2 = await asyncio.wait_for(get_active_client(preferred), timeout=timeout)
+                    _r2 = getattr(_w2, "_client", None)
+                    if _r2 is not None:
+                        await asyncio.wait_for(_r2.get_me(), timeout=timeout)
+                        print("[TGHirayi_v2] get_me falló una vez pero el pool responde: sin cuarentena", flush=True)
+                        return _r2, preferred
+                except Exception as e2:
+                    _tn2 = type(e2).__name__
+                    if "AuthKeyDuplicated" in _tn2 or "AuthKeyUnregistered" in _tn2:
+                        try:
+                            _sd = getattr(wrapper, "session_data", None) or {}
+                            quarantine_session(_sd.get("tg_user_id"), preferred, _tn2)
+                        except Exception:
+                            pass
+            raise ConnectionError(f"cliente {preferred} no responde: {e}")
+        return raw, preferred
+    except Exception as e:
+        if last_err is None:
+            last_err = e
+        raise ValueError(f"Sin cliente Telegram disponible ({last_err})")
 
 
 async def _delete_upload(uploader, kind, channel_id, mid):

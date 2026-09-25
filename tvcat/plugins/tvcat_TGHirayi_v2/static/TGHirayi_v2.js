@@ -328,6 +328,9 @@
                     html += '<label title="Sin año extraíble en algún lado no hay match" style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
                         '<input type="checkbox" class="tgcopy-hide-strict-cb" ' + (strictDefault ? 'checked' : '') + ' style="accent-color:#eab308;">' +
                         '<span style="flex:1;font-size:12px;">Comparar estrictamente incluyendo años</span></label>';
+                    html += '<label title="Incluye títulos alternativos de los orígenes (scans). No afecta a destinos (topics)." style="display:flex;align-items:center;gap:8px;padding:10px;margin:4px 0;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.3);border-radius:6px;cursor:pointer;">' +
+                        '<input type="checkbox" class="tgcopy-hide-alt-cb" style="accent-color:#eab308;">' +
+                        '<span style="flex:1;font-size:12px;">Ampliar con nombres alternativos (solo orígenes)</span></label>';
                 }
                 html += '<div class="muted" style="margin:6px 0 2px;font-size:11px;color:#a1a1aa;">Destinos (topics, topo3):</div>';
                 for (var i = 0; i < dests.length; i++) {
@@ -396,7 +399,9 @@
                     var queueMode = !!(queueBox && queueBox.checked);
                     var strictBox = content.querySelector('.tgcopy-hide-strict-cb');
                     var strictMode = strictBox ? !!strictBox.checked : strictDefault;
-                    var payload = { destination_ids: ids, scan_ids: scanIds, items: [], full_catalog: fullMode, for_hide: !showMode, include_queue: queueMode, strict_year: strictMode };
+                    var altBox = content.querySelector('.tgcopy-hide-alt-cb');
+                    var useAlt = !!(altBox && altBox.checked);
+                    var payload = { destination_ids: ids, scan_ids: scanIds, items: [], full_catalog: fullMode, for_hide: !showMode, include_queue: queueMode, strict_year: strictMode, use_alt_titles: useAlt };
                     if (!fullMode) {
                         for (var n = 0; n < items.length; n++) {
                             payload.items.push({
