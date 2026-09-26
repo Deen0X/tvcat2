@@ -123,12 +123,12 @@
         #login-bg {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
-            background-size: 100% 100%;
+            background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
-            filter: blur(18px);
+            filter: blur(12px);
             transform: scale(1.08);
-            opacity: 0.5;
+            opacity: 0.6;
             z-index: 0;
             display: none;
         }
@@ -411,7 +411,7 @@
                                 bg.style.backgroundImage = "url('" + encodeURI(r.image) + "')";
                                 var op = parseInt(r.opacity, 10);
                                 if (!(op >= 0 && op <= 100)) op = 70;
-                                bg.style.opacity = String((op / 100) * 0.7);
+                                bg.style.opacity = String((op / 100) * 0.9);
                                 bg.style.display = 'block';
                             }
                             var t = r.tint || null;
@@ -435,8 +435,25 @@
                 };
                 xhr.send();
             } catch (e) {}
-            // QR desplegado por defecto (salvo modo autorización).
-            try { if (!QR_REQUEST_ID && typeof toggleQrArea === 'function') toggleQrArea(); } catch (e2) {}
+            // QR desplegado por defecto (salvo modo autorización). Una sola vez:
+            // inmediato + refuerzo al load por si el primer intento llegó pronto.
+            try {
+                if (!QR_REQUEST_ID && typeof toggleQrArea === 'function' && !window._qrAutoOpened) {
+                    window._qrAutoOpened = true;
+                    toggleQrArea();
+                }
+            } catch (e2) {}
+            try {
+                window.addEventListener('load', function() {
+                    try {
+                        var qv = document.getElementById('logo-qr-view');
+                        if (!QR_REQUEST_ID && typeof toggleQrArea === 'function' && !window._qrAutoOpened && qv && qv.style.display === 'none') {
+                            window._qrAutoOpened = true;
+                            toggleQrArea();
+                        }
+                    } catch (e3) {}
+                });
+            } catch (e4) {}
         })();
     </script>
 </body>
