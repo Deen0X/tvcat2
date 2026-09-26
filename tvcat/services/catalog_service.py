@@ -188,6 +188,11 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES tvcat_users(id) ON DELETE CASCADE
         )
     """)
+    # Migración: imagen de cabecera por usuario (JSON: image/modo/ajuste/opacidad/tinte)
+    try:
+        c.execute("ALTER TABLE tvcat_user_prefs ADD COLUMN header_image TEXT DEFAULT '{}'")
+    except sqlite3.OperationalError:
+        pass
 
 
     c.execute("""
@@ -1673,6 +1678,14 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
         pconn.close()
         conn.commit()
         conn.close()
+        # Re-aplicar ediciones locales: el incremental trae títulos raw del
+        # plugin y pisaría los enriquecidos (igual que hace rebuild_cache).
+        # Idempotente; best-effort para no romper el ciclo.
+        try:
+            from services.enrich_apply import reapply_all_enriched as _reapply2
+            _reapply2()
+        except Exception as _e_re2:
+            print(f" [CATALOG] reapply enriched omitido (incremental): {_e_re2}", flush=True)
         print(f" [CATALOG] Sync incremental {plugin_name}: {items_inserted} items, {eps_inserted} episodios")
         return {"success": True, "items": items_inserted, "episodes": eps_inserted}
     except Exception as e:
@@ -1849,6 +1862,54 @@ def _apply_content_layer(conn, where_clauses, params, key):
         pass
 
 
+_SEARCH_TAG_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^}]*)\}")
+_SEARCH_TAG_YEAR_RE = re.compile(r"^(\d{4})(?:\s*-\s*(\d{4}))?$")
+
+
+def parse_search_tags(search):
+    """Extrae tags avanzados `{clave:valor}` de una búsqueda de catálogo.
+
+    Claves reconocidas: `year` (YYYY o YYYY-YYYY), `genre` (repetible),
+    `id` (item_id exacto, repetible). Devuelve (texto_limpio, tags) donde
+    tags = {"year_from", "year_to", "genres", "ids"}.
+    Claves desconocidas o valores inválidos se dejan como texto literal
+    (comportamiento anterior, sin sorpresas).
+    """
+    tags = {"year_from": None, "year_to": None, "genres": [], "ids": []}
+    if not search or "{" not in str(search):
+        return (str(search or ""), tags)
+
+    def _take(m):
+        key = (m.group(1) or "").lower()
+        val = (m.group(2) or "").strip()
+        if key == "year" and val:
+            ym = _SEARCH_TAG_YEAR_RE.match(val)
+            if ym:
+                y1 = int(ym.group(1))
+                y2 = int(ym.group(2)) if ym.group(2) else y1
+                if y1 > y2:
+                    y1, y2 = y2, y1
+                # Varios tags year se intersecan (AND)
+                tags["year_from"] = y1 if tags["year_from"] is None else max(tags["year_from"], y1)
+                tags["year_to"] = y2 if tags["year_to"] is None else min(tags["year_to"], y2)
+                return ""
+        elif key == "genre" and val:
+            g = val.lower()
+            if g not in tags["genres"]:
+                tags["genres"].append(g)
+            return ""
+        elif key == "id" and val:
+            v = val.lower()
+            if v not in tags["ids"]:
+                tags["ids"].append(v)
+            return ""
+        return m.group(0)
+
+    clean = _SEARCH_TAG_RE.sub(_take, str(search))
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean, tags
+
+
 def get_random_items(category=None, search=None, limit=200, filters=None, user_id=None, search_fields=None, year_from=None, year_to=None, exclude_genres=None):
     """Retorna items aleatorios del catálogo central."""
     conn = get_conn()
@@ -1882,8 +1943,11 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
         _apply_hidden_layer(conn, where_clauses, params,
                             user_id=user_id, profile_id=profile_id, role=role)
 
-    if search and len(search.strip()) >= 2:
-        query = search.strip().lower()
+    _st = None
+    if search and (len(search.strip()) >= 2 or "{" in search):
+        # Tags avanzados {year}/{genre}/{id} (gateway._filter_items hace lo mismo)
+        clean_search, _st = parse_search_tags(search)
+        query = clean_search.strip().lower()
         like_clauses = []
 
         # Determinar qué campos buscar (whitelist: los nombres se interpolan en SQL)
@@ -1896,32 +1960,50 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
         # (mi*totoro casa "mi amigo totoro", no "totoro y mi").
         def _like_esc(s):
             return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        if '*' in query:
-            parts = [_like_esc(p.strip()) for p in query.split('*') if p.strip()]
-            if not parts:
-                parts = [_like_esc(query)]
-            for field in fields_to_search:
-                if field == "file_name":
-                    # file_name vive en item_episodes, no en unified_catalog
-                    like_clauses.append("EXISTS (SELECT 1 FROM item_episodes e WHERE (e.item_id = unified_catalog.item_id OR e.item_id = CAST(unified_catalog.id AS TEXT)) AND LOWER(COALESCE(e.file_name,'')) LIKE ? ESCAPE '\\')")
-                    params.append("%" + "%".join(parts) + "%")
-                else:
-                    like_clauses.append(f"LOWER({field}) LIKE ? ESCAPE '\\'")
-                    params.append("%" + "%".join(parts) + "%")
-        else:
-            for field in fields_to_search:
-                if field == "file_name":
-                    like_clauses.append("EXISTS (SELECT 1 FROM item_episodes e WHERE (e.item_id = unified_catalog.item_id OR e.item_id = CAST(unified_catalog.id AS TEXT)) AND LOWER(COALESCE(e.file_name,'')) LIKE ? ESCAPE '\\')")
-                    params.append(f"%{_like_esc(query)}%")
-                else:
-                    like_clauses.append(f"LOWER({field}) LIKE ? ESCAPE '\\'")
-                    params.append(f"%{_like_esc(query)}%")
+        if query:
+            if '*' in query:
+                parts = [_like_esc(p.strip()) for p in query.split('*') if p.strip()]
+                if not parts:
+                    parts = [_like_esc(query)]
+                for field in fields_to_search:
+                    if field == "file_name":
+                        # file_name vive en item_episodes, no en unified_catalog
+                        like_clauses.append("EXISTS (SELECT 1 FROM item_episodes e WHERE (e.item_id = unified_catalog.item_id OR e.item_id = CAST(unified_catalog.id AS TEXT)) AND LOWER(COALESCE(e.file_name,'')) LIKE ? ESCAPE '\\')")
+                        params.append("%" + "%".join(parts) + "%")
+                    else:
+                        like_clauses.append(f"LOWER({field}) LIKE ? ESCAPE '\\'")
+                        params.append("%" + "%".join(parts) + "%")
+            else:
+                for field in fields_to_search:
+                    if field == "file_name":
+                        like_clauses.append("EXISTS (SELECT 1 FROM item_episodes e WHERE (e.item_id = unified_catalog.item_id OR e.item_id = CAST(unified_catalog.id AS TEXT)) AND LOWER(COALESCE(e.file_name,'')) LIKE ? ESCAPE '\\')")
+                        params.append(f"%{_like_esc(query)}%")
+                    else:
+                        like_clauses.append(f"LOWER({field}) LIKE ? ESCAPE '\\'")
+                        params.append(f"%{_like_esc(query)}%")
+        # Filtros por tags: AND con el texto y entre sí
+        if _st["ids"]:
+            where_clauses.append("(%s)" % " OR ".join(
+                ["LOWER(unified_catalog.item_id) = ?"] * len(_st["ids"])))
+            params.extend(_st["ids"])
+        for _tg in _st["genres"]:
+            where_clauses.append("(',' || LOWER(COALESCE(genres,'')) || ',' LIKE ? ESCAPE '\\')")
+            params.append("%," + _like_esc(_tg) + ",%")
 
+        _has_tags = bool(_st["ids"] or _st["genres"]
+                         or _st["year_from"] is not None or _st["year_to"] is not None)
         if like_clauses:
             where_clauses.append(f"({' OR '.join(like_clauses)})")
-        else:
+        elif not _has_tags:
             # No hay campos para buscar, forzar resultados vacíos
             where_clauses.append("1=0")
+
+    # Tags {year}: tienen prioridad sobre el rango del modal (lo sustituyen,
+    # no se intersecan: un rango olvidado no debe tumbar la búsqueda con tag).
+    if _st and _st["year_from"] is not None and _st["year_to"] is not None:
+        try:
+            year_from, year_to = int(_st["year_from"]), int(_st["year_to"])
+        except: pass
 
     # Filtro por año
     if year_from:
@@ -1937,6 +2019,9 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
 
     # Filtro por géneros excluidos: un item se descarta si alguno de sus géneros
     # coincide con uno de los excluidos. `genres` está normalizado 'a,b,c' en minúsculas.
+    # Tags {genre}: gobiernan la dimensión género (ignoran exclusiones del modal).
+    if _st and _st["genres"]:
+        exclude_genres = []
     if exclude_genres:
         for g in exclude_genres:
             if g == "__no_genre__":

@@ -31,9 +31,12 @@ if (!Array.prototype.indexOf) {
             styles.innerHTML = '\
                 .' + this.FOCUS_CLASS + ' {\
                     outline: 3px solid #e11d48 !important;\
+                    outline: 3px solid var(--selection, #e11d48) !important;\
                     border-color: #e11d48 !important;\
+                    border-color: var(--selection, #e11d48) !important;\
                     background-color: rgba(225, 29, 72, 0.15) !important;\
                     box-shadow: 0 0 15px rgba(225, 29, 72, 0.6) !important;\
+                    box-shadow: 0 0 15px var(--selection, #e11d48) !important;\
                     transform: scale(1.04) !important;\
                     transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease !important;\
                     z-index: 50 !important;\
@@ -51,11 +54,22 @@ if (!Array.prototype.indexOf) {
         applyProfileColorToFocused: function() {
             var focused = document.querySelector('.' + this.FOCUS_CLASS);
             if (!focused) return;
-            var sideProfileIcon = document.getElementById('side-profile-icon');
+            // Fuente: avatar del sidebar (existe) > icono navbar > default.
+            // (El antiguo 'side-profile-icon' no existe: siempre caía al default.)
             var profileColor = '#e11d48';
-            if (sideProfileIcon && sideProfileIcon.style.backgroundColor) {
-                profileColor = sideProfileIcon.style.backgroundColor;
-            }
+            try {
+                var cssSel = '';
+                try { cssSel = document.documentElement.style.getPropertyValue('--selection') || ''; } catch (e0) {}
+                if (cssSel) profileColor = cssSel;
+                else {
+                    var av = document.getElementById('side-avatar');
+                    if (av && av.style.background) profileColor = av.style.background;
+                    else {
+                        var hi = document.getElementById('header-profile-icon');
+                        if (hi && hi.style.background) profileColor = hi.style.background;
+                    }
+                }
+            } catch (e1) {}
             focused.style.outlineColor = profileColor;
             focused.style.setProperty('outline-color', profileColor, 'important');
             focused.style.boxShadow = '0 0 15px ' + profileColor;

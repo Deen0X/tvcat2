@@ -1060,6 +1060,9 @@ var UI = {
             });
         }
 
+        // 4b. Imagen de cabecera (prefs usuario o default servidor)
+        try { this.initHeaderSection(user); } catch (eH) {}
+
         // 5. Cargar Checkbox de Preferencias de Categorías Dinámicamente desde BD
         var checklistContainer = document.getElementById('user-preferences-checklist');
         if (checklistContainer) {
@@ -1087,6 +1090,83 @@ var UI = {
         }
     },
 
+    // ─── Imagen de cabecera (perfil) ───
+    selectedHeader: null,
+    headerStock: [],
+    headerServerDefault: {},
+    headerCustomUrl: null,
+    initHeaderSection: function(user) {
+        var self = this;
+        var hi = (user && user.header_image) || {};
+        if (typeof hi === 'string') { try { hi = JSON.parse(hi); } catch (e) { hi = {}; } }
+        this.selectedHeader = {
+            image: hi.image || '',
+            fit: hi.fit === 'stretch' ? 'stretch' : 'cover',
+            opacity: (hi.opacity >= 0 && hi.opacity <= 100) ? hi.opacity : 70,
+            tint: hi.tint || { mode: 'profile' }
+        };
+        if (!this.selectedHeader.tint) this.selectedHeader.tint = { mode: 'profile' };
+        if (!this.selectedHeader.tint.mode) this.selectedHeader.tint.mode = 'profile';
+        window.API.ajax({
+            url: '/api/header/stock',
+            success: function(r) {
+                r = r || {};
+                self.headerStock = r.stock || [];
+                self.headerServerDefault = r.server_default || {};
+                self.headerCustomUrl = r.custom_url || null;
+                if (!self.selectedHeader.image && self.headerServerDefault.image) {
+                    self.selectedHeader.image = self.headerServerDefault.image;
+                    self.selectedHeader.fit = self.headerServerDefault.fit || 'cover';
+                    if (self.headerServerDefault.opacity !== undefined) self.selectedHeader.opacity = self.headerServerDefault.opacity;
+                }
+                self.paintHeaderSection();
+                self.previewHeader();
+            },
+            error: function() { self.paintHeaderSection(); }
+        });
+        this.paintHeaderSection();
+    },
+    paintHeaderSection: function() {
+        var h = this.selectedHeader || { image: '', fit: 'cover', opacity: 70, tint: { mode: 'profile' } };
+        var cur = document.getElementById('header-current');
+        if (cur) {
+            if (h.image) {
+                cur.style.backgroundImage = "url('" + encodeURI(h.image) + "')";
+                cur.style.backgroundSize = (h.fit === 'stretch') ? '100% 100%' : 'cover';
+            } else {
+                cur.style.backgroundImage = '';
+                cur.style.background = 'var(--bg-surface)';
+            }
+        }
+        var fit = document.getElementById('header-fit');
+        if (fit) fit.value = h.fit === 'stretch' ? 'stretch' : 'cover';
+        var op = document.getElementById('header-opacity');
+        if (op) op.value = String(h.opacity);
+        var opv = document.getElementById('header-opacity-val');
+        if (opv) opv.textContent = h.opacity + '%';
+        var link = document.getElementById('header-tint-link');
+        var linked = !h.tint || h.tint.mode !== 'custom';
+        if (link) link.checked = linked;
+        var tc = document.getElementById('header-tint-custom');
+        if (tc) tc.style.display = linked ? 'none' : 'flex';
+        if (!linked) {
+            var col = document.getElementById('header-tint-color');
+            if (col && h.tint.color) col.value = h.tint.color;
+            var lv = document.getElementById('header-tint-level');
+            var lvv = parseInt(h.tint.level, 10);
+            if (!(lvv >= 0 && lvv <= 100)) lvv = 40;
+            if (lv) lv.value = String(lvv);
+            var lvt = document.getElementById('header-tint-level-val');
+            if (lvt) lvt.textContent = lvv + '%';
+        }
+    },
+    previewHeader: function() {
+        try {
+            var h = this.selectedHeader || { image: '', fit: 'cover', opacity: 70, tint: { mode: 'profile' } };
+            var pc = this.selectedColor || '';
+            if (window.applyHeaderImage) window.applyHeaderImage(h, pc);
+        } catch (e) {}
+    },
     // Guardar cambios del Perfil en el Servidor
     saveUserProfileChanges: function() {
         var self = this;
@@ -1110,6 +1190,7 @@ var UI = {
             avatar: this.selectedAvatar,
             avatar_url: document.getElementById('profile-avatar-url') ? document.getElementById('profile-avatar-url').value.trim() : '',
             color: this.selectedColor,
+            header_image: JSON.stringify(this.selectedHeader || {}),
             category_preferences: JSON.stringify(prefs)
         };
 
@@ -1122,9 +1203,13 @@ var UI = {
                 window.Catalog.currentUser.avatar_url = avatarUrl ? avatarUrl.value.trim() : '';
                 window.Catalog.currentUser.color = self.selectedColor;
                 window.Catalog.currentUser.category_preferences = payload.category_preferences;
+                try { window.Catalog.currentUser.header_image = JSON.parse(payload.header_image || '{}'); } catch (eH4) {}
 
                 // Actualizar visual de cabecera en sidebar
                 window.Catalog.updateSidebarProfileUI();
+
+                // Cabecera con la imagen recién guardada
+                try { if (window.refreshHeaderImage) window.refreshHeaderImage(); } catch (eH3) {}
 
                 // Actualizar árbol de categorías para aplicar filtro de preferencias de inmediato
                 if (window.Catalog && window.Catalog.initCategoriesTree) {
@@ -1208,6 +1293,7 @@ var UI = {
             avatar: this.selectedAvatar,
             avatar_url: document.getElementById('profile-avatar-url') ? document.getElementById('profile-avatar-url').value.trim() : '',
             color: this.selectedColor,
+            header_image: JSON.stringify(this.selectedHeader || {}),
             category_preferences: JSON.stringify(prefs)
         };
 
@@ -1225,6 +1311,7 @@ var UI = {
                 window.Catalog.currentUser.avatar_url = avatarUrl ? avatarUrl.value.trim() : '';
                 window.Catalog.currentUser.color = self.selectedColor;
                 window.Catalog.currentUser.category_preferences = payload.category_preferences;
+                try { window.Catalog.currentUser.header_image = JSON.parse(payload.header_image || '{}'); } catch (eH5) {}
 
                 // Actualizar UI
                 window.Catalog.updateSidebarProfileUI();
@@ -1309,6 +1396,7 @@ var UI = {
             avatar: this.selectedAvatar,
             avatar_url: document.getElementById('profile-avatar-url') ? document.getElementById('profile-avatar-url').value.trim() : '',
             color: this.selectedColor,
+            header_image: JSON.stringify(this.selectedHeader || {}),
             category_preferences: JSON.stringify(prefs)
         };
         window.API.updateProfile(payload, function(profileRes) {
@@ -1319,6 +1407,7 @@ var UI = {
                 window.Catalog.currentUser.avatar_url = avatarUrl ? avatarUrl.value.trim() : '';
                 window.Catalog.currentUser.color = self.selectedColor;
                 window.Catalog.currentUser.category_preferences = payload.category_preferences;
+                try { window.Catalog.currentUser.header_image = JSON.parse(payload.header_image || '{}'); } catch (eH6) {}
                 window.Catalog.updateSidebarProfileUI();
                 if (window.Catalog && window.Catalog.initCategoriesTree) window.Catalog.initCategoriesTree();
                 window.Catalog.load(window.Catalog.currentCategory);
@@ -2751,6 +2840,211 @@ window.changeHeroScale = function(v) {
     if (!(n >= 30 && n <= 100)) return;
     try { localStorage.setItem('tvcat_hero_btn_scale', String(n)); } catch (e) {}
     UI.applyHeroButtons();
+};
+// ─── Imagen de cabecera (perfil) ───
+function _headerMarkDirty() { try { window._settingsDirty = true; } catch (e) {} }
+window.headerFitChanged = function(v) {
+    try {
+        UI.selectedHeader = UI.selectedHeader || {};
+        UI.selectedHeader.fit = (v === 'stretch') ? 'stretch' : 'cover';
+        _headerMarkDirty(); UI.previewHeader();
+    } catch (e) {}
+};
+window.headerOpacityChanged = function(v) {
+    try {
+        var n = parseInt(v, 10);
+        if (!(n >= 0 && n <= 100)) return;
+        UI.selectedHeader = UI.selectedHeader || {};
+        UI.selectedHeader.opacity = n;
+        var s = document.getElementById('header-opacity-val');
+        if (s) s.textContent = n + '%';
+        _headerMarkDirty(); UI.previewHeader();
+    } catch (e) {}
+};
+window.headerTintLinkChanged = function(checked) {
+    try {
+        UI.selectedHeader = UI.selectedHeader || {};
+        UI.selectedHeader.tint = UI.selectedHeader.tint || {};
+        UI.selectedHeader.tint.mode = checked ? 'profile' : 'custom';
+        if (!checked && !UI.selectedHeader.tint.color) {
+            try { UI.selectedHeader.tint.color = document.getElementById('header-tint-color').value || '#3b82f6'; } catch (e0) {}
+            if (!UI.selectedHeader.tint.level && UI.selectedHeader.tint.level !== 0) UI.selectedHeader.tint.level = 40;
+        }
+        _headerMarkDirty(); UI.paintHeaderSection(); UI.previewHeader();
+    } catch (e) {}
+};
+window.headerTintChanged = function() {
+    try {
+        UI.selectedHeader = UI.selectedHeader || {};
+        UI.selectedHeader.tint = UI.selectedHeader.tint || { mode: 'custom' };
+        UI.selectedHeader.tint.mode = 'custom';
+        var c = document.getElementById('header-tint-color');
+        if (c) UI.selectedHeader.tint.color = c.value;
+        var lv = document.getElementById('header-tint-level');
+        var n = lv ? parseInt(lv.value, 10) : 40;
+        if (!(n >= 0 && n <= 100)) n = 40;
+        UI.selectedHeader.tint.level = n;
+        var s = document.getElementById('header-tint-level-val');
+        if (s) s.textContent = n + '%';
+        var link = document.getElementById('header-tint-link');
+        if (link) link.checked = false;
+        var tc = document.getElementById('header-tint-custom');
+        if (tc) tc.style.display = 'flex';
+        _headerMarkDirty(); UI.previewHeader();
+    } catch (e) {}
+};
+window.openHeaderModal = function() {
+    try {
+        var ov = document.getElementById('header-modal-ov');
+        if (ov) { ov.style.display = 'flex'; return; }
+        ov = document.createElement('div');
+        ov.id = 'header-modal-ov';
+        ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:999999;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;';
+        ov.innerHTML = '<div style="background:#0d0d0f;border:1px solid #3f3f46;border-radius:10px;padding:16px;width:100%;max-width:560px;max-height:84vh;overflow-y:auto;color:#f4f4f5;">' +
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><b style="flex:1;">Elegir imagen de cabecera</b>' +
+            '<button onclick="closeHeaderModal()" style="padding:4px 12px;background:#27272a;border:1px solid #3f3f46;color:#fff;border-radius:6px;cursor:pointer;">Cerrar</button></div>' +
+            '<div id="header-modal-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;"><span style="font-size:0.8rem;color:#a1a1aa;">Cargando…</span></div>' +
+            '<div style="font-size:0.8rem;color:#a1a1aa;margin-bottom:4px;">Desde URL</div>' +
+            '<div style="display:flex;gap:6px;margin-bottom:12px;"><input id="header-url-input" class="settings-input" placeholder="https://…" style="flex:1;">' +
+            '<button onclick="pickHeaderUrl()" class="btn-secondary" style="padding:6px 12px;white-space:nowrap;">Usar</button></div>' +
+            '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">' +
+            '<button onclick="document.getElementById(\'header-file-input\').click()" class="btn-secondary" style="padding:6px 12px;">📁 Subir fichero</button>' +
+            '<input type="file" id="header-file-input" accept="image/*" style="display:none;" onchange="uploadHeaderFile(this)">' +
+            '<button onclick="deleteHeaderCustom()" class="btn-secondary" style="padding:6px 12px;border-color:#ef4444;color:#f87171;">🗑 Quitar custom</button></div>' +
+            '<div style="font-size:0.75rem;color:#a1a1aa;margin-top:8px;">Tip: pega una imagen con Ctrl+V en este cuadro.</div></div>';
+        ov.addEventListener('click', function(e) { if (e.target === ov) closeHeaderModal(); });
+        ov.addEventListener('paste', handleHeaderPaste);
+        document.body.appendChild(ov);
+        refreshHeaderModalList();
+    } catch (e) {}
+};
+window.closeHeaderModal = function() {
+    try { var ov = document.getElementById('header-modal-ov'); if (ov) ov.style.display = 'none'; } catch (e) {}
+};
+window.refreshHeaderModalList = function() {
+    try {
+        var box = document.getElementById('header-modal-list');
+        if (!box) return;
+        window.API.ajax({
+            url: '/api/header/stock',
+            success: function(r) {
+                r = r || {};
+                UI.headerStock = r.stock || [];
+                UI.headerServerDefault = r.server_default || {};
+                UI.headerCustomUrl = r.custom_url || null;
+                var cur = (UI.selectedHeader && UI.selectedHeader.image) || '';
+                var html = '';
+                var all = [];
+                if (UI.headerCustomUrl) all.push({ url: UI.headerCustomUrl, tag: 'Custom' });
+                var defUrl = UI.headerServerDefault.image || '';
+                for (var i = 0; i < UI.headerStock.length; i++) all.push({ url: UI.headerStock[i], tag: (UI.headerStock[i] === defUrl ? 'Default' : '') });
+                if (!all.length) html = '<span style="font-size:0.8rem;color:#a1a1aa;">Sin imágenes (pega o sube una).</span>';
+                for (var j = 0; j < all.length; j++) {
+                    var u = all[j].url;
+                    var sel = (u === cur) ? 'border-color:#e11d48 !important;' : '';
+                    html += '<div onclick="pickHeaderImage(\'' + u.replace(/'/g, '%27') + '\')" title="' + u.replace(/"/g, '') + '" style="height:64px;border-radius:8px;border:2px solid #3f3f46;' + sel + 'background-image:url(\'' + encodeURI(u) + '\');background-size:cover;background-position:center;cursor:pointer;display:flex;align-items:flex-end;justify-content:flex-end;overflow:hidden;">' +
+                        (all[j].tag ? '<span style="font-size:0.65rem;color:#fff;background:rgba(0,0,0,0.6);border-radius:4px;padding:1px 6px;margin:4px;">' + all[j].tag + '</span>' : '') + '</div>';
+                }
+                box.innerHTML = html;
+            },
+            error: function() { box.innerHTML = '<span style="font-size:0.8rem;color:#f87171;">Error cargando.</span>'; }
+        });
+    } catch (e) {}
+};
+window.pickHeaderImage = function(url) {
+    try {
+        UI.selectedHeader = UI.selectedHeader || {};
+        UI.selectedHeader.image = url;
+        _headerMarkDirty(); UI.paintHeaderSection(); UI.previewHeader();
+        refreshHeaderModalList(); closeHeaderModal();
+    } catch (e) {}
+};
+window.pickHeaderUrl = function() {
+    try {
+        var el = document.getElementById('header-url-input');
+        var u = el ? el.value.trim() : '';
+        if (!u) return;
+        pickHeaderImage(u);
+    } catch (e) {}
+};
+window.uploadHeaderFile = function(input) {
+    try {
+        if (!input || !input.files || !input.files[0]) return;
+        var f = input.files[0];
+        if (f.size > 5 * 1024 * 1024) { alert('Máximo 5MB'); return; }
+        var fd = new FormData();
+        fd.append('file', f);
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/header/custom', true);
+        var token = null;
+        try { token = localStorage.getItem('tvcat_token'); } catch (e0) {}
+        if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+        xhr.onload = function() {
+            try {
+                var j = JSON.parse(xhr.responseText);
+                if (xhr.status >= 200 && xhr.status < 300 && j && j.url) {
+                    pickHeaderImage(j.url);
+                } else { alert('Error subiendo: ' + ((j && j.detail) || xhr.status)); }
+            } catch (e) { alert('Error subiendo imagen'); }
+            try { input.value = ''; } catch (e2) {}
+        };
+        xhr.onerror = function() { alert('Error de red'); };
+        xhr.send(fd);
+    } catch (e) {}
+};
+window.handleHeaderPaste = function(e) {
+    try {
+        var items = (e.clipboardData && e.clipboardData.items) || [];
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].type && items[i].type.indexOf('image/') === 0) {
+                var f = items[i].getAsFile();
+                if (!f) continue;
+                if (f.size > 5 * 1024 * 1024) { alert('Máximo 5MB'); return; }
+                var rd = new FileReader();
+                rd.onload = function(ev) {
+                    try {
+                        var b64 = String(ev.target.result || '');
+                        window.API.ajax({
+                            method: 'POST', url: '/api/header/custom', data: { b64: b64 },
+                            success: function(j) {
+                                if (j && j.url) pickHeaderImage(j.url);
+                                else alert('Error pegando imagen');
+                            },
+                            error: function() { alert('Error pegando imagen'); }
+                        });
+                    } catch (ee) {}
+                };
+                rd.readAsDataURL(f);
+                if (e.preventDefault) e.preventDefault();
+                return;
+            }
+        }
+    } catch (e) {}
+};
+// Previsualizar cabecera: quita el atenuado del fondo para ver la cabecera
+// real mientras se mueve cada ajuste (los cambios ya se aplican en vivo).
+window.toggleHeaderPreview = function(on) {
+    try {
+        var modal = document.getElementById('settings-modal');
+        if (!modal) return;
+        if (on) modal.classList.add('preview');
+        else modal.classList.remove('preview');
+    } catch (e) {}
+};
+window.deleteHeaderCustom = function() {
+    try {
+        if (!confirm('Quitar tu imagen custom y volver a la default del servidor?')) return;
+        window.API.ajax({
+            method: 'DELETE', url: '/api/header/custom',
+            success: function() {
+                UI.selectedHeader = UI.selectedHeader || {};
+                UI.selectedHeader.image = (UI.headerServerDefault && UI.headerServerDefault.image) || '';
+                _headerMarkDirty(); UI.paintHeaderSection(); UI.previewHeader();
+                refreshHeaderModalList();
+            },
+            error: function() { alert('Error eliminando'); }
+        });
+    } catch (e) {}
 };
 window.createUserFromAdmin = function() { UI.createUserFromAdmin(); };
 window.changeUserPassword = function() { UI.changeUserPassword(); };

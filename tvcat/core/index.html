@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title data-i18n="TVCat 2">TVCat 2</title>
     <link rel="icon" type="image/png" href="static/TVCat.png">
-    <link rel="stylesheet" href="style.css?v=20260914c">
+    <link rel="stylesheet" href="style.css?v=20260923a">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css">
     <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
@@ -22,6 +22,8 @@
 
     <!-- Navbar -->
     <header class="navbar">
+        <div id="header-img"></div>
+        <div id="header-tint"></div>
         <div class="nav-left" id="nav-left">
             <button class="profile-header-btn" onclick="toggleSideMenu()" title="Menú">
                 <div id="header-profile-icon" class="header-profile-icon">
@@ -236,6 +238,37 @@
                     <div class="settings-input-group">
                         <label>Color de perfil</label>
                         <div class="color-presets-grid" id="color-presets"></div>
+                    </div>
+                    <div class="settings-input-group">
+                        <label>Imagen de cabecera</label>
+                        <label style="font-size:0.8rem;color:var(--text-secondary);display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                            <input type="checkbox" id="header-preview" style="accent-color:var(--accent);" onchange="toggleHeaderPreview(this.checked)"> 👁 Previsualizar (oculta este panel para ver la cabecera)
+                        </label>
+                        <div id="header-current" onclick="openHeaderModal()" title="Click para cambiar la imagen" style="height:90px;border-radius:8px;border:1px solid var(--border-color);background-size:cover;background-position:center;cursor:pointer;display:flex;align-items:flex-end;justify-content:flex-end;overflow:hidden;">
+                            <span style="font-size:0.7rem;color:#fff;background:rgba(0,0,0,0.55);border-radius:6px;padding:2px 8px;margin:6px;">Cambiar</span>
+                        </div>
+                        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+                            <select id="header-fit" class="variant-select" style="max-width:160px;" onchange="headerFitChanged(this.value)">
+                                <option value="cover">Recortar</option>
+                                <option value="stretch">Estirar</option>
+                            </select>
+                            <label style="font-size:0.8rem;color:var(--text-secondary);display:flex;align-items:center;gap:6px;flex:1;min-width:160px;">Transparencia
+                                <input type="range" id="header-opacity" min="0" max="100" value="70" style="flex:1;accent-color:var(--accent);" oninput="headerOpacityChanged(this.value)">
+                                <span id="header-opacity-val">70%</span>
+                            </label>
+                        </div>
+                        <div style="margin-top:8px;">
+                            <label style="font-size:0.8rem;color:var(--text-secondary);display:flex;align-items:center;gap:6px;">
+                                <input type="checkbox" id="header-tint-link" checked style="accent-color:var(--accent);" onchange="headerTintLinkChanged(this.checked)"> Usar color de perfil como tinte
+                            </label>
+                            <div id="header-tint-custom" style="display:none;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">
+                                <input type="color" id="header-tint-color" value="#3b82f6" style="width:40px;height:28px;padding:0;border:1px solid var(--border-color);border-radius:6px;background:none;cursor:pointer;" oninput="headerTintChanged()">
+                                <label style="font-size:0.8rem;color:var(--text-secondary);display:flex;align-items:center;gap:6px;flex:1;min-width:160px;">Nivel
+                                    <input type="range" id="header-tint-level" min="0" max="100" value="40" style="flex:1;accent-color:var(--accent);" oninput="headerTintChanged()">
+                                    <span id="header-tint-level-val">40%</span>
+                                </label>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="tab-pane hidden" id="pane-security">
@@ -1008,12 +1041,12 @@
     <script src="js/translate.js?v=20260801"></script>
     <script src="js/api.js?v=20260801"></script>
     <script src="js/plugin_system.js?v=20260910"></script>
-    <script src="js/assistants.js?v=20260910a"></script>    <script src="js/navEngine.js?v=20260801"></script>
+    <script src="js/assistants.js?v=20260910a"></script>    <script src="js/navEngine.js?v=20260923a"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
     <script src="js/inputHelper.js?v=20260903q"></script>
-    <script src="js/catalog.js?v=20260923c"></script>
+    <script src="js/catalog.js?v=20260923e"></script>
     <script src="js/player.js?v=20260801"></script>
-    <script src="js/ui2.js?v=20260923a"></script>
-    <script src="js/app.js?v=20260923f"></script>
+    <script src="js/ui2.js?v=20260923c"></script>
+    <script src="js/app.js?v=20260923j"></script>
 </body>
 </html>

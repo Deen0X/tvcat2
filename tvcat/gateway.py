@@ -582,6 +582,10 @@ async def lifespan(app_instance):
         app_instance.mount(f"{base_path}/static", StaticFiles(directory=core_static), name="static")
     from services.catalog_service import init_db, rebuild_cache
     init_db()
+    try:
+        _header_ensure_server_default()
+    except Exception:
+        pass
     _hls_cache_init_db()
     # Reconstrucción asíncrona de la caché central (no bloquea el arranque).
     # Se regeneran las export tables de los plugins y se repobla la central.
@@ -1515,6 +1519,11 @@ def _filter_items(items, search: str = "", fields: Optional[str] = None, year_fr
     if not items:
         return items
     search = (search or "").strip()
+    # Tags avanzados {year}/{genre}/{id}: se extraen antes del texto
+    from services.catalog_service import parse_search_tags as _pst
+    clean_search, _ftags = _pst(search)
+    _fidset = set(_ftags["ids"])
+    search = clean_search
     search_fields = [f.strip() for f in fields.split(",") if f.strip()] if fields is not None else None
     if search_fields is None:
         search_fields = ["title", "description", "alt_titles"]
@@ -1553,6 +1562,15 @@ def _filter_items(items, search: str = "", fields: Optional[str] = None, year_fr
         if year_to: yt = int(year_to)
     except: yt = None
     exclude_genres = [g.strip().lower() for g in genres.split(",") if g.strip()] if genres else []
+    # Tags {year}: tienen prioridad sobre el rango del modal (lo sustituyen).
+    if _ftags["year_from"] is not None or _ftags["year_to"] is not None:
+        try:
+            yf = int(_ftags["year_from"]) if _ftags["year_from"] is not None else None
+            yt = int(_ftags["year_to"]) if _ftags["year_to"] is not None else None
+        except: pass
+    # Tags {genre}: gobiernan la dimensión género (ignoran exclusiones del modal).
+    if _ftags["genres"]:
+        exclude_genres = []
     # Pre-parsear búsqueda con comodines
     search_parts = []
     if search and len(search) >= 2:
@@ -1564,6 +1582,17 @@ def _filter_items(items, search: str = "", fields: Optional[str] = None, year_fr
             search_parts = [q]
     filtered = []
     for it in items:
+        # Tags {id}/{genre}: AND con el resto de filtros
+        if _fidset and str(it.get("item_id") or "").lower() not in _fidset:
+            continue
+        if _ftags["genres"]:
+            _tgset = set(x.strip() for x in str(it.get("genres") or "").lower().split(",") if x.strip())
+            _ok = True
+            for _tg in _ftags["genres"]:
+                if _tg not in _tgset:
+                    _ok = False; break
+            if not _ok:
+                continue
         # género
         if exclude_genres:
             gval = (it.get("genres") or "").lower()
@@ -8282,7 +8311,7 @@ async def sync_refresh():
 async def check_updates():
     return _plugin_loader.check_updates()
 
-_USER_PREF_KEYS = ("display_name", "avatar", "avatar_url", "color", "category_preferences", "watch_threshold_min", "watch_threshold_max", "hls_title_prefs")
+_USER_PREF_KEYS = ("display_name", "avatar", "avatar_url", "color", "category_preferences", "watch_threshold_min", "watch_threshold_max", "hls_title_prefs", "header_image")
 
 @app.get(api_url("/api/config"))
 async def get_config(request: Request):
@@ -8348,6 +8377,303 @@ async def save_config(request: Request):
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     with open(CONFIG_PATH, "w") as f: json.dump(body, f, indent=2)
     return {"success": True}
+
+# ─── Imagen de cabecera (perfil + identidad del servidor) ───
+_HEADER_DIR = os.path.join(CORE_DIR, "static", "imgheader")
+_HEADER_CUSTOM_DIR = os.path.join(_HEADER_DIR, "custom")
+_HEADER_STOCK_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
+def _header_session_user(request: Request):
+    from services.auth_service import get_session
+    token = request.cookies.get("tvcat_session", "")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    return get_session(token) if token else None
+
+def _header_stock():
+    try:
+        files = sorted(f for f in os.listdir(_HEADER_DIR)
+                       if os.path.isfile(os.path.join(_HEADER_DIR, f))
+                       and f.lower().endswith(_HEADER_STOCK_EXTS))
+    except Exception:
+        files = []
+    return ["/static/imgheader/" + f for f in files]
+
+def _header_server_default():
+    raw = get_global_setting("server_header_image", "") or ""
+    try:
+        d = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:
+        d = {}
+    return d if isinstance(d, dict) else {}
+
+def _header_setting_set(value: dict):
+    from services.catalog_service import get_conn as _gc
+    conn = _gc()
+    try:
+        conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
+                     ("server_header_image", json.dumps(value, ensure_ascii=False)))
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _header_ensure_server_default():
+    # Una sola vez: sin default y con stock, fijar una al azar.
+    try:
+        if _header_server_default().get("image"):
+            return
+        stock = _header_stock()
+        if not stock:
+            return
+        import random as _rnd
+        _header_setting_set({"image": _rnd.choice(stock), "fit": "cover", "opacity": 70})
+        print(" [HEADER] default del servidor fijada (aleatoria)", flush=True)
+    except Exception as _e:
+        print(f" [HEADER] default no fijada: {_e}", flush=True)
+
+def _header_effective(user_id):
+    # Propia o default del servidor. Tint por defecto: link al perfil.
+    from services.auth_service import get_user_prefs
+    hi = {}
+    try:
+        hi = (get_user_prefs(user_id) or {}).get("header_image") or {}
+        if isinstance(hi, str):
+            hi = json.loads(hi)
+    except Exception:
+        hi = {}
+    if not isinstance(hi, dict):
+        hi = {}
+    if hi.get("image"):
+        return {"image": hi.get("image"), "fit": hi.get("fit", "cover"),
+                "opacity": hi.get("opacity", 70), "tint": hi.get("tint") or {"mode": "profile"}}
+    d = _header_server_default()
+    return {"image": d.get("image", ""), "fit": d.get("fit", "cover"),
+            "opacity": d.get("opacity", 70), "tint": {"mode": "profile"}}
+
+@app.get(api_url("/api/header/stock"))
+async def header_stock(request: Request):
+    sess = _header_session_user(request)
+    if not sess:
+        raise HTTPException(401, "Inicia sesion")
+    from services.auth_service import get_user_prefs
+    prefs = get_user_prefs(sess.get("user_id")) or {}
+    hi = prefs.get("header_image") or {}
+    if isinstance(hi, str):
+        try:
+            hi = json.loads(hi)
+        except Exception:
+            hi = {}
+    custom_url = None
+    try:
+        uid = str(sess.get("user_id"))
+        for _f in os.listdir(_HEADER_CUSTOM_DIR):
+            if _f.startswith(uid + "."):
+                custom_url = "/static/imgheader/custom/" + _f
+                break
+    except Exception:
+        pass
+    return {"stock": _header_stock(), "server_default": _header_server_default(),
+            "mine": hi if isinstance(hi, dict) else {}, "custom_url": custom_url}
+
+@app.get(api_url("/api/header/resolve"))
+async def header_resolve(request: Request):
+    sess = _header_session_user(request)
+    if not sess:
+        raise HTTPException(401, "Inicia sesion")
+    return _header_effective(sess.get("user_id"))
+
+@app.post(api_url("/api/header/custom"))
+async def header_custom(request: Request, file: UploadFile = File(None), scope: str = ""):
+    sess = _header_session_user(request)
+    if not sess:
+        raise HTTPException(401, "Inicia sesion")
+    is_server = (scope == "server")
+    if is_server and sess.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    data = None
+    if file is not None:
+        try:
+            data = await file.read()
+        except Exception:
+            data = None
+    if not data:
+        try:
+            body = await request.json()
+            b64 = (body or {}).get("b64", "") or ""
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
+            import base64 as _b64
+            data = _b64.b64decode(b64)
+        except Exception:
+            data = None
+    if not data or len(data) > 5 * 1024 * 1024:
+        raise HTTPException(400, "Imagen vacía o >5MB")
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        ext = ".png"
+    elif data[:3] == b"\xff\xd8\xff":
+        ext = ".jpg"
+    elif data[:6] in (b"GIF87a", b"GIF89a"):
+        ext = ".gif"
+    elif len(data) > 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        ext = ".webp"
+    else:
+        raise HTTPException(400, "Formato no soportado (png/jpg/gif/webp)")
+    try:
+        os.makedirs(_HEADER_CUSTOM_DIR, exist_ok=True)
+        name = "_server" if is_server else str(sess.get("user_id"))
+        for _f in os.listdir(_HEADER_CUSTOM_DIR):
+            if _f.startswith(name + "."):
+                try:
+                    os.remove(os.path.join(_HEADER_CUSTOM_DIR, _f))
+                except Exception:
+                    pass
+        try:
+            from PIL import Image as _PILh
+            import io as _ioh
+            _im = _PILh.open(_ioh.BytesIO(data)).convert("RGB")
+            if _im.width > 1920:
+                _im = _im.resize((1920, int(_im.height * 1920 / _im.width)))
+            _buf = _ioh.BytesIO()
+            _im.save(_buf, format="PNG")
+            data = _buf.getvalue()
+            ext = ".png"
+        except Exception:
+            pass
+        with open(os.path.join(_HEADER_CUSTOM_DIR, name + ext), "wb") as f:
+            f.write(data)
+    except Exception as e:
+        raise HTTPException(500, f"No se pudo guardar: {e}")
+    return {"ok": True, "url": "/static/imgheader/custom/" + name + ext}
+
+@app.delete(api_url("/api/header/custom"))
+async def header_custom_del(request: Request):
+    sess = _header_session_user(request)
+    if not sess:
+        raise HTTPException(401, "Inicia sesion")
+    try:
+        uid = str(sess.get("user_id"))
+        for _f in os.listdir(_HEADER_CUSTOM_DIR):
+            if _f.startswith(uid + "."):
+                try:
+                    os.remove(os.path.join(_HEADER_CUSTOM_DIR, _f))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    from services.auth_service import get_user_prefs, save_user_prefs
+    try:
+        hi = (get_user_prefs(sess.get("user_id")) or {}).get("header_image") or {}
+        if isinstance(hi, str):
+            hi = json.loads(hi)
+        if not isinstance(hi, dict):
+            hi = {}
+        hi["image"] = ""
+        save_user_prefs(sess.get("user_id"), {"header_image": hi})
+    except Exception:
+        pass
+    return {"ok": True}
+
+@app.get(api_url("/api/header/login"))
+async def header_login():
+    # Sin sesión: imagen + tinte del admin principal; si no, default sin tinte.
+    aid = None
+    try:
+        from services.catalog_service import get_conn as _gc2
+        conn = _gc2()
+        row = conn.execute(
+            "SELECT id FROM tvcat_users WHERE username='admin' OR role='admin' ORDER BY id LIMIT 1").fetchone()
+        conn.close()
+        aid = row[0] if row else None
+    except Exception:
+        aid = None
+    if aid:
+        try:
+            eff = _header_effective(aid)
+            if eff.get("image"):
+                # Resolver el color de perfil para el modo link (el login no
+                # tiene sesión para conocerlo).
+                try:
+                    from services.auth_service import get_user_prefs as _gup
+                    _pc = (_gup(aid) or {}).get("color") or "#e11d48"
+                    _t = eff.get("tint") or {}
+                    _t["profile_color"] = _pc
+                    eff["tint"] = _t
+                except Exception:
+                    pass
+                return eff
+        except Exception:
+            pass
+    d = _header_server_default()
+    return {"image": d.get("image", ""), "fit": d.get("fit", "cover"),
+            "opacity": d.get("opacity", 70), "tint": None}
+
+@app.get(api_url("/api/admin/header/server"))
+async def admin_header_get(request: Request):
+    sess = _header_session_user(request)
+    if not sess or sess.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    custom_url = None
+    try:
+        for _f in os.listdir(_HEADER_CUSTOM_DIR):
+            if _f.startswith("_server."):
+                custom_url = "/static/imgheader/custom/" + _f
+                break
+    except Exception:
+        pass
+    return {"server_default": _header_server_default(), "stock": _header_stock(),
+            "custom_url": custom_url}
+
+@app.delete(api_url("/api/admin/header/server-custom"))
+async def admin_header_custom_del(request: Request):
+    sess = _header_session_user(request)
+    if not sess or sess.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    try:
+        for _f in os.listdir(_HEADER_CUSTOM_DIR):
+            if _f.startswith("_server."):
+                try:
+                    os.remove(os.path.join(_HEADER_CUSTOM_DIR, _f))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    # Si la default apuntaba al custom, re-elegir una del stock al azar.
+    try:
+        d = _header_server_default()
+        if (d.get("image") or "").startswith("/static/imgheader/custom/_server"):
+            import random as _rnd2
+            stock = _header_stock()
+            d["image"] = _rnd2.choice(stock) if stock else ""
+            _header_setting_set(d)
+    except Exception:
+        pass
+    return {"ok": True, "server_default": _header_server_default()}
+
+@app.post(api_url("/api/admin/header/server"))
+async def admin_header_set(request: Request):
+    sess = _header_session_user(request)
+    if not sess or sess.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    d = {"image": str((body or {}).get("image") or ""),
+         "fit": str((body or {}).get("fit") or "cover"),
+         "opacity": (body or {}).get("opacity", 70)}
+    try:
+        d["opacity"] = max(0, min(100, int(d["opacity"])))
+    except Exception:
+        d["opacity"] = 70
+    if d["fit"] not in ("cover", "stretch"):
+        d["fit"] = "cover"
+    _header_setting_set(d)
+    return {"ok": True, "server_default": d}
 
 @app.get(api_url("/api/admin/users"))
 async def admin_users(request: Request):

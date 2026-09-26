@@ -103,6 +103,29 @@ def _parse_cover_alt_titles(text: str) -> list:
     return out
 
 
+_YEAR_TAG_RE = _re.compile(r"(?i)(?:year|a[ñn]o)\s*[:=\s\-]\s*((?:19|20)\d{2})")
+_YEAR_PAR_RE = _re.compile(r"\(((?:19|20)\d{2})\)\s*$")
+
+
+def _year_from_cover_text(text: str) -> str:
+    """Año del cover editado: tag Year:/Año: o (YYYY) al final de alguna de
+    las 3 primeras líneas. Vacío si no hay dato (no se pisa nada)."""
+    if not text:
+        return ""
+    try:
+        m = _YEAR_TAG_RE.search(text)
+        if m:
+            return m.group(1)
+        lines = [l.strip() for l in str(text).split("\n") if l.strip()][:3]
+        for ln in lines:
+            m = _YEAR_PAR_RE.search(ln)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
 def apply_enriched_title(item_id: str, cover_text: str) -> dict:
     """Propaga título + variantes de un cover al catálogo central y réplica en
     las DBs de plugins (mismo modo que central). Retorna
@@ -229,9 +252,50 @@ def apply_enriched_title(item_id: str, cover_text: str) -> dict:
                         pass
             except Exception:
                 pass
+    # Año del cover editado -> columna year (central + réplica en plugins).
+    # Solo si el cover trae año (no se pisa un dato existente con vacío).
+    _year_applied = ""
+    _cover_year = _year_from_cover_text(cover_text or "")
+    if _cover_year:
+        try:
+            from services.catalog_service import get_conn as _cc3
+            _c3 = _cc3()
+            _yrow = _c3.execute("SELECT year FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+            if _yrow is not None:
+                _c3.execute("UPDATE unified_catalog SET year=? WHERE item_id=?", (_cover_year, item_id))
+                _c3.commit()
+                _year_applied = _cover_year
+            _c3.close()
+        except Exception as _e:
+            print(f" [Enricher] year propagate error (central): {_e}")
+        if _year_applied:
+            try:
+                from services.catalog_service import BASE_DIR as _bd3
+                for _pdb in _g.glob(_os.path.join(_bd3, "plugins", "*", "data", "tvcat.db")):
+                    try:
+                        _pc3 = _sq.connect(_pdb, timeout=10)
+                        try:
+                            _pcols = [r[1] for r in _pc3.execute("PRAGMA table_info(unified_catalog)").fetchall()]
+                        except Exception:
+                            _pcols = []
+                        if "year" not in _pcols:
+                            try:
+                                _pc3.execute("ALTER TABLE unified_catalog ADD COLUMN year TEXT")
+                            except Exception:
+                                pass
+                        _prow3 = _pc3.execute("SELECT item_id FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+                        if _prow3 is not None:
+                            _pc3.execute("UPDATE unified_catalog SET year=? WHERE item_id=?", (_cover_year, item_id))
+                            _pc3.commit()
+                        _pc3.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
     return {"title_applied": _title_applied,
             "catalog_title": _catalog_title if _title_applied else "",
-            "alts_applied": _alts_applied}
+            "alts_applied": _alts_applied,
+            "year_applied": _year_applied}
 
 
 def revert_enriched_title(item_id: str) -> dict:
@@ -295,7 +359,7 @@ def reapply_all_enriched() -> dict:
     from services.catalog_service import BASE_DIR as _bd
     _edb = _os.path.join(_bd, "plugins", "tvcat_enricher", "data", "tvcat.db")
     if not _os.path.isfile(_edb):
-        return {"covers": 0, "titles": 0, "alts": 0}
+        return {"covers": 0, "titles": 0, "alts": 0, "years": 0}
     try:
         _ec = _sq.connect(_edb, timeout=30)
         _ec.row_factory = _sq.Row
@@ -316,11 +380,12 @@ def reapply_all_enriched() -> dict:
         except Exception:
             continue
     _REAPPLY.update({"running": True, "done": 0, "total": len(_items)})
-    _t, _a = 0, 0
+    _t, _a, _y = 0, 0, 0
+    _years = {}
     if not _items:
         _REAPPLY.update({"running": False, "done": 0, "total": 0})
         print(" [Enricher] reapply: 0 covers", flush=True)
-        return {"covers": 0, "titles": 0, "alts": 0}
+        return {"covers": 0, "titles": 0, "alts": 0, "years": 0}
     try:
         from services.catalog_service import get_conn as _cc
         _c = _cc()
@@ -378,6 +443,13 @@ def reapply_all_enriched() -> dict:
                     _new = [_x for _x in _cover_alts if _x.strip().lower() not in _have]
                     if _new:
                         _plan.append((_iid, "alts", None, None, None, _new))
+                # Año del cover editado (se aplica con el resto tras el plan).
+                try:
+                    _yy = _year_from_cover_text(_ct)
+                    if _yy:
+                        _years[_iid] = _yy
+                except Exception:
+                    pass
                 _REAPPLY["done"] += 1
             # Aplicar central en un solo commit.
             for _iid, _mode, _raw, _flat, _old_flat, _extra in _plan:
@@ -411,6 +483,13 @@ def reapply_all_enriched() -> dict:
                         _c.execute("UPDATE unified_catalog SET title=?, group_title=?, group_title_flat=? WHERE item_id=?",
                                    (_raw, _raw, _flat, _iid))
                         _t += 1
+                except Exception:
+                    continue
+            # Año de covers editados (solo si el cover trae año).
+            for _iid, _yy in _years.items():
+                try:
+                    _c.execute("UPDATE unified_catalog SET year=? WHERE item_id=?", (_yy, _iid))
+                    _y += 1
                 except Exception:
                     continue
             _c.commit()
@@ -448,6 +527,17 @@ def reapply_all_enriched() -> dict:
                     for _iid, _ops in _by_id.items():
                         if _iid not in _prows:
                             continue
+                        # Año del cover editado (migra la columna si falta).
+                        if _iid in _years:
+                            try:
+                                if "year" not in _cols:
+                                    try:
+                                        _pc.execute("ALTER TABLE unified_catalog ADD COLUMN year TEXT")
+                                    except Exception:
+                                        pass
+                                _pc.execute("UPDATE unified_catalog SET year=? WHERE item_id=?", (_years[_iid], _iid))
+                            except Exception:
+                                pass
                         for (_mode, _raw, _flat, _old_flat, _extra) in _ops:
                             try:
                                 if _mode == "alts":
@@ -486,6 +576,6 @@ def reapply_all_enriched() -> dict:
             print(f" [Enricher] reapply error: {e}", flush=True)
     finally:
         _REAPPLY.update({"running": False})
-    print(f" [Enricher] reapply: {len(_items)} covers, {_t} títulos, {_a} variantes",
+    print(f" [Enricher] reapply: {len(_items)} covers, {_t} títulos, {_a} variantes, {_y} años",
           flush=True)
-    return {"covers": len(_items), "titles": _t, "alts": _a}
+    return {"covers": len(_items), "titles": _t, "alts": _a, "years": _y}

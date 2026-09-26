@@ -480,6 +480,8 @@
                 }
                 if (u.color) avatarEl.style.background = u.color;
             }
+            try { if (typeof window.applySelectionColor === 'function') window.applySelectionColor(u.color); } catch (eSC) {}
+            try { if (typeof window.refreshHeaderImage === 'function') window.refreshHeaderImage(); } catch (eHH) {}
             if (typeof window.syncNavbarAvatar === 'function') window.syncNavbarAvatar();
         },
         get currentCategory() { return currentCategory; },
@@ -693,9 +695,27 @@
                 if (mySeq !== _loadSeq) return;
                 currentItems = data.items || [];
                 if (q.length >= 2) {
+                    // Mismos campos activos que la búsqueda de Inicio
+                    // (título + alt_titles + descripción según filtros) más el
+                    // cover_text local (donde viven Original Title y variantes).
+                    var ff = (window._activeFilters && window._activeFilters.fields) || { title: true };
+                    var wantTitle = ff.title !== false;
+                    var wantAlt = ff.alt_titles === true;
+                    var wantDesc = ff.description === true;
                     currentItems = currentItems.filter(function(it) {
-                        var t = String((it && it.title) || '').toLowerCase();
-                        return t.indexOf(q) !== -1;
+                        if (!it) return false;
+                        var hay = [];
+                        if (wantTitle) hay.push(String(it.title || ''));
+                        if (wantAlt) {
+                            var alts = it.alt_titles;
+                            if (typeof alts === 'string') {
+                                try { var pa = JSON.parse(alts); hay.push(typeof pa === 'string' ? pa : pa.join(' ')); }
+                                catch (e) { hay.push(alts); }
+                            } else if (alts && alts.join) { hay.push(alts.join(' ')); }
+                        }
+                        if (wantDesc) hay.push(String(it.description || ''));
+                        if (it.cover_text) hay.push(String(it.cover_text));
+                        return hay.join('\n').toLowerCase().indexOf(q) !== -1;
                     });
                 }
                 // Si el filtro de huérfanos se quedó sin resultados (p. ej.

@@ -118,8 +118,32 @@
             min-height: 20px;
         }
     </style>
+    <style>
+        /* Fondo con la imagen de cabecera del admin (estirada + difuminada) */
+        #login-bg {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-size: 100% 100%;
+            background-position: center;
+            background-repeat: no-repeat;
+            filter: blur(18px);
+            transform: scale(1.08);
+            opacity: 0.5;
+            z-index: 0;
+            display: none;
+        }
+        #login-tint {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 0;
+            display: none;
+        }
+        .login-card { position: relative; z-index: 1; }
+    </style>
 </head>
 <body>
+    <div id="login-bg"></div>
+    <div id="login-tint"></div>
     <div class="login-card">
         <div id="logo-area" onclick="toggleQrArea()" style="cursor:pointer;position:relative;">
             <div id="logo-view">
@@ -371,6 +395,49 @@
         })();
 
         checkGoogleConfig();
+
+        // Fondo con la imagen de cabecera del admin + QR desplegado por defecto.
+        (function() {
+            try {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', '/api/header/login', true);
+                xhr.onreadystatechange = function() {
+                    if (xhr.readyState !== 4) return;
+                    try {
+                        var r = JSON.parse(xhr.responseText) || {};
+                        if (r.image) {
+                            var bg = document.getElementById('login-bg');
+                            if (bg) {
+                                bg.style.backgroundImage = "url('" + encodeURI(r.image) + "')";
+                                var op = parseInt(r.opacity, 10);
+                                if (!(op >= 0 && op <= 100)) op = 70;
+                                bg.style.opacity = String((op / 100) * 0.7);
+                                bg.style.display = 'block';
+                            }
+                            var t = r.tint || null;
+                            var tc = '';
+                            if (t) {
+                                if (t.mode === 'custom' && t.color) tc = t.color;
+                                else if (t.mode !== 'none' && t.profile_color) tc = t.profile_color;
+                            }
+                            if (tc) {
+                                var tn = document.getElementById('login-tint');
+                                if (tn) {
+                                    tn.style.background = tc;
+                                    var lv = (t && t.level !== undefined) ? parseInt(t.level, 10) : 40;
+                                    if (!(lv >= 0 && lv <= 100)) lv = 40;
+                                    tn.style.opacity = String(lv / 100);
+                                    tn.style.display = 'block';
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                };
+                xhr.send();
+            } catch (e) {}
+            // QR desplegado por defecto (salvo modo autorización).
+            try { if (!QR_REQUEST_ID && typeof toggleQrArea === 'function') toggleQrArea(); } catch (e2) {}
+        })();
     </script>
 </body>
 </html>

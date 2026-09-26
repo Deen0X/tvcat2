@@ -316,6 +316,81 @@ var _activeFilters = {
     sort_alpha: false
 };
 
+// Imagen de cabecera: propia del usuario o default del servidor.
+// eff = {image, fit, opacity, tint:{mode:'profile'|'custom', color, level}}
+window.applyHeaderImage = function(eff, profileColor) {
+    try {
+        var img = document.getElementById('header-img');
+        var tint = document.getElementById('header-tint');
+        if (!img || !tint) return;
+        eff = eff || {};
+        if (eff.image) {
+            img.style.backgroundImage = "url('" + encodeURI(eff.image) + "')";
+            img.style.backgroundSize = (eff.fit === 'stretch') ? '100% 100%' : 'cover';
+            var op = parseInt(eff.opacity, 10);
+            if (!(op >= 0 && op <= 100)) op = 70;
+            img.style.opacity = String(op / 100);
+            img.style.display = '';
+        } else {
+            img.style.backgroundImage = '';
+            img.style.display = 'none';
+        }
+        var t = eff.tint || null;
+        var tcolor = '';
+        var tlevel = 40;
+        if (t) {
+            if (t.mode === 'custom' && t.color) tcolor = t.color;
+            else if (t.mode !== 'none') tcolor = profileColor || '';
+            var lv = parseInt(t.level, 10);
+            if (lv >= 0 && lv <= 100) tlevel = lv;
+        }
+        if (tcolor) {
+            tint.style.background = tcolor;
+            tint.style.opacity = String(tlevel / 100);
+            tint.style.display = 'block';
+        } else {
+            tint.style.display = 'none';
+        }
+    } catch (e) {}
+};
+window.refreshHeaderImage = function() {
+    try {
+        var pc = '';
+        try {
+            var av = document.getElementById('side-avatar');
+            if (av && av.style.background) pc = av.style.background;
+        } catch (e0) {}
+        window.API.ajax({
+            url: '/api/header/resolve',
+            success: function(eff) { window.applyHeaderImage(eff, pc); },
+            error: function() {}
+        });
+    } catch (e) {}
+};
+// Red de seguridad al arrancar: si a los pocos segundos no hay imagen,
+// reintentar (independiente de qué cadena de init haya corrido).
+try {
+    setTimeout(function() {
+        try {
+            var el = document.getElementById('header-img');
+            if (el && !el.style.backgroundImage && typeof window.refreshHeaderImage === 'function') {
+                window.refreshHeaderImage();
+            }
+        } catch (eRT) {}
+    }, 2500);
+} catch (eRT0) {}
+// Color de selección: el color de perfil gobierna --selection (borde de
+// tarjeta, píldora de usuario, foco del mando). Fallback al rojo.
+window.applySelectionColor = function(color) {
+    var c = color || '#e11d48';
+    try { document.documentElement.style.setProperty('--selection', c); } catch (e) {}
+    try {
+        if (window.navEngine && typeof window.navEngine.applyProfileColorToFocused === 'function') {
+            window.navEngine.applyProfileColorToFocused();
+        }
+    } catch (e2) {}
+};
+
 window.toggleFilterModal = function() {
     var modal = document.getElementById('filter-modal');
     if (modal) {
@@ -417,6 +492,9 @@ window.applyFilters = function() {
 
     var yearFrom = document.getElementById('filter-year-from').value;
     var yearTo = document.getElementById('filter-year-to').value;
+    // Un solo bound = año exacto (no rango abierto): se refleja en la otra caja.
+    if (yearFrom && !yearTo) { yearTo = yearFrom; document.getElementById('filter-year-to').value = yearFrom; }
+    if (yearTo && !yearFrom) { yearFrom = yearTo; document.getElementById('filter-year-from').value = yearTo; }
     _activeFilters.year_from = yearFrom ? parseInt(yearFrom) : null;
     _activeFilters.year_to = yearTo ? parseInt(yearTo) : null;
 
@@ -463,6 +541,8 @@ window.toggleSettingsModal = function() {
         modal.style.display = '';
         modal.style.visibility = '';
         modal.style.opacity = '';
+        try { var _hpcb = document.getElementById('header-preview'); if (_hpcb) _hpcb.checked = false; } catch (eHP) {}
+        try { var _hpm = document.getElementById('settings-modal'); if (_hpm) _hpm.classList.remove('preview'); } catch (eHP2) {}
         loadSettings();
         if (window.UI) window.UI.loadSettings();
         // Restaurar última sección visitada (persistente por usuario-dispositivo) — diferido para que currentUser esté cargado
@@ -2637,6 +2717,7 @@ function loadSettings() {
                         avatar: config.avatar || '',
                         avatar_url: config.avatar_url || '',
                         color: config.color || '#e11d48',
+                        header_image: config.header_image || {},
                         category_preferences: config.category_preferences || {}
                     };
                     try { if (window.refreshHiddenNav) window.refreshHiddenNav(); } catch (eH) {}
@@ -2662,6 +2743,8 @@ function loadSettings() {
                         document.querySelector('#side-avatar').style.background = config.color;
                         syncNavbarAvatar();
                     }
+                    try { if (typeof window.applySelectionColor === 'function') window.applySelectionColor(config.color); } catch (eSC3) {}
+                    try { if (typeof window.refreshHeaderImage === 'function') window.refreshHeaderImage(); } catch (eHH) {}
                 }
             });
         }
@@ -5169,6 +5252,7 @@ function loadAdminUsers() {
                             '<svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor;vertical-align:middle;"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>' +
                             '</button>' +
                             '<button onclick="createUser()" style="padding:8px 16px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-family:Outfit,sans-serif;">Crear</button></div>';
+                        html += '<div id="server-identity-box" style="margin-bottom:12px;padding:10px 12px;background:var(--bg-surface);border-radius:6px;border:1px solid var(--border-color);"><span style="font-size:0.8rem;color:var(--text-secondary);">Cargando identidad visual…</span></div>';
                         html += '<div style="display:flex;flex-direction:column;gap:4px;">';
                         for (var i = 0; i < users.length; i++) {
                             var u = users[i];
@@ -5191,12 +5275,187 @@ function loadAdminUsers() {
                         html += '</div>';
                         container.innerHTML = html;
                         try { refreshAdminActivityLeds(); } catch (e) {}
+                        try { if (typeof window.loadServerIdentityBox === 'function') window.loadServerIdentityBox(); } catch (eSI) {}
                     }
                 });
             }});
         }
     });
 }
+
+// ─── Identidad visual del servidor (imagen de cabecera por defecto) ───
+window.loadServerIdentityBox = function() {
+    var box = document.getElementById('server-identity-box');
+    if (!box) return;
+    window.API.ajax({
+        url: '/api/admin/header/server',
+        success: function(r) {
+            r = r || {};
+            var def = r.server_default || {};
+            var stock = r.stock || [];
+            var customUrl = r.custom_url || null;
+            window._serverHeader = { def: def, stock: stock, customUrl: customUrl };
+            window.paintServerIdentityBox();
+        },
+        error: function() { box.innerHTML = '<span style="font-size:0.8rem;color:#f87171;">Error cargando identidad.</span>'; }
+    });
+};
+window.paintServerIdentityBox = function() {
+    var box = document.getElementById('server-identity-box');
+    if (!box) return;
+    var st = window._serverHeader || { def: {}, stock: [], customUrl: null };
+    var def = st.def || {};
+    var cur = def.image || '';
+    var html = '<div style="font-size:0.85rem;font-weight:600;margin-bottom:6px;">Identidad visual del servidor <span style="font-weight:400;color:var(--text-secondary);font-size:0.75rem;">(cabecera por defecto para usuarios nuevos y fondo del login)</span></div>';
+    html += '<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;">';
+    html += '<div id="server-header-current" style="width:220px;height:56px;border-radius:8px;border:1px solid var(--border-color);' +
+        (cur ? 'background-image:url(\'' + encodeURI(cur) + '\');' : 'background:var(--bg-surface);') +
+        'background-size:cover;background-position:center;flex-shrink:0;" title="Actual"></div>';
+    html += '<div style="flex:1;min-width:200px;display:flex;flex-direction:column;gap:6px;">';
+    html += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">';
+    html += '<select id="server-header-fit" style="padding:6px 8px;border-radius:6px;border:1px solid var(--border-color);background:rgba(24,24,27,0.6);color:var(--text-primary);font-size:0.8rem;">' +
+        '<option value="cover"' + ((def.fit || 'cover') === 'cover' ? ' selected' : '') + '>Recortar</option>' +
+        '<option value="stretch"' + (def.fit === 'stretch' ? ' selected' : '') + '>Estirar</option></select>';
+    html += '<label style="font-size:0.8rem;color:var(--text-secondary);display:flex;align-items:center;gap:6px;">Transparencia ' +
+        '<input type="range" id="server-header-opacity" min="0" max="100" value="' + (def.opacity !== undefined ? def.opacity : 70) + '" style="accent-color:var(--accent);" oninput="document.getElementById(\'server-header-opacity-val\').textContent=this.value+\'%\'' + '">' +
+        '<span id="server-header-opacity-val">' + (def.opacity !== undefined ? def.opacity : 70) + '%</span></label>';
+    html += '<button onclick="saveServerIdentity()" class="btn-primary" style="padding:6px 14px;font-size:0.8rem;">Guardar</button>';
+    html += '</div>';
+    html += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">';
+    html += '<button onclick="uploadServerHeaderFile()" class="btn-secondary" style="padding:4px 10px;font-size:0.75rem;">📁 Subir custom</button>';
+    html += '<button onclick="deleteServerHeaderCustom()" class="btn-secondary" style="padding:4px 10px;font-size:0.75rem;border-color:#ef4444;color:#f87171;">🗑 Quitar custom</button>';
+    html += '<span style="font-size:0.72rem;color:var(--text-secondary);">Tip: pega imagen con Ctrl+V aquí.</span>';
+    html += '</div></div></div>';
+    html += '<div id="server-header-list" style="display:flex;flex-direction:column;gap:4px;margin-top:8px;max-height:220px;overflow-y:auto;"></div>';
+    box.innerHTML = html;
+    box.onpaste = handleServerHeaderPaste;
+    window.paintServerIdentityList();
+};
+window.paintServerIdentityList = function() {
+    var list = document.getElementById('server-header-list');
+    if (!list) return;
+    var st = window._serverHeader || { def: {}, stock: [], customUrl: null };
+    var cur = (st.def && st.def.image) || '';
+    var html = '';
+    var all = [];
+    if (st.customUrl) all.push({ url: st.customUrl, tag: 'Custom' });
+    for (var i = 0; i < (st.stock || []).length; i++) all.push({ url: st.stock[i], tag: (st.stock[i] === cur ? 'Default' : '') });
+    if (!all.length) html = '<span style="font-size:0.78rem;color:var(--text-secondary);">Sin imágenes.</span>';
+    for (var j = 0; j < all.length; j++) {
+        var u = all[j].url;
+        var sel = (u === cur) ? 'border-color:#e11d48 !important;' : '';
+        html += '<div onclick="pickServerHeaderImage(\'' + u.replace(/'/g, '%27') + '\')" style="height:44px;border-radius:6px;border:2px solid #3f3f46;' + sel + 'background-image:url(\'' + encodeURI(u) + '\');background-size:cover;background-position:center;cursor:pointer;display:flex;align-items:flex-end;justify-content:flex-end;overflow:hidden;">' +
+            (all[j].tag ? '<span style="font-size:0.62rem;color:#fff;background:rgba(0,0,0,0.6);border-radius:4px;padding:0 5px;margin:3px;">' + all[j].tag + '</span>' : '') + '</div>';
+    }
+    list.innerHTML = html;
+};
+window.pickServerHeaderImage = function(url) {
+    try {
+        window._serverHeader = window._serverHeader || { def: {} };
+        window._serverHeader.def = window._serverHeader.def || {};
+        window._serverHeader.def.image = url;
+        window.paintServerIdentityBox();
+        window.saveServerIdentity(true);
+    } catch (e) {}
+};
+window.saveServerIdentity = function(silent) {
+    try {
+        var fit = 'cover', op = 70;
+        var fitEl = document.getElementById('server-header-fit');
+        if (fitEl) fit = fitEl.value === 'stretch' ? 'stretch' : 'cover';
+        var opEl = document.getElementById('server-header-opacity');
+        if (opEl) { op = parseInt(opEl.value, 10); if (!(op >= 0 && op <= 100)) op = 70; }
+        var img = (window._serverHeader && window._serverHeader.def && window._serverHeader.def.image) || '';
+        window.API.ajax({
+            method: 'POST', url: '/api/admin/header/server',
+            data: { image: img, fit: fit, opacity: op },
+            success: function(r) {
+                if (r) window._serverHeader.def = r.server_default || window._serverHeader.def;
+                if (!silent) { try { refreshHeaderImage(); } catch (e) {} }
+                window.paintServerIdentityList();
+            },
+            error: function() { if (!silent) alert('Error guardando identidad'); }
+        });
+    } catch (e) {}
+};
+window.uploadServerHeaderFile = function() {
+    try {
+        var inp = document.getElementById('server-header-file');
+        if (!inp) {
+            inp = document.createElement('input');
+            inp.type = 'file'; inp.id = 'server-header-file';
+            inp.accept = 'image/*'; inp.style.display = 'none';
+            inp.onchange = function() {
+                if (!inp.files || !inp.files[0]) return;
+                if (inp.files[0].size > 5 * 1024 * 1024) { alert('Máximo 5MB'); return; }
+                var fd = new FormData();
+                fd.append('file', inp.files[0]);
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', '/api/header/custom?scope=server', true);
+                try { var t = localStorage.getItem('tvcat_token'); if (t) xhr.setRequestHeader('Authorization', 'Bearer ' + t); } catch (e0) {}
+                xhr.onload = function() {
+                    try {
+                        var j = JSON.parse(xhr.responseText);
+                        if (xhr.status >= 200 && xhr.status < 300 && j && j.url) {
+                            window._serverHeader.customUrl = j.url;
+                            window.pickServerHeaderImage(j.url);
+                        } else alert('Error subiendo');
+                    } catch (e) { alert('Error subiendo'); }
+                    try { inp.value = ''; } catch (e2) {}
+                };
+                xhr.onerror = function() { alert('Error de red'); };
+                xhr.send(fd);
+            };
+            document.body.appendChild(inp);
+        }
+        inp.click();
+    } catch (e) {}
+};
+window.handleServerHeaderPaste = function(e) {
+    try {
+        var items = (e.clipboardData && e.clipboardData.items) || [];
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].type && items[i].type.indexOf('image/') === 0) {
+                var f = items[i].getAsFile();
+                if (!f) continue;
+                if (f.size > 5 * 1024 * 1024) { alert('Máximo 5MB'); return; }
+                var rd = new FileReader();
+                rd.onload = function(ev) {
+                    window.API.ajax({
+                        method: 'POST', url: '/api/header/custom?scope=server', data: { b64: String(ev.target.result || '') },
+                        success: function(j) {
+                            if (j && j.url) {
+                                window._serverHeader.customUrl = j.url;
+                                window.pickServerHeaderImage(j.url);
+                            } else alert('Error pegando');
+                        },
+                        error: function() { alert('Error pegando'); }
+                    });
+                };
+                rd.readAsDataURL(f);
+                if (e.preventDefault) e.preventDefault();
+                return;
+            }
+        }
+    } catch (e) {}
+};
+window.deleteServerHeaderCustom = function() {
+    try {
+        if (!confirm('Quitar el custom del servidor? Se elegirá otra imagen del stock.')) return;
+        window.API.ajax({
+            method: 'DELETE', url: '/api/admin/header/server-custom',
+            success: function(r) {
+                if (r) {
+                    window._serverHeader.def = r.server_default || {};
+                    window._serverHeader.customUrl = null;
+                }
+                window.paintServerIdentityBox();
+                try { refreshHeaderImage(); } catch (e) {}
+            },
+            error: function() { alert('Error eliminando'); }
+        });
+    } catch (e) {}
+};
 
 function refreshAdminActivityLeds() {
     // 2026-09-04 F1: LEDs de actividad en Gestión de usuarios + polling 45s.
@@ -6001,6 +6260,8 @@ function restoreProfile() {
                     avatarEl.style.background = config.color;
                 }
             }
+            try { if (typeof window.applySelectionColor === 'function') window.applySelectionColor(config.color); } catch (eSC2) {}
+            try { if (typeof window.refreshHeaderImage === 'function') window.refreshHeaderImage(); } catch (eHH2) {}
             syncNavbarAvatar();
         }
     });

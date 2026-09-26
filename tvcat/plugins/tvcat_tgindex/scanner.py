@@ -235,6 +235,7 @@ def _ensure_plugin_schema(conn):
         "ALTER TABLE unified_catalog ADD COLUMN collection_name TEXT DEFAULT ''",
         "ALTER TABLE unified_catalog ADD COLUMN collection_serial TEXT DEFAULT ''",
         "ALTER TABLE unified_catalog ADD COLUMN collection_msg_date INTEGER DEFAULT 0",
+        "ALTER TABLE unified_catalog ADD COLUMN year TEXT",
     ]:
         try:
             cur.execute(_ddl)
@@ -540,6 +541,13 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
             info_parts.append(f"{k}: {v}")
     info = "\n".join(info_parts)
 
+    # Año del cover (tags Year:/Año: o (YYYY)): se guarda en la columna year
+    # para que el export a central lo arrastre (búsqueda/filtros por año).
+    try:
+        _year = _derive_year(title, info, description)
+    except Exception:
+        _year = ""
+
     alt_json = json.dumps(alt_titles or [])
 
     cursor.execute("SELECT id, title, info_messages FROM unified_catalog WHERE item_id = ?", (item_id,))
@@ -608,19 +616,19 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
                     actual_title = f"Título {cat_id}"
         if source is not None:
             cursor.execute(
-                "UPDATE unified_catalog SET title=?, description=?, telegram_link=?, subcategory=?, source=?, info_messages=?, alt_titles=?, group_title=?, group_title_flat=?, season_number=?, season_display=?, tg_user_id=COALESCE(?, tg_user_id), rorder=COALESCE(?, rorder), is_collection=?, collection_raw=?, collection_name=?, collection_serial=?, collection_msg_date=? WHERE id=?",
-                (actual_title, description, telegram_link, subcategory, source, info, alt_json, effective_group, group_title_flat, season_number, season_display, tg_user_id, rorder, is_collection, collection_raw, _col_name, _col_serial, collection_msg_date, cat_id),
+                "UPDATE unified_catalog SET title=?, description=?, telegram_link=?, subcategory=?, source=?, info_messages=?, alt_titles=?, group_title=?, group_title_flat=?, season_number=?, season_display=?, year=COALESCE(NULLIF(?, ''), year), tg_user_id=COALESCE(?, tg_user_id), rorder=COALESCE(?, rorder), is_collection=?, collection_raw=?, collection_name=?, collection_serial=?, collection_msg_date=? WHERE id=?",
+                (actual_title, description, telegram_link, subcategory, source, info, alt_json, effective_group, group_title_flat, season_number, season_display, _year, tg_user_id, rorder, is_collection, collection_raw, _col_name, _col_serial, collection_msg_date, cat_id),
             )
         else:
             cursor.execute(
-                "UPDATE unified_catalog SET title=?, description=?, telegram_link=?, subcategory=?, info_messages=?, alt_titles=?, group_title=?, group_title_flat=?, season_number=?, season_display=?, tg_user_id=COALESCE(?, tg_user_id), rorder=COALESCE(?, rorder), is_collection=?, collection_raw=?, collection_name=?, collection_serial=?, collection_msg_date=? WHERE id=?",
-                (actual_title, description, telegram_link, subcategory, info, alt_json, effective_group, group_title_flat, season_number, season_display, tg_user_id, rorder, is_collection, collection_raw, _col_name, _col_serial, collection_msg_date, cat_id),
+                "UPDATE unified_catalog SET title=?, description=?, telegram_link=?, subcategory=?, info_messages=?, alt_titles=?, group_title=?, group_title_flat=?, season_number=?, season_display=?, year=COALESCE(NULLIF(?, ''), year), tg_user_id=COALESCE(?, tg_user_id), rorder=COALESCE(?, rorder), is_collection=?, collection_raw=?, collection_name=?, collection_serial=?, collection_msg_date=? WHERE id=?",
+                (actual_title, description, telegram_link, subcategory, info, alt_json, effective_group, group_title_flat, season_number, season_display, _year, tg_user_id, rorder, is_collection, collection_raw, _col_name, _col_serial, collection_msg_date, cat_id),
             )
     else:
         # INSERT OR REPLACE sobre item_id (UNIQUE) - sin SELECT de deduplicación
-        columns = ["item_id", "title", "category", "subcategory", "description", "telegram_msg_id", "telegram_link", "group_title", "group_title_flat", "info_messages", "alt_titles", "season_number", "season_display", "is_collection", "collection_raw", "collection_name", "collection_serial", "collection_msg_date"]
+        columns = ["item_id", "title", "category", "subcategory", "description", "year", "telegram_msg_id", "telegram_link", "group_title", "group_title_flat", "info_messages", "alt_titles", "season_number", "season_display", "is_collection", "collection_raw", "collection_name", "collection_serial", "collection_msg_date"]
         placeholders = ["?"] * len(columns)
-        values = [item_id, title, category, subcategory, description, telegram_msg_id, telegram_link, effective_group, group_title_flat, info, alt_json, season_number, season_display, is_collection, collection_raw, _col_name, _col_serial, collection_msg_date]
+        values = [item_id, title, category, subcategory, description, _year, telegram_msg_id, telegram_link, effective_group, group_title_flat, info, alt_json, season_number, season_display, is_collection, collection_raw, _col_name, _col_serial, collection_msg_date]
         if tg_user_id is not None:
             columns.append("tg_user_id")
             placeholders.append("?")
@@ -1732,7 +1740,8 @@ def _extract_metadata_from_text(text):
     metadata = {}
 
     # Extraer campos específicos
-    m = re.search(r"(?i)year\s*[:=\s\-]\s*(\d{4})", text)
+    # Año del cover: Year: o Año: (el tag viaja a info_messages y a la columna year)
+    m = re.search(r"(?i)(?:year|a[ñn]o)\s*[:=\s\-]\s*(\d{4})", text)
     if m:
         metadata["year"] = m.group(1)
 
@@ -1809,6 +1818,42 @@ def _extract_metadata_from_text(text):
 
     clean_desc = "\n".join(clean_lines).strip()
     return metadata, clean_desc
+
+
+_YEAR_TAG_RE = re.compile(r"(?i)(?:year|a[ñn]o)\s*[:=\s\-]\s*((?:19|20)\d{2})")
+_YEAR_PAREN_RE = re.compile(r"\(((?:19|20)\d{2})\)\s*$")
+
+
+def _derive_year(title, *texts):
+    """Año (YYYY) desde tags del cover (Year:/Año:) o (YYYY) final en el
+    título o en alguna de las 3 primeras líneas del texto. Fuente única
+    para el scan (columna year) y para el backfill puntual."""
+    for tx in texts:
+        if not tx:
+            continue
+        try:
+            m = _YEAR_TAG_RE.search(tx)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+    cands = [title]
+    for tx in texts:
+        if tx:
+            try:
+                cands.extend([l for l in str(tx).split("\n") if l.strip()][:3])
+            except Exception:
+                pass
+    for tx in cands:
+        if not tx:
+            continue
+        try:
+            m = _YEAR_PAREN_RE.search(str(tx).strip())
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+    return ""
 
 
 # ---------------------------------------------------------------------------

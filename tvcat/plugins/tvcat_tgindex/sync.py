@@ -132,7 +132,7 @@ def _ensure_export_tables(conn):
     for _tbl in ["unified_catalog", "plugin_catalog_export"]:
         for _col, _typ in [("is_collection", "INTEGER DEFAULT 0"), ("collection_raw", "TEXT DEFAULT ''"),
                            ("collection_name", "TEXT DEFAULT ''"), ("collection_serial", "TEXT DEFAULT ''"),
-                           ("collection_msg_date", "INTEGER DEFAULT 0")]:
+                           ("collection_msg_date", "INTEGER DEFAULT 0"), ("year", "TEXT")]:
             try:
                 c.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_typ}")
             except:
@@ -407,7 +407,7 @@ def refresh_export_source(source_tag):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 d.get("item_id"), d.get("title"), d.get("category", ""), d.get("subcategory", ""),
-                d.get("description", ""), "", d.get("rating", 0),
+                d.get("description", ""), d.get("year", ""), d.get("rating", 0),
                 d.get("alt_titles", "[]"), "", d.get("telegram_link"), d.get("telegram_msg_id"),
                 d.get("group_title"), d.get("group_title_flat"), d.get("season_display"),
                 "tvcat_tgindex", d.get("source_channel_id", ""), d.get("tg_user_id"),

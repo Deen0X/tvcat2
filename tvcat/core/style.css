@@ -5,6 +5,7 @@
     --border-color: rgba(39, 39, 42, 0.4);
     --accent: #e11d48;
     --accent-glow: rgba(225, 29, 72, 0.35);
+    --selection: #e11d48;
     --text-primary: #f4f4f5;
     --text-secondary: #a1a1aa;
     --card-glow: rgba(255, 255, 255, 0.03);
@@ -358,6 +359,24 @@ body.avatar-right .nav-right { order: 0; justify-content: flex-start; }
     background: rgba(24, 24, 27, 0.9);
 }
 
+/* Imagen de cabecera por usuario + tinte (detrás del contenido) */
+#header-img {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    opacity: 0.7;
+    z-index: 0;
+}
+#header-tint {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 0;
+    display: none;
+}
+.nav-left, .search-container, .nav-right { position: relative; z-index: 1; }
+
 /* Profile button in navbar */
 .profile-header-btn {
     display: flex;
@@ -395,6 +414,11 @@ body.avatar-right .nav-right { order: 0; justify-content: flex-start; }
     max-width: 140px;
     overflow: hidden;
     text-overflow: ellipsis;
+    background: #e11d48;
+    background: var(--selection, #e11d48);
+    color: #fff;
+    border-radius: 12px;
+    padding: 2px 10px;
 }
 
 /* Side Menu - Overlay Panel */
@@ -951,6 +975,12 @@ body[class*="cols-"] .catalog-grid {
     opacity: 0 !important;
     pointer-events: none !important;
     display: none !important;
+}
+
+/* Previsualizar cabecera: quita el oscurecido para ver el navbar real
+   mientras se ajusta (el panel sigue visible y operativo). */
+#settings-modal.preview {
+    background: transparent;
 }
 
 .modal-content {

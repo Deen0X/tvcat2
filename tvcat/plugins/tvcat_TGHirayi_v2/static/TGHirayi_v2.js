@@ -892,40 +892,82 @@ html += '</div>';
         if (j.status === 'error') bgCls += 'border-left:3px solid #ef4444;';
 
         var h = '';
-        h += '<div class="tgcopy2-jobrow" data-qid="' + j.id + '" data-qtitle="' + escHtml(String(j.title || '').toLowerCase()) + '" style="display:flex;align-items:center;gap:6px;padding:8px;margin:3px 0;border-radius:6px;' + bgCls + pausedCls + '">';
-
-        if (!isDone) {
-            // Controles de prioridad: 2 columnas (izq: mover 1 en blanco;
-            // der: al tope en amarillo, un pelín más grandes) + asa de arrastre.
-            h += '<div style="display:flex;align-items:stretch;gap:3px;flex-shrink:0;">';
-            h += '<span class="tgcopy2-draghandle" title="Arrastrar para reordenar" onpointerdown="window._tgcopy2DragStart(event,\'' + j.id + '\',this)" style="display:flex;align-items:center;color:#71717a;cursor:grab;font-size:18px;letter-spacing:-5px;padding:6px 4px;touch-action:none;user-select:none;-webkit-user-select:none;">&#8942;&#8942;</span>';
-            h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:3px;align-content:center;">';
-            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'up\')" title="Subir uno" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:13px;padding:8px 9px;min-width:40px;line-height:1;">&#9650;</button>';
-            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'top\')" title="Al inicio" style="background:none;border:1px solid #eab308;color:#eab308;border-radius:4px;cursor:pointer;font-size:15px;font-weight:700;padding:8px 9px;min-width:40px;line-height:1;">&#9650;&#9650;</button>';
-            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'down\')" title="Bajar uno" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:13px;padding:8px 9px;min-width:40px;line-height:1;">&#9660;</button>';
-            h += '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'bottom\')" title="Al final" style="background:none;border:1px solid #eab308;color:#eab308;border-radius:4px;cursor:pointer;font-size:15px;font-weight:700;padding:8px 9px;min-width:40px;line-height:1;">&#9660;&#9660;</button>';
-            h += '</div>';
-            h += '</div>';
-        }
+        h += '<div class="tgcopy2-jobrow" data-qid="' + j.id + '" data-qtitle="' + escHtml(String(j.title || '').toLowerCase()) + '" style="padding:8px;margin:3px 0;border-radius:6px;' + bgCls + pausedCls + '">';
 
         var _thumbSrc = j.cover_thumb ? (API + '/queue/' + j.id + '/cover-thumb?v=' + (j.cover_rev || 0)) : ('/api/cover/' + encodeURIComponent(j.item_id || ''));
-        h += '<span style="display:block;width:44px;height:66px;border-radius:4px;border:1px solid #3f3f46;flex-shrink:0;background:#18181b;overflow:hidden;" title="Cover del job"><img src="' + _thumbSrc + '" onload="this.style.display=\'block\'" onerror="this.onerror=null;this.parentNode.style.display=\'none\'" style="display:none;width:100%;height:100%;object-fit:cover;"></span>';
-        h += '<div style="flex:1;min-width:0;">';
-        h += '<div style="display:flex;align-items:center;gap:6px;font-size:13px;">';
-        h += '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">' + jobTitleHtml(j) + '</span>';
-        // Badge [Topic=nombre] con enlace al topic destino (si está resuelto).
+        var _thumbImg = '<img src="' + _thumbSrc + '" onload="this.style.display=\'block\'" onerror="this.onerror=null;this.parentNode.style.display=\'none\'" style="display:none;width:100%;height:100%;object-fit:cover;">';
+        var _thumbHtml = '<span style="display:block;width:44px;height:66px;border-radius:4px;border:1px solid #3f3f46;flex-shrink:0;background:#18181b;overflow:hidden;" title="Cover del job">' + _thumbImg + '</span>';
+        if (!isDone) {
+            _thumbHtml = '<span onclick="window._tgcopy2EditCover(\'' + j.id + '\')" title="Editar cover" style="display:block;width:44px;height:66px;border-radius:4px;border:1px solid #3f3f46;flex-shrink:0;background:#18181b;overflow:hidden;cursor:pointer;">' + _thumbImg + '</span>';
+        }
+
+        // Badges con hueco fijo: si uno no aplica, placeholder invisible del
+        // mismo tamaño para que todo aparezca siempre en la misma posición.
+        // Orden (der, anclado): ...topics | dest | eps | pyro | 🔍.
+        // (Sin badge de cover: el editor se abre pulsando la imagen.)
+        var _tb = '';
         try {
             var _tl = j._topic_links || [];
             for (var _ti = 0; _ti < _tl.length; _ti++) {
                 var _t = _tl[_ti];
-                var _lbl = '[Topic=' + escHtml(_t.topic_name || ('#' + _t.topic_id)) + ']';
-                if (_t.url) h += '<a href="' + escHtml(_t.url) + '" target="_blank" rel="noopener noreferrer" title="Abrir topic en ' + escHtml(_t.dest_name || '') + '" style="font-size:10px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;text-decoration:none;">' + _lbl + '</a>';
-                else h += '<span title="Topic resuelto (sin enlace)" style="font-size:10px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;">' + _lbl + '</span>';
+                var _tip = '[Topic=' + (_t.topic_name || ('#' + _t.topic_id)) + '] en ' + (_t.dest_name || '');
+                if (_t.url) _tb += '<a href="' + escHtml(_t.url) + '" target="_blank" rel="noopener noreferrer" title="' + escHtml(_tip) + ' (abrir topic)" style="font-size:11px;background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 4px;white-space:nowrap;text-decoration:none;">✈️</a>';
+                else _tb += '<span title="' + escHtml(_tip) + '" style="font-size:11px;background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 4px;white-space:nowrap;">✈️</span>';
             }
         } catch (_eTl) {}
-        if (((j.in_scope_total || j.total_episodes) || 0) > 1) {
-            h += '<span onclick="window._tgcopy2Episodes(\'' + j.id + '\')" title="Ver episodios y elegir cuáles copiar" style="cursor:pointer;font-size:11px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;">🎞️ ' + (j.in_scope_total || j.total_episodes) + '</span>';
+        var _stDest = 'font-size:11px;color:#a1a1aa;padding:1px 5px;border:1px solid #3f3f46;border-radius:4px;white-space:nowrap;display:inline-block;min-width:36px;text-align:center;';
+        var _destBadge = '';
+        if (!isDone) {
+            var dCount = (j.destination_ids || []).length;
+            _destBadge = '<span onclick="window._tgcopy2ShowDestinos(\'' + j.id + '\')" title="Destinos" style="cursor:pointer;' + _stDest + '">' + dCount + '🎯</span>';
+        } else {
+            _destBadge = '<span aria-hidden="true" style="' + _stDest + 'visibility:hidden;">0🎯</span>';
         }
+        var _stEps = 'font-size:11px;background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;display:inline-block;min-width:36px;text-align:center;';
+        var _epsBadge = '';
+        if (((j.in_scope_total || j.total_episodes) || 0) > 1) {
+            _epsBadge = '<span onclick="window._tgcopy2Episodes(\'' + j.id + '\')" title="Ver episodios y elegir cuáles copiar" style="cursor:pointer;' + _stEps + '">🎞️ ' + (j.in_scope_total || j.total_episodes) + '</span>';
+        } else {
+            _epsBadge = '<span aria-hidden="true" style="' + _stEps + 'visibility:hidden;">🎞️ 0</span>';
+        }
+        var _stPyro = 'background:rgba(168,85,247,0.15);color:#c084fc;border:1px solid rgba(168,85,247,0.4);border-radius:4px;font-size:11px;padding:1px 5px;white-space:nowrap;display:inline-block;text-align:center;';
+        var _pyroBadge = '';
+        if (j.needs_pyro) {
+            _pyroBadge = '<span title="Requiere sesión Pyrogram (>1.9GB)" style="' + _stPyro + '">🐍</span>';
+        } else {
+            _pyroBadge = '<span aria-hidden="true" style="' + _stPyro + 'visibility:hidden;">🐍</span>';
+        }
+        var _stCat = 'font-size:11px;background:rgba(34,197,94,0.12);color:#86efac;border:1px solid rgba(34,197,94,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;display:inline-block;text-align:center;';
+        var _catBadge = '';
+        if (j.title) {
+            _catBadge = '<span onclick="window._tgcopy2FilterCatalog(\'' + encodeURIComponent(j.title || '') + '\')" title="Filtrar el catálogo por este título" style="cursor:pointer;' + _stCat + '">🔍</span>';
+        } else {
+            _catBadge = '<span aria-hidden="true" style="' + _stCat + 'visibility:hidden;">🔍</span>';
+        }
+        var _prioBtns = '';
+        if (!isDone) {
+            var _pb = 'background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 5px;min-width:0;line-height:1.2;';
+            var _pbTop = 'background:none;border:1px solid #eab308;color:#eab308;border-radius:4px;cursor:pointer;font-size:11px;font-weight:700;padding:2px 5px;min-width:0;line-height:1.2;';
+            _prioBtns = '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'up\')" title="Subir uno" style="' + _pb + '">&#9650;</button>'
+                + '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'down\')" title="Bajar uno" style="' + _pb + '">&#9660;</button>'
+                + '<span style="width:6px;flex:none;"></span>'
+                + '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'top\')" title="Al inicio" style="' + _pbTop + '">&#9650;&#9650;</button>'
+                + '<button onclick="window._tgcopy2Move(\'' + j.id + '\',\'bottom\')" title="Al final" style="' + _pbTop + '">&#9660;&#9660;</button>';
+        }
+        // Línea superior completa (también sobre la imagen): prioridad a la
+        // izquierda + badges fijos a la derecha.
+        h += '<div style="display:flex;align-items:center;gap:4px;">' + _prioBtns
+            + '<span style="flex:1;min-width:0;"></span>'
+            + _tb + _destBadge + _epsBadge + _pyroBadge + _catBadge + '</div>';
+        // Cuerpo: asa + cover a la izquierda, contenido flexible, botones a la derecha.
+        h += '<div style="display:flex;align-items:center;gap:6px;margin-top:4px;">';
+        if (!isDone) {
+            h += '<span class="tgcopy2-draghandle" title="Arrastrar para reordenar" onpointerdown="window._tgcopy2DragStart(event,\'' + j.id + '\',this)" style="display:flex;align-items:center;color:#71717a;cursor:grab;font-size:26px;letter-spacing:-2px;padding:8px 10px;touch-action:none;user-select:none;-webkit-user-select:none;">&#8942;&#8942;</span>';
+        }
+        h += _thumbHtml;
+        h += '<div style="flex:1;min-width:0;">';
+        h += '<div style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:2px;">';
+        h += '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">' + jobTitleHtml(j) + '</span>';
         if (j.is_archive) {
             h += '<span title="Job de archives comprimidos" style="background:rgba(251,191,36,0.15);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">\uD83D\uDCE6 Archive</span>';
             var phase = j.archive_phase;
@@ -936,12 +978,6 @@ html += '</div>';
                 else if (phase === 'uploading' || phase === 'ready_upload') pcolor = '#4ade80';
                 h += '<span style="background:rgba(0,0,0,0.35);color:' + pcolor + ';border:1px solid ' + pcolor + ';border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">' + phaseLabels[phase] + '</span>';
             }
-        }
-        if (j.needs_pyro) {
-            h += '<span title="Requiere sesión Pyrogram (>1.9GB)" style="background:rgba(168,85,247,0.15);color:#c084fc;border:1px solid rgba(168,85,247,0.4);border-radius:4px;font-size:9px;padding:1px 5px;white-space:nowrap;">\uD83D\uDC0D Pyro</span>';
-        }
-        if (!isDone) {
-            h += '<button onclick="window._tgcopy2EditCover(\'' + j.id + '\')" title="Editar cover" class="tgcopy2-presskey" style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:4px;cursor:pointer;font-size:10px;padding:1px 5px;white-space:nowrap;">Cover</button>';
         }
         h += '</div>';
         if (j.progress > 0 && j.progress < 100) {
@@ -966,28 +1002,21 @@ html += '</div>';
 
         // Información de episodios: total y siguiente a procesar (editable en jobs activos)
         // En scope: hechos relativos al scope; si no, absoluto (comportamiento anterior).
+        // Línea 1: Total / Proces / Omitir — Línea 2: Next + Audio.
         var processed = (typeof j._scope_done === 'number') ? j._scope_done : ((j.current_episode && j.current_episode > 0) ? (j.current_episode - 1) : 0);
         var totalEps = (j.in_scope_total || j.total_episodes || '?');
-        h += '<div style="display:flex;align-items:center;gap:6px;margin-top:3px;font-size:11px;color:#a1a1aa;">';
+        h += '<div style="display:flex;align-items:center;gap:8px;margin-top:3px;font-size:11px;color:#a1a1aa;white-space:nowrap;">';
         h += '<span>Total: ' + totalEps + '</span>';
-        h += '<span>·</span>';
-        h += '<span>Procesados: ' + processed + '</span>';
-        h += '<span>·</span>';
-        h += '<label title="Omitir subida si el topic ya existe en el destino" style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" ' + (j.skip_if_exists_topo3 ? 'checked' : '') + ' onchange="window._tgcopy2SetSkip(\'' + j.id + '\',this.checked)" style="accent-color:#eab308;"><span>Omitir si existe</span></label>';
+        h += '<span>Proces: ' + processed + '</span>';
+        h += '<label title="Omitir subida si el topic ya existe en el destino" style="display:flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" ' + (j.skip_if_exists_topo3 ? 'checked' : '') + ' onchange="window._tgcopy2SetSkip(\'' + j.id + '\',this.checked)" style="accent-color:#eab308;margin:0;"><span>Omitir</span></label>';
+        h += '</div>';
         if (!isDone) {
             var nextVal = (typeof j.next_episode === 'number' && j.next_episode > 0) ? j.next_episode : 'auto';
-            h += '<span>·</span><span>Siguiente:</span>';
-            h += '<input type="text" class="tgcopy2-next-input" value="' + nextVal + '" onfocus="this.select()" onchange="window._tgcopy2SetNext(\'' + j.id + '\',this.value)" onkeydown="if(event.key===\'Enter\'){this.blur();return false;}" style="width:52px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
-        }
-        h += '</div>';
-
-        // Audio / subtítulos de la normalización MP4 (combotext editable + lista)
-        if (!isDone) {
             var audioVal = j.audio_lang || '';
-            var subVal = j.sub_lang || '';
-            h += '<div style="display:flex;align-items:center;gap:6px;margin-top:3px;font-size:11px;color:#a1a1aa;">';
+            h += '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:3px;font-size:11px;color:#a1a1aa;">';
+            h += '<span>Next:</span>';
+            h += '<input type="text" class="tgcopy2-next-input" value="' + nextVal + '" onfocus="this.select()" onchange="window._tgcopy2SetNext(\'' + j.id + '\',this.value)" onkeydown="if(event.key===\'Enter\'){this.blur();return false;}" style="width:52px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
             h += '<span>Audio:</span><input type="text" list="tgcopy2-langs" class="tgcopy2-norm-input" value="' + audioVal + '" placeholder="original" onchange="window._tgcopy2SetNorm(\'' + j.id + '\',\'audio_lang\',this.value)" style="width:64px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
-            h += '<span>Subs:</span><input type="text" list="tgcopy2-langs" class="tgcopy2-norm-input" value="' + subVal + '" placeholder="ninguno" onchange="window._tgcopy2SetNorm(\'' + j.id + '\',\'sub_lang\',this.value)" style="width:64px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
             h += '</div>';
         }
         // Archive protegido con contraseña: campo password + reintentar
@@ -1001,8 +1030,6 @@ html += '</div>';
         h += '</div>';
 
         if (!isDone) {
-            var dCount = (j.destination_ids || []).length;
-            h += '<span onclick="window._tgcopy2ShowDestinos(\'' + j.id + '\')" title="Ver/editar destinos" style="font-size:11px;color:#a1a1aa;cursor:pointer;padding:2px 6px;border:1px solid #3f3f46;border-radius:4px;white-space:nowrap;">' + dCount + ' dest</span>';
             if (j.paused) h += '<span style="font-size:10px;color:#eab308;font-weight:600;">PAUSADO</span>';
             if (j.archive_phase === 'processing') h += '<button onclick="window._tgcopy2KillEncode(\'' + j.id + '\')" title="Matar el ffmpeg en curso y re-encodar" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:10px;padding:2px 6px;white-space:nowrap;">✕ Kill</button>';
             h += '<button onclick="window._tgcopy2TogglePause(\'' + j.id + '\',' + (!j.paused) + ')" title="' + (j.paused ? 'Reanudar' : 'Pausar') + '" style="background:none;border:1px solid #3f3f46;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">' + (j.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
@@ -1015,8 +1042,42 @@ html += '</div>';
         }
         h += '<button onclick="window._tgcopy2Remove(\'' + j.id + '\')" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#10005;</button>';
         h += '</div>';
+        h += '</div>';
         return h;
     }
+    // Badge 🔍: cierra la cola y filtra el catálogo por título + año
+    // ("GOAT🗓2026" -> "GOAT {year:2026}").
+    window._tgcopy2FilterCatalog = function(encTitle) {
+        var t = '';
+        var tagYear = '';
+        try { t = decodeURIComponent(encTitle || ''); } catch (e) { t = String(encTitle || ''); }
+        try {
+            // El año del sufijo pasa a tag (desambigua remakes); el resto se limpia.
+            // 🗓=U+1F5D3 (D83D DDD3), 📅=U+1F4C5 (D83D DCC5).
+            var _ym = String(t || '').match(/(?:\ud83d\uddd3|\ud83d\udcc5)\s*(\d{4})\s*$/) || String(t || '').match(/\((\d{4})\)\s*$/);
+            if (_ym) tagYear = _ym[1];
+            t = String(t || '').replace(/\s*(?:\ud83d\uddd3|\ud83d\udcc5)\s*\d{4}\s*$/, '').replace(/\s*\(\d{4}\)\s*$/, '').replace(/[\ud800-\udfff]+$/, '').trim();
+        } catch (e) {}
+        if (!t || t.length < 2) return;
+        var q = tagYear ? (t + ' {year:' + tagYear + '}') : t;
+        try {
+            var ov = (_queue_modal && _queue_modal.overlay) || null;
+            if (!ov) {
+                var pp = document.getElementById('tgcopy2-queue-panel');
+                ov = pp ? pp.parentNode : null;
+            }
+            if (ov) {
+                if (ov.parentNode) ov.parentNode.removeChild(ov);
+                else ov.remove();
+            }
+        } catch (e) {}
+        try {
+            var si = document.getElementById('global-search');
+            if (si) si.value = q;
+            if (window.handleSearch) window.handleSearch(q);
+            else if (window.Catalog && window.Catalog.performSearch) window.Catalog.performSearch(q);
+        } catch (e) {}
+    };
     window._tgcopy2ShowDestinos = function(jobId) {
         api(API + '/queue', {}, function(res) {
             var queue = (res && res.queue) || [];
