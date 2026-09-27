@@ -183,10 +183,19 @@
                 error: function(){ window._hlsTitlePrefs = window._hlsTitlePrefs||{}; window._hlsTitlePrefsReady = true; if(cb) cb(); }
             });
         }
-        function saveTitlePrefs(audioIdx, subsIdx){
+        function saveTitlePrefs(audioIdx, subsIdx, audioLang, subsLang){
             if(!currentItemId) return;
             var prefs = window._hlsTitlePrefs || {};
-            prefs[currentItemId] = {audio: audioIdx, subs: subsIdx};
+            var prev = prefs[currentItemId] || {};
+            // Solo se guarda por selección explícita del usuario (los change
+            // de los combos). Se guarda idioma ADEMÁS de índice: los índices
+            // cambian entre episodios, el idioma propaga (jpn sigue siendo jpn).
+            var entry = {audio: audioIdx, subs: subsIdx};
+            if (audioLang === undefined) audioLang = prev.audioLang;
+            if (subsLang === undefined) subsLang = prev.subsLang;
+            if (audioLang) entry.audioLang = audioLang;
+            if (subsLang || subsLang === -1) entry.subsLang = subsLang;
+            prefs[currentItemId] = entry;
             window._hlsTitlePrefs = prefs;
             window.API.ajax({
                 method: 'POST',
@@ -195,6 +204,15 @@
                 success: function(){ log("title prefs guardado "+currentItemId+" audio="+audioIdx+" subs="+subsIdx); },
                 error: function(s,msg){ log("title prefs save error "+msg); }
             });
+        }
+        // Idioma de una pista (para guardar/propagar por idioma, no por índice).
+        function trackLangOf(list, idx) {
+            try {
+                if (list && idx !== null && idx !== undefined && idx >= 0 && idx < list.length) {
+                    return list[idx].lang || list[idx].name || '';
+                }
+            } catch (e) {}
+            return '';
         }
         // cargar prefs de tÃ­tulo en background
         loadTitlePrefs();
@@ -577,14 +595,14 @@
             var lblA=document.createElement("div"); lblA.textContent="Audio:"; lblA.style.cssText="color:#fff;font-size:11px;margin-bottom:2px;"; comboAudioWrap.appendChild(lblA);
             var selA=document.createElement("select"); selA.id="cc-audio-sel"; selA.style.cssText="width:100%;padding:4px;background:rgba(0,0,0,0.85);color:#fff;border:1px solid #888;font-size:11px;";
             selA.addEventListener("click", function(e){ e.stopPropagation(); resetCustomTimer(); });
-            selA.addEventListener("change", function(){ var v=this.value; var idx=parseInt(v,10); if(isNaN(idx)) idx=0; try{ var h=videoPlayer._hls; var cur=videoPlayer.currentTime||0; var curSubs=(h?h.subtitleTrack:-1); if(h){ var newUrl="/api/hls_seq/"+episodeKey+"/playlist.m3u8?audio="+idx; log("cc audio loadSource "+newUrl+" (subs="+curSubs+", cur="+cur+")"); var onP=function(){ try{ flushFrontBuffer(h); }catch(efe){} try{ selA.value=String(idx); if(curSubs>=0){ h.subtitleTrack=curSubs; log("cc audio: subs restaurado a "+curSubs); } var buscarPos=function(){ try{ if(cur>0 && Math.abs(videoPlayer.currentTime-cur)>0.3){ videoPlayer.currentTime=cur; h.startLoad(); log("cc audio: seek a "+cur); } videoPlayer.play(); }catch(e){} }; setTimeout(buscarPos, 200); setTimeout(buscarPos, 600); setTimeout(buscarPos, 1200); }catch(e){} try{ h.off(Hls.Events.MANIFEST_PARSED, onP); }catch(e){} }; h.on(Hls.Events.MANIFEST_PARSED, onP); videoPlayer.addEventListener("loadedmetadata", onP, {once:true}); h.loadSource(newUrl); saveTitlePrefs(idx, curSubs); _hlsSeqCurrentAudio=idx; } }catch(e){} resetCustomTimer(); });
+            selA.addEventListener("change", function(){ var v=this.value; var idx=parseInt(v,10); if(isNaN(idx)) idx=0; try{ var h=videoPlayer._hls; var cur=videoPlayer.currentTime||0; var curSubs=(h?h.subtitleTrack:-1); if(h){ var newUrl="/api/hls_seq/"+episodeKey+"/playlist.m3u8?audio="+idx; log("cc audio loadSource "+newUrl+" (subs="+curSubs+", cur="+cur+")"); var onP=function(){ try{ flushFrontBuffer(h); }catch(efe){} try{ selA.value=String(idx); if(curSubs>=0){ h.subtitleTrack=curSubs; log("cc audio: subs restaurado a "+curSubs); } var buscarPos=function(){ try{ if(cur>0 && Math.abs(videoPlayer.currentTime-cur)>0.3){ videoPlayer.currentTime=cur; h.startLoad(); log("cc audio: seek a "+cur); } videoPlayer.play(); }catch(e){} }; setTimeout(buscarPos, 200); setTimeout(buscarPos, 600); setTimeout(buscarPos, 1200); }catch(e){} try{ h.off(Hls.Events.MANIFEST_PARSED, onP); }catch(e){} }; h.on(Hls.Events.MANIFEST_PARSED, onP); videoPlayer.addEventListener("loadedmetadata", onP, {once:true});                             h.loadSource(newUrl); saveTitlePrefs(idx, curSubs, trackLangOf(window._hlsSeqAudioTracks, idx), trackLangOf(h.subtitleTracks, curSubs)); _hlsSeqCurrentAudio=idx; } }catch(e){} resetCustomTimer(); });
             comboAudioWrap.appendChild(selA); customLayer.appendChild(comboAudioWrap);
             var comboSubsWrap=document.createElement("div"); comboSubsWrap.id="cc-subs-wrap"; comboSubsWrap.setAttribute("data-cc-interactive","1");
             comboSubsWrap.style.cssText="position:absolute;right:12%;top:70%;width:28%;text-align:center;z-index:11;pointer-events:none;";
             var lblS=document.createElement("div"); lblS.textContent="Subtitle:"; lblS.style.cssText="color:#fff;font-size:11px;margin-bottom:2px;"; comboSubsWrap.appendChild(lblS);
             var selS=document.createElement("select"); selS.id="cc-subs-sel"; selS.style.cssText="width:100%;padding:4px;background:rgba(0,0,0,0.85);color:#fff;border:1px solid #888;font-size:11px;";
             selS.addEventListener("click", function(e){ e.stopPropagation(); resetCustomTimer(); });
-            selS.addEventListener("change", function(){ var v=this.value; var idx=parseInt(v,10); try{ var h2=videoPlayer._hls; if(h2 && h2.subtitleTracks && h2.subtitleTracks.length){ var real = (idx>=0 && idx<h2.subtitleTracks.length)?idx:-1; h2.subtitleTrack=real; if(window._autoSelDone) window._autoSelDone.subs=true; log("cc subtitleTrack ->"+real); var curAudio = (h2.audioTrack!=null?h2.audioTrack:0); saveTitlePrefs(curAudio, real); } }catch(e){} resetCustomTimer(); });
+            selS.addEventListener("change", function(){ var v=this.value; var idx=parseInt(v,10); try{ var h2=videoPlayer._hls; if(h2 && h2.subtitleTracks && h2.subtitleTracks.length){                         var real = (idx>=0 && idx<h2.subtitleTracks.length)?idx:-1; h2.subtitleTrack=real; if(window._autoSelDone) window._autoSelDone.subs=true; log("cc subtitleTrack ->"+real); var curAudio = (h2.audioTrack!=null?h2.audioTrack:0); saveTitlePrefs(curAudio, real, trackLangOf(window._hlsSeqAudioTracks, curAudio), trackLangOf(h2.subtitleTracks, real)); } }catch(e){} resetCustomTimer(); });
             comboSubsWrap.appendChild(selS); customLayer.appendChild(comboSubsWrap);
             playerModal.appendChild(customLayer);
             // Integrar barra verde en el borde superior de la capa custom (2px)
@@ -772,7 +790,7 @@
                             var onParsed = function(){ try{ if(cur>0){ videoPlayer.currentTime = cur; } videoPlayer.play(); }catch(e){} try{ h.off(Hls.Events.MANIFEST_PARSED, onParsed); }catch(e){} };
                             h.on(Hls.Events.MANIFEST_PARSED, onParsed);
                             h.loadSource(newUrl);
-                            try{ var curSubs2 = h.subtitleTrack; saveTitlePrefs(idx, curSubs2); }catch(e){}
+                            try{ var curSubs2 = h.subtitleTrack; saveTitlePrefs(idx, curSubs2, trackLangOf(window._hlsSeqAudioTracks, idx), trackLangOf(h.subtitleTracks, curSubs2)); }catch(e){}
                         }
                     } catch(e){ log("audio switch error: "+e); }
                 };
@@ -800,7 +818,7 @@
                         log("BEFORE hls.subtitleTracks="+JSON.stringify((hlsInst.subtitleTracks||[]).map(function(t){return t.name||t.lang;}))+" curTrack="+hlsInst.subtitleTrack+" set to "+idx);
                         hlsInst.subtitleTrack = idx;
                         log("AFTER hls.subtitleTrack="+hlsInst.subtitleTrack);
-                        try{ var curAudio2 = hlsInst.audioTrack; saveTitlePrefs(curAudio2, idx); }catch(e){}
+                        try{ var curAudio2 = hlsInst.audioTrack; saveTitlePrefs(curAudio2, idx, trackLangOf(window._hlsSeqAudioTracks, curAudio2), trackLangOf(hlsInst.subtitleTracks, idx)); }catch(e){}
                     } catch(e){ log("subs switch error: "+e); }
                 };
                 var off = document.createElement("option"); off.value="-1"; off.textContent="Sin subs"; _subsSel.appendChild(off);
@@ -1146,11 +1164,25 @@
                     var titlePref = (window._hlsTitlePrefs && currentItemId && window._hlsTitlePrefs[currentItemId]) ? window._hlsTitlePrefs[currentItemId] : null;
                     if(titlePref){
                         log("auto-select titlePref "+currentItemId+" => "+JSON.stringify(titlePref)+" atracks="+(hls.audioTracks?hls.audioTracks.length:0)+" stracks="+(hls.subtitleTracks?hls.subtitleTracks.length:0));
-                        if(hls.audioTracks&&hls.audioTracks.length&&!window._autoSelDone.audio && titlePref.audio!==undefined && titlePref.audio!==null){
+                        // Propagación POR IDIOMA (los índices cambian entre episodios).
+                        // Sin match: no se toca nada (pista por defecto) y cae al global.
+                        if(hls.audioTracks&&hls.audioTracks.length&&!window._autoSelDone.audio && titlePref.audioLang){
+                            var aiL = -1;
+                            try { aiL = findSingleTrackIndex(hls.audioTracks, titlePref.audioLang); } catch (eL) {}
+                            if(aiL>=0){ hls.audioTrack=aiL; window._autoSelDone.audio=true; log("auto audioTrack (title lang "+titlePref.audioLang+") ->"+aiL+" ("+(hls.audioTracks[aiL].lang||hls.audioTracks[aiL].name)+")"); var aSel=document.getElementById("hls-audio-sel"); if(aSel) aSel.value=String(aiL); var caSel=document.getElementById("cc-audio-sel"); if(caSel) caSel.value=String(aiL); }
+                            else { log("auto audio: '"+titlePref.audioLang+"' no está en este episodio, default"); }
+                        }
+                        if(hls.subtitleTracks&&hls.subtitleTracks.length&&!window._autoSelDone.subs && titlePref.subsLang!==undefined && titlePref.subsLang!==null){
+                            var siL = -1;
+                            try { siL = (titlePref.subsLang===-1) ? -1 : findSingleTrackIndex(hls.subtitleTracks, titlePref.subsLang); } catch (eL2) {}
+                            if(siL===-1 || siL>=0){ hls.subtitleTrack=siL; window._autoSelDone.subs=true; log("auto subtitleTrack (title lang) ->"+siL); var sel=document.getElementById("hls-subs-sel"); if(sel) sel.value=String(siL); var csel=document.getElementById("cc-subs-sel"); if(csel) csel.value=String(siL); }
+                            else { log("auto subs: '"+titlePref.subsLang+"' no está en este episodio, default"); }
+                        }
+                        if(hls.audioTracks&&hls.audioTracks.length&&!window._autoSelDone.audio && titlePref.audio!==undefined && titlePref.audio!==null && !titlePref.audioLang){
                             var aiT = parseInt(titlePref.audio,10);
                             if(!isNaN(aiT) && aiT>=0 && aiT<hls.audioTracks.length){ hls.audioTrack=aiT; window._autoSelDone.audio=true; log("auto audioTrack (title) ->"+aiT+" ("+(hls.audioTracks[aiT].lang||hls.audioTracks[aiT].name)+")"); var aSel=document.getElementById("hls-audio-sel"); if(aSel) aSel.value=String(aiT); var caSel=document.getElementById("cc-audio-sel"); if(caSel) caSel.value=String(aiT); }
                         }
-                        if(hls.subtitleTracks&&hls.subtitleTracks.length&&!window._autoSelDone.subs && titlePref.subs!==undefined && titlePref.subs!==null){
+                        if(hls.subtitleTracks&&hls.subtitleTracks.length&&!window._autoSelDone.subs && titlePref.subs!==undefined && titlePref.subs!==null && titlePref.subsLang===undefined){
                             var siT = parseInt(titlePref.subs,10);
                             if(!isNaN(siT) && (siT===-1 || siT<hls.subtitleTracks.length)){ hls.subtitleTrack=siT; window._autoSelDone.subs=true; log("auto subtitleTrack (title) ->"+siT+(siT>=0?" ("+(hls.subtitleTracks[siT].lang||hls.subtitleTracks[siT].name)+")":" (desactivado)")); var sel=document.getElementById("hls-subs-sel"); if(sel) sel.value=String(siT); var csel=document.getElementById("cc-subs-sel"); if(csel) csel.value=String(siT); }
                         }
@@ -1195,12 +1227,34 @@
                 try{
                     var audT = window._hlsSeqAudioTracks;
                     if(!audT || !audT.length) { log("SEQ: sin audio_tracks aún"); return; }
-                    // Resolver preferencia: título (central) > global (prio1/prio2)
+                    // Resolver preferencia: título (central) > global (prio1/prio2).
+                    // Por IDIOMA (los índices cambian entre episodios); sin match
+                    // se deja el default y cae al global. Índice legacy solo para
+                    // prefs viejas sin idioma.
                     var titlePref = (window._hlsTitlePrefs && currentItemId && window._hlsTitlePrefs[currentItemId]) ? window._hlsTitlePrefs[currentItemId] : null;
                     var audioIdx = null, subsIdx = null;
                     if(titlePref){
-                        if(titlePref.audio!=null && titlePref.audio>=0 && titlePref.audio<audT.length) audioIdx = titlePref.audio;
-                        if(titlePref.subs!=null) subsIdx = titlePref.subs;
+                        if(titlePref.audioLang){
+                            try {
+                                var aiL2 = findSingleTrackIndex(audT, titlePref.audioLang);
+                                if(aiL2>=0) audioIdx = aiL2;
+                                else log("SEQ: '"+titlePref.audioLang+"' no está en este episodio, default");
+                            } catch (eL3) {}
+                        } else if(titlePref.audio!=null && titlePref.audio>=0 && titlePref.audio<audT.length){
+                            audioIdx = titlePref.audio;
+                        }
+                        if(titlePref.subsLang!==undefined && titlePref.subsLang!==null){
+                            if(titlePref.subsLang===-1){ subsIdx = -1; }
+                            else {
+                                try {
+                                    var siL2 = findSingleTrackIndex(window._hlsSeqSubTracks, titlePref.subsLang);
+                                    if(siL2>=0) subsIdx = siL2;
+                                    else log("SEQ: subs '"+titlePref.subsLang+"' no está, default");
+                                } catch (eL4) {}
+                            }
+                        } else if(titlePref.subs!=null){
+                            subsIdx = titlePref.subs;
+                        }
                     }
                     if(audioIdx===null){
                         var p1a = getPref("prio1_audio","spa"), p2a = getPref("prio2_audio","eng");

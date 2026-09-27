@@ -6393,14 +6393,23 @@ def _run_ffmpeg_progress(cmd: list, duration: float, base: float = 0.0, span: fl
     else:
         full += ["-progress", "pipe:1"]
     # F5 QueuePriority: el recode es fondo → hilos capados + prioridad baja.
-    # -threads solo si es seguro (una única salida al final y sin -threads ya).
+    # -threads es opción GLOBAL: va justo tras el ejecutable. (NO al final:
+    # _run_ffmpeg_progress ya añadió "-progress <fichero>" detrás del output
+    # y ahí el valor quedaba como nombre de fichero: "Unable to choose an
+    # output format for '7'".)
     try:
         _nth = _recode_max_threads()
-        if _nth and "-threads" not in full and len(full) >= 2 and not str(full[-1]).startswith("-"):
-            full = full[:-1] + ["-threads", str(_nth)] + full[-1:]
+        if _nth and "-threads" not in full and len(full) >= 1:
+            full = [full[0], "-threads", str(_nth)] + full[1:]
     except Exception:
         pass
     _err = open(err_log, "wb") if err_log else subprocess.DEVNULL
+    # Diagnóstico: comando completo (imprescindible cuando ffmpeg falla).
+    try:
+        import shlex as _shlex
+        print(f" [FFMPEG] {' '.join(_shlex.quote(str(a)) for a in full)}", flush=True)
+    except Exception:
+        pass
     _preexec = None
     _cflags = 0
     try:
@@ -6789,8 +6798,14 @@ def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_
             tail = ""
             if err_log and os.path.isfile(err_log):
                 try:
+                    # El error REAL está al FINAL del log (el inicio es la
+                    # cabecera de versión). Leer la cola, no la cabeza.
                     with open(err_log, 'rb') as _f:
-                        tail = _f.read()[:300].decode(errors='replace')
+                        try:
+                            _f.seek(-1500, os.SEEK_END)
+                        except Exception:
+                            _f.seek(0)
+                        tail = _f.read().decode(errors='replace')
                 except Exception:
                     pass
             log(f"ffmpeg error: {tail}")

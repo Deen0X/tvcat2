@@ -12,7 +12,7 @@
   "priority": 3,
   "js": [
     "hls.min.js?v=20260935z21",
-    "player_hls.js?v=20260923g"
+    "player_hls.js?v=20260923h"
   ],
   "css": [],
   "formats": ["*"],

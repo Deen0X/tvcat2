@@ -246,12 +246,15 @@ def _refresh_central(tag: str, verify_item_id=None):
     import traceback
     loader, how = _get_loader()
     if loader is None:
+        print(f" [SLICER] refresh central sin loader: {how}", flush=True)
         return False, f"loader: {how}"
     try:
         sync_mod = (loader.registry.get("tvcat_tgindex") or {}).get("_sync_module")
     except Exception as ex:
+        print(f" [SLICER] refresh central sin registry tgindex: {ex}", flush=True)
         return False, f"registry tgindex: {ex}"
     if sync_mod is None or not hasattr(sync_mod, "sync"):
+        print(" [SLICER] refresh central: tgindex sin _sync_module.sync (¿plugin deshabilitado?)", flush=True)
         return False, "tgindex sin _sync_module.sync en el registry (¿plugin deshabilitado?)"
     # Reintentos ante "database is locked": el ciclo del scanner y los syncs
     # incrementales pisan la misma DB (visto en producción: el refresh del
@@ -297,6 +300,51 @@ def _refresh_central(tag: str, verify_item_id=None):
         except Exception as ex:
             return False, f"verificación central: {ex}"
     return True, f"central OK ({how})"
+
+
+def _prune_central_original(plugin_conn, item_id: str) -> int:
+    """Poda en central los episodios que el plugin ya no lista bajo `item_id`
+    (movidos a otro título). Match por telegram_msg_id, estable en ambas DBs.
+    Devuelve nº de filas podadas. Best-effort con logs."""
+    try:
+        _keep = {str(r[0]) for r in plugin_conn.execute(
+            "SELECT telegram_msg_id FROM item_episodes WHERE item_id=?",
+            (str(item_id or ""),)).fetchall()}
+    except Exception as _e:
+        print(f" [SLICER] verificación central omitida ({item_id}): {_e}", flush=True)
+        return 0
+    if not _keep:
+        return 0
+    try:
+        from services.catalog_service import get_conn as _gc
+    except Exception as _e:
+        print(f" [SLICER] verificación central omitida ({item_id}): {_e}", flush=True)
+        return 0
+    try:
+        _cc = _gc()
+    except Exception as _e:
+        print(f" [SLICER] verificación central omitida ({item_id}): {_e}", flush=True)
+        return 0
+    try:
+        _ph = ",".join("?" * len(_keep))
+        _stale = _cc.execute(
+            f"SELECT COUNT(*) FROM item_episodes WHERE item_id=? AND telegram_msg_id NOT IN ({_ph})",
+            [str(item_id or "")] + list(_keep)).fetchone()[0]
+        if _stale:
+            _cc.execute(
+                f"DELETE FROM item_episodes WHERE item_id=? AND telegram_msg_id NOT IN ({_ph})",
+                [str(item_id or "")] + list(_keep))
+            _cc.commit()
+            print(f" [SLICER] central podada para {item_id}: {_stale} filas rancias", flush=True)
+        return int(_stale or 0)
+    except Exception as _e:
+        print(f" [SLICER] verificación central omitida ({item_id}): {_e}", flush=True)
+        return 0
+    finally:
+        try:
+            _cc.close()
+        except Exception:
+            pass
 
 
 def _do_single_split(conn, cat: dict, eps: list, from_msg_id: int,
@@ -379,6 +427,14 @@ def _do_single_split(conn, cat: dict, eps: list, from_msg_id: int,
     conn.execute(
         "INSERT INTO slicer_cuts (source, orig_item_id, new_item_id, cut_msg_id, created) VALUES (?,?,?,?,?)",
         (source, cat.get("item_id"), new_item_id, from_msg_id, now))
+    # Tocar el original: su fila no cambia (mismo título), pero sus episodios
+    # sí. Sin bump de sync_timestamp, los incrementales por cambios no lo
+    # detectan y la central conserva los episodios movidos.
+    try:
+        conn.execute("UPDATE unified_catalog SET sync_timestamp=? WHERE item_id=?",
+                     (now, cat.get("item_id")))
+    except Exception:
+        pass
     # Refrescar lista local para el siguiente corte del batch (opera sobre el resto).
     return new_item_id, n
 
@@ -451,6 +507,10 @@ async def batch(body: BatchReq, request: Request):
         central_ok, central_detail = _refresh_central(
             f"slicer batch {cat.get('item_id')} ({len(parts)} cortes)",
             verify_item_id=parts[-1]["new_item_id"] if parts else None)
+        # Auto-reparación del original en central: si el refresh falló en
+        # silencio o un incremental resucitó filas, la central puede conservar
+        # episodios ya movidos. Se podan los que el plugin ya no lista.
+        _prune_central_original(conn, cat.get("item_id"))
         out = {"ok": True, "parts": parts, "central_refreshed": central_ok}
         if not central_ok:
             out["warn"] = ("Cortes guardados pero la central no se actualizó: " + central_detail
@@ -560,6 +620,7 @@ async def split(body: SplitReq, request: Request):
             central_ok, central_detail = _refresh_central(
                 f"slicer split-retry {dup['new_item_id']}",
                 verify_item_id=dup["new_item_id"])
+            _prune_central_original(conn, cat.get("item_id"))
             out = {"ok": True, "new_item_id": dup["new_item_id"],
                    "moved": moved, "reused": True, "central_refreshed": central_ok}
             if not central_ok:
@@ -651,6 +712,7 @@ async def split(body: SplitReq, request: Request):
         # Si falla, el corte YA está guardado: se reintenta con POST /resync.
         central_ok, central_detail = _refresh_central(
             f"slicer split {new_item_id}", verify_item_id=new_item_id)
+        _prune_central_original(conn, cat.get("item_id"))
 
         _ = new_int
         out = {"ok": True, "new_item_id": new_item_id, "moved": n,
@@ -898,6 +960,127 @@ async def cut_of(request: Request, item_id: str):
             conn.close()
         except Exception:
             pass
+
+
+@router.get("/api/slicer/neighbors")
+async def neighbors(request: Request, item_id: str):
+    """Trozo anterior y siguiente de un título en su cadena de cortes.
+    anterior = título del que se cortó este (si existe); siguiente = hijo
+    directo con cut_msg menor (continuación inmediata, si existe)."""
+    _require_user(request)
+    conn = _connect_plugin_db()
+    try:
+        _ensure_slicer_table(conn)
+        iid = str(item_id or "")
+        prev = None
+        nxt = None
+        r = conn.execute("SELECT * FROM slicer_cuts WHERE new_item_id=?",
+                         (iid,)).fetchone()
+        if r:
+            orig = _load_title(conn, dict(r).get("orig_item_id"))
+            if orig:
+                prev = {"item_id": orig.get("item_id") or dict(r).get("orig_item_id"),
+                        "title": orig.get("title") or dict(r).get("orig_item_id")}
+        rows = conn.execute(
+            "SELECT * FROM slicer_cuts WHERE orig_item_id=? ORDER BY cut_msg_id ASC",
+            (iid,)).fetchall()
+        for rr in rows or []:
+            d = dict(rr)
+            t = _load_title(conn, d.get("new_item_id"))
+            if t:
+                nxt = {"item_id": d.get("new_item_id"),
+                       "title": t.get("title") or d.get("new_item_id")}
+                break
+        return {"prev": prev, "next": nxt}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+class TmdbSeasonsReq(BaseModel):
+    title: str = ""
+    from_season: int = 1
+
+
+@router.get("/api/slicer/tmdb-status")
+async def tmdb_status(request: Request):
+    """¿Hay API key TMDB para autofill del editor?"""
+    _require_user(request)
+    try:
+        from services.enrich_service import _load_credentials
+        creds = _load_credentials() or {}
+        has_key = bool((creds.get("tmdb") or {}).get("api_key"))
+    except Exception:
+        has_key = False
+    return {"has_key": has_key}
+
+
+@router.post("/api/slicer/tmdb-seasons")
+async def tmdb_seasons(body: TmdbSeasonsReq, request: Request):
+    """Episodios por temporada según TMDB desde from_season (S0 solo si 0).
+    Resuelve el ID con el primer resultado de búsqueda (muestra cuál)."""
+    _require_user(request)
+    title = (body.title or "").strip()
+    try:
+        start = int(body.from_season or 1)
+    except Exception:
+        start = 1
+    if start < 0:
+        start = 0
+    if not title:
+        raise HTTPException(400, "Falta title")
+    try:
+        from services.enrich_service import _load_credentials
+        from services.enrich.providers.tmdb import TMDBProvider
+    except Exception as e:
+        raise HTTPException(500, f"Enriquecedor no disponible: {e}")
+    try:
+        creds = _load_credentials() or {}
+        key = (creds.get("tmdb") or {}).get("api_key") or ""
+    except Exception:
+        key = ""
+    if not key:
+        raise HTTPException(400, "Sin API key TMDB")
+    prov = TMDBProvider(key)
+    cands = []
+    try:
+        cands = await prov.search(title, "tv") or []
+    except Exception as e:
+        raise HTTPException(502, f"TMDB search falló: {e}")
+    if not cands:
+        import re as _re
+        short = _re.sub(r"\s*\(\d{4}\)\s*$", "", title).strip()
+        if short and short != title:
+            try:
+                cands = await prov.search(short, "tv") or []
+            except Exception:
+                cands = []
+    if not cands:
+        raise HTTPException(404, "TMDB no encontró la serie")
+    best = cands[0]
+    tid = best.get("id")
+    out = []
+    try:
+        for s in range(start, start + 40):
+            try:
+                det = await prov.get_details(tid, "tv", s)
+            except Exception:
+                break
+            n = 0
+            try:
+                n = int(det.get("api_season_episodes") or 0)
+            except Exception:
+                n = 0
+            if n <= 0:
+                break
+            out.append({"season": s, "episodes": n})
+    except Exception as e:
+        raise HTTPException(502, f"TMDB seasons falló: {e}")
+    return {"series": {"title": best.get("title") or "", "year": best.get("year"),
+                       "tmdb_id": tid},
+            "from_season": start, "seasons": out}
 
 
 def reapply_slicer_cuts(source_tag: str) -> int:

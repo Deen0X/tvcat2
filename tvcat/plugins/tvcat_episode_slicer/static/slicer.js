@@ -171,35 +171,53 @@
         if (String(eps[fi].item_id || '') === String(itemId)) own.push(eps[fi]);
       }
       if (own.length) eps = own;
-      // ¿Es parte de un corte? Línea "Unir con original" sobre el listado.
+      // ¿Es parte de un corte? Línea "Unir" sobre el listado + vecino siguiente.
       ajax(API + '/cut_of?item_id=' + encodeURIComponent(itemId), { method: 'GET' }, function(eCut, cutRes) {
         var cut = (!eCut && cutRes && cutRes.cut) ? cutRes.cut : null;
-        buildList(eps, cut);
+        ajax(API + '/neighbors?item_id=' + encodeURIComponent(itemId), { method: 'GET' }, function(eN, nRes) {
+          var nb = (!eN && nRes) ? nRes : { prev: null, next: null };
+          buildList(eps, cut, nb);
+        });
       });
     });
-    function buildList(eps, cut) {
+    function buildList(eps, cut, neighbors) {
+      neighbors = neighbors || { prev: null, next: null };
       var html = '';
-      // Offset auto = siguiente a la temporada del propio título (la del
-      // primer fichero + 1; 1 si no hay patrón). La numeración es secuencial
-      // desde el offset; el Auto omite la temporada del título (titleSeason).
+      // Offset = temporada del propio título (la del primer fichero; 1 si no
+      // hay patrón). El primer check es offset+1 y la numeración sigue
+      // secuencial; el Auto omite la temporada del título (titleSeason).
       var fam = detectFamily(eps);
       var titleSeason = null;
       var firstSeason = 1;
       try {
         var d0 = detectSeasonEp(eps[0].file_name || eps[0].title || '');
-        if (d0 && (!fam || d0.fam === fam)) { titleSeason = d0.s; firstSeason = d0.s + 1; }
+        if (d0 && (!fam || d0.fam === fam)) { titleSeason = d0.s; firstSeason = d0.s; }
       } catch (eFS) {}
-      if (cut) {
-        var origTitle = esc(cut.orig_title || cut.orig_item_id || 'original');
-        var origCover = '/api/cover/' + encodeURIComponent(cut.orig_item_id || '');
-        var origLink = cut.orig_link
-          ? '<a href="' + esc(cut.orig_link) + '" target="_blank" style="color:#a855f7;">' + origTitle + '</a>'
-          : origTitle;
-        html += '<div style="display:flex;align-items:center;gap:10px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.4);border-radius:8px;padding:8px 10px;margin-bottom:10px;">'
-          + '<img src="' + origCover + '" style="width:48px;height:72px;object-fit:cover;border-radius:4px;" onerror="this.style.display=\'none\'">'
-          + '<div style="flex:1;font-size:0.8rem;color:#f4f4f5;">Parte de<br><b>' + origLink + '</b></div>'
-          + '<button class="slicer-unsplit" style="background:#a855f7;border:none;border-radius:6px;padding:8px 12px;color:#fff;font-weight:700;font-size:0.8rem;cursor:pointer;white-space:nowrap;">Unir con original</button>'
-          + '</div>';
+      // Trozo anterior (del que se cortó) y/o siguiente (hijo directo).
+      // Mitades: izquierda anterior, derecha siguiente.
+      var _prevT = (cut && (cut.orig_title || cut.orig_item_id)) || (neighbors.prev && neighbors.prev.title) || null;
+      var _prevId = (cut && cut.orig_item_id) || (neighbors.prev && neighbors.prev.item_id) || null;
+      var _nextT = (neighbors.next && neighbors.next.title) || null;
+      var _nextId = (neighbors.next && neighbors.next.item_id) || null;
+      if (_prevId || _nextId) {
+        html += '<div style="display:flex;gap:8px;margin-bottom:10px;">';
+        if (_prevId) {
+          var _prevCover = '/api/cover/' + encodeURIComponent((cut && (cut.orig_item_id || '')) || _prevId);
+          html += '<div style="flex:1;display:flex;align-items:center;gap:10px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.4);border-radius:8px;padding:8px 10px;">'
+            + '<img src="' + _prevCover + '" style="width:48px;height:72px;object-fit:cover;border-radius:4px;" onerror="this.style.display=\'none\'">'
+            + '<div style="flex:1;font-size:0.8rem;color:#f4f4f5;">Parte de<br><b>' + esc(_prevT || _prevId) + '</b></div>'
+            + '<button class="slicer-unsplit" title="Unir con ' + esc(_prevT || _prevId) + '" style="background:#a855f7;border:none;border-radius:6px;padding:8px 12px;color:#fff;font-weight:700;font-size:1rem;cursor:pointer;white-space:nowrap;">◀</button>'
+            + '</div>';
+        }
+        if (_nextId) {
+          var _nextCover = '/api/cover/' + encodeURIComponent(_nextId);
+          html += '<div style="flex:1;display:flex;align-items:center;gap:10px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.4);border-radius:8px;padding:8px 10px;">'
+            + '<div style="flex:1;font-size:0.8rem;color:#f4f4f5;">Siguiente<br><b>' + esc(_nextT || _nextId) + '</b></div>'
+            + '<button class="slicer-unsplit-next" data-id="' + esc(_nextId) + '" data-name="' + esc(_nextT || _nextId) + '" title="Unir con ' + esc(_nextT || _nextId) + '" style="background:#22c55e;border:none;border-radius:6px;padding:8px 12px;color:#fff;font-weight:700;font-size:1rem;cursor:pointer;white-space:nowrap;">▶</button>'
+            + '<img src="' + _nextCover + '" style="width:48px;height:72px;object-fit:cover;border-radius:4px;" onerror="this.style.display=\'none\'">'
+            + '</div>';
+        }
+        html += '</div>';
       }
       html += '<label style="display:flex;gap:8px;align-items:center;font-size:0.8rem;color:#f4f4f5;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.4);border-radius:8px;padding:8px 10px;margin-bottom:10px;cursor:pointer;">'
         + '<input type="checkbox" class="slicer-use-orig" style="accent-color:#a855f7;">'
@@ -213,6 +231,7 @@
         + '<button class="slicer-auto" style="background:#0e7490;border:none;border-radius:6px;padding:6px 10px;color:#fff;font-size:0.75rem;cursor:pointer;">Auto</button>'
         + '<button class="slicer-goslice" style="background:#22c55e;border:none;border-radius:6px;padding:6px 10px;color:#fff;font-weight:700;font-size:0.75rem;cursor:pointer;">Slice</button>'
         + '<button class="slicer-goseason" style="background:#a855f7;border:none;border-radius:6px;padding:6px 10px;color:#fff;font-weight:700;font-size:0.75rem;cursor:pointer;">Season Slicer</button>'
+        + '<button class="slicer-epeditor" title="episode editor: episodios por temporada (autofill TMDB)" style="background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:6px 10px;color:#f4f4f5;font-size:0.75rem;cursor:pointer;">🔢</button>'
         + '</div>'
         // Lista compacta propia (NO .episode-card del reproductor: esa fila
         // mide ~90px + la fila superior de controles = ~140px por episodio).
@@ -236,14 +255,16 @@
           ctrls = '<span title="El original siempre conserva el primero" style="opacity:0.3;color:rgba(255,255,255,0.3);flex-shrink:0;">✂️</span>';
         } else {
           ctrls = '<input type="number" class="slicer-season" data-msg="' + ep.telegram_msg_id + '" value="" placeholder="—" title="Temporada de este corte (vacío = sin temporada)" style="width:48px;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:3px 4px;color:#f4f4f5;font-size:0.75rem;flex-shrink:0;">'
-            + '<input type="checkbox" class="slicer-check" data-msg="' + ep.telegram_msg_id + '" style="accent-color:#a855f7;width:16px;height:16px;cursor:pointer;flex-shrink:0;">';
+            + '<input type="checkbox" class="slicer-check" data-msg="' + ep.telegram_msg_id + '" style="accent-color:#a855f7;width:16px;height:16px;cursor:pointer;flex-shrink:0;">'
+            + '<button class="slicer-cutone" data-msg="' + ep.telegram_msg_id + '" data-idx="' + i + '" title="Cortar aquí y mover a un título nuevo" style="background:none;border:1px solid #3f3f46;border-radius:4px;color:#f4f4f5;font-size:0.8rem;padding:2px 5px;cursor:pointer;flex-shrink:0;">✂️</button>';
         }
         // Fila compacta en UNA línea: thumb + título + controles al final.
+        // El indicador T/E va SOBRE la caja de temporada + checkbox.
         html += '<div class="slicer-row" style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:6px;padding:4px 8px;min-height:44px;box-sizing:border-box;">'
         + '<img src="' + src + '" alt="" loading="lazy" style="width:70px;height:40px;object-fit:cover;border-radius:4px;flex-shrink:0;background:#141414;" '
         + 'onerror="this.onerror=null;this.src=\'' + coverUrl + '\';" />'
         + '<span style="flex:1;min-width:0;font-size:0.8rem;font-weight:600;color:#f4f4f5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(nm) + '">' + titleHtml + '</span>'
-        + '<span style="display:flex;align-items:center;gap:6px;flex-shrink:0;">' + ctrls + '</span>'
+        + '<span style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0;"><span class="slicer-te" style="font-size:0.65rem;color:#a1a1aa;font-family:monospace;white-space:nowrap;"></span><span style="display:flex;align-items:center;gap:6px;flex-shrink:0;">' + ctrls + '</span></span>'
         + '</div>';
       }
       html += '</div>';
@@ -313,15 +334,16 @@
           return out;
         };
         var renumber = function() {
-          // Secuencial desde el offset: off+k por check marcado (sin edición
-          // manual). El offset ya apunta a la siguiente temporada del título.
+          // Secuencial desde el offset+1: el offset es la temporada del
+          // título (primer bloque) y cada check marcado es off+1+k.
+          // No toca ediciones manuales (data-manual).
           var off = getOffset(), k = 0;
           var checks = body.querySelectorAll('.slicer-check');
           for (var ni = 0; ni < checks.length; ni++) {
             var inp = body.querySelector('.slicer-season[data-msg="' + checks[ni].getAttribute('data-msg') + '"]');
             if (!inp) continue;
             if (checks[ni].checked && inp.getAttribute('data-manual') !== '1') {
-              inp.value = off + k;
+              inp.value = off + 1 + k;
               k++;
             }
           }
@@ -335,6 +357,25 @@
           }
         };
         markManual();
+        // Indicador T/E por fila: temporada resultante + episodio dentro de
+        // ella. Base = temporada del título (si se detectó) u offset.
+        var pad3 = function(v) { v = String(v); while (v.length < 3) v = '0' + v; return v; };
+        var updateTE = function() {
+          try {
+            var base = (titleSeason !== null && titleSeason !== undefined) ? titleSeason : getOffset();
+            if (!(base >= 1)) base = 1;
+            var rows = body.querySelectorAll('.slicer-row');
+            var block = 0, e = 0;
+            for (var ri = 0; ri < rows.length; ri++) {
+              var cb = rows[ri].querySelector('.slicer-check');
+              if (ri > 0 && cb && cb.checked) { block++; e = 0; }
+              e++;
+              var te = rows[ri].querySelector('.slicer-te');
+              if (te) te.textContent = 'T=' + pad3(base + block) + ' E=' + pad3(e);
+            }
+          } catch (eT) {}
+        };
+        updateTE();
         // Marcar/desmarcar a mano asigna/limpia número (sin tocar al resto).
         try {
           var checksAll = body.querySelectorAll('.slicer-check');
@@ -349,6 +390,7 @@
                   inp.value = '';
                   inp.removeAttribute('data-manual');
                 }
+                updateTE();
               };
             })(checksAll[ha]);
           }
@@ -359,16 +401,18 @@
             var inps = body.querySelectorAll('.slicer-season');
             for (var ci = 0; ci < inps.length; ci++) inps[ci].removeAttribute('data-manual');
             renumber();
+            updateTE();
           };
         } catch (eOff) {}
         var masters = body.querySelectorAll('.slicer-master');
         for (var mi2 = 0; mi2 < masters.length; mi2++) {
           (function(btn) {
-            btn.onclick = function() {
+              btn.onclick = function() {
               var on = btn.getAttribute('data-on') === '1';
               var checks = body.querySelectorAll('.slicer-check');
               for (var ci = 0; ci < checks.length; ci++) checks[ci].checked = on;
               renumber();
+              updateTE();
             };
           })(masters[mi2]);
         }
@@ -401,6 +445,7 @@
             }
             void off;
             renumber();
+            updateTE();
             toast(marked ? ('Auto: ' + marked + ' inicios marcados') : 'Auto: sin patrón de temporada');
           };
         } catch (eAuto) {}
@@ -454,6 +499,174 @@
           body.querySelector('.slicer-goslice').onclick = function() { runBatch('slice'); };
           body.querySelector('.slicer-goseason').onclick = function() { runBatch('season'); };
         } catch (eGo) {}
+        // ---- Editor de episodios por temporada (conteos + autofill TMDB) ----
+        var openEpEditor = function() {
+          var ov2 = document.createElement('div');
+          ov2.setAttribute('style', 'position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,0.7);z-index:1000000;');
+          ov2.onclick = function(e) { if (e.target === ov2) { try { document.body.removeChild(ov2); } catch (ex) {} } };
+          var panel2 = document.createElement('div');
+          panel2.setAttribute('style', 'position:fixed;top:8%;left:0;right:0;margin:0 auto;width:440px;max-width:92%;box-sizing:border-box;max-height:80%;overflow:auto;background:#18181b;color:#f4f4f5;border:1px solid #333;border-radius:10px;padding:16px;');
+          var h2 = document.createElement('h3');
+          h2.appendChild(document.createTextNode('Editor de episodios'));
+          var x2 = document.createElement('button');
+          x2.appendChild(document.createTextNode('X'));
+          x2.setAttribute('style', 'float:right;width:32px;height:32px;background:#333;color:#fff;border:1px solid #555;border-radius:8px;');
+          x2.onclick = function() { try { document.body.removeChild(ov2); } catch (ex) {} };
+          panel2.appendChild(x2);
+          panel2.appendChild(h2);
+          var info = document.createElement('p');
+          info.style.cssText = 'font-size:0.75rem;color:#a1a1aa;';
+          info.textContent = 'Una línea por temporada = nº de episodios. Se marcan los inicios (reemplaza los checks).';
+          panel2.appendChild(info);
+          var rowTop = document.createElement('div');
+          rowTop.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;';
+          var lblS = document.createElement('label');
+          lblS.style.cssText = 'font-size:0.75rem;color:#a1a1aa;';
+          lblS.textContent = 'Temporada inicial:';
+          var inpS = document.createElement('input');
+          inpS.type = 'number'; inpS.min = '0'; inpS.value = String(getOffset());
+          inpS.style.cssText = 'width:64px;background:#0a0a0c;border:1px solid #3f3f46;border-radius:4px;padding:4px 6px;color:#f4f4f5;font-size:0.8rem;';
+          var btnGet = document.createElement('button');
+          btnGet.textContent = 'Obtener episodios';
+          btnGet.style.cssText = 'background:#0e7490;border:none;border-radius:6px;padding:6px 10px;color:#fff;font-size:0.75rem;cursor:pointer;display:none;';
+          rowTop.appendChild(lblS); rowTop.appendChild(inpS); rowTop.appendChild(btnGet);
+          panel2.appendChild(rowTop);
+          var found = document.createElement('div');
+          found.style.cssText = 'font-size:0.75rem;color:#a1a1aa;margin-bottom:8px;display:none;';
+          panel2.appendChild(found);
+          var ta = document.createElement('textarea');
+          ta.rows = 8;
+          ta.placeholder = '15\n20\n18\n22';
+          ta.style.cssText = 'width:100%;box-sizing:border-box;background:#0a0a0c;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;font-size:0.8rem;font-family:monospace;';
+          panel2.appendChild(ta);
+          var rowBtn = document.createElement('div');
+          rowBtn.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:10px;';
+          var btnCancel = document.createElement('button');
+          btnCancel.textContent = 'Cancelar';
+          btnCancel.style.cssText = 'background:#27272a;border:1px solid #3f3f46;border-radius:6px;padding:6px 12px;color:#f4f4f5;font-size:0.8rem;cursor:pointer;';
+          btnCancel.onclick = function() { try { document.body.removeChild(ov2); } catch (ex) {} };
+          var btnApply = document.createElement('button');
+          btnApply.textContent = 'Aplicar';
+          btnApply.style.cssText = 'background:#22c55e;border:none;border-radius:6px;padding:6px 12px;color:#fff;font-weight:700;font-size:0.8rem;cursor:pointer;';
+          rowBtn.appendChild(btnCancel); rowBtn.appendChild(btnApply);
+          panel2.appendChild(rowBtn);
+          ov2.appendChild(panel2);
+          document.body.appendChild(ov2);
+          ajax(API + '/tmdb-status', { method: 'GET' }, function(eS, rS) {
+            if (!eS && rS && rS.has_key) {
+              btnGet.style.display = '';
+              // Con API key: obtener automáticamente al abrir (temporada
+              // inicial = inicio de secuencia). El botón reintenta si se edita.
+              doFetch();
+            }
+          });
+          var doFetch = function() {
+            var sv = parseInt(inpS.value, 10);
+            if (isNaN(sv) || sv < 0) sv = getOffset();
+            found.style.display = 'none';
+            btnGet.textContent = 'Buscando…';
+            ajax(API + '/tmdb-seasons', { method: 'POST', data: { title: (itemData.title || itemId), from_season: sv } }, function(eT, rT) {
+              btnGet.textContent = 'Obtener episodios';
+              if (eT) { found.style.display = 'block'; found.textContent = 'TMDB: ' + (eT.message || eT); return; }
+              var seasons = (rT && rT.seasons) || [];
+              if (!seasons.length) { found.style.display = 'block'; found.textContent = 'TMDB: sin temporadas desde ' + sv; return; }
+              var lines = [];
+              for (var si = 0; si < seasons.length; si++) lines.push(String(seasons[si].episodes));
+              ta.value = lines.join('\n');
+              var sr = (rT.series || {});
+              found.style.display = 'block';
+              found.textContent = 'TMDB: ' + (sr.title || '') + (sr.year ? ' (' + sr.year + ')' : '') + ' · T' + sv + '–T' + (sv + seasons.length - 1);
+            });
+          };
+          btnGet.onclick = function() { doFetch(); };
+          btnApply.onclick = function() {
+            var counts = [];
+            var rawLines = String(ta.value || '').split('\n');
+            for (var li = 0; li < rawLines.length; li++) {
+              var nv = parseInt(String(rawLines[li]).trim(), 10);
+              if (!isNaN(nv) && nv > 0) counts.push(nv);
+            }
+            var checks = body.querySelectorAll('.slicer-check');
+            var inps = body.querySelectorAll('.slicer-season');
+            for (var ci = 0; ci < checks.length; ci++) checks[ci].checked = false;
+            for (var cj = 0; cj < inps.length; cj++) { inps[cj].value = ''; inps[cj].removeAttribute('data-manual'); }
+            var cum = 0;
+            for (var ck = 0; ck < counts.length; ck++) {
+              cum += counts[ck];
+              // checks[ci] ↔ eps[ci+1]: el inicio en eps[cum] es checks[cum-1].
+              // Si excede el total, se deja de marcar (el resto = última temporada).
+              if (cum >= 1 && cum < eps.length && checks[cum - 1]) checks[cum - 1].checked = true;
+            }
+            renumber();
+            updateTE();
+            try { document.body.removeChild(ov2); } catch (ex) {}
+            toast('Editor: checks aplicados');
+          };
+        };
+        try {
+          var epEdBtn = body.querySelector('.slicer-epeditor');
+          if (epEdBtn) epEdBtn.onclick = function() { openEpEditor(); };
+        } catch (eEp) {}
+        // ---- Tijera por fila: cortar aquí y mover a título nuevo ----
+        try {
+          var cutones = body.querySelectorAll('.slicer-cutone');
+          for (var co = 0; co < cutones.length; co++) {
+            (function(btn) {
+              btn.onclick = function() {
+                var idx = parseInt(btn.getAttribute('data-idx'), 10);
+                var msg = parseInt(btn.getAttribute('data-msg'), 10);
+                if (isNaN(idx) || idx < 1 || !msg) return;
+                var fromN = idx + 1, toN = eps.length;
+                if (!confirm('¿Cortar aquí y mover ' + fromN + '..' + toN + ' a un título nuevo?')) return;
+                setBusy('Generando vista previa');
+                ajax(API + '/preview', { method: 'POST', data: { item_id: itemId, from_msg_id: msg, use_orig_title: useOrigTitle() } }, function(e2, prev) {
+                  setBusy(null);
+                  if (e2) { toast('Preview falló: ' + (e2.message || e2)); return; }
+                  var newName = (prev && prev.new && prev.new.title) || 'nuevo título';
+                  var newCnt = (prev && prev.new && prev.new.count) || (toN - fromN + 1);
+                  var keepCnt = (prev && prev.orig && prev.orig.keep) || (fromN - 1);
+                  if (!confirm('Crear "' + newName + '" con ' + newCnt + ' episodios?\nOriginal queda con ' + keepCnt + '.')) return;
+                  setBusy('Cortando y sincronizando (puede tardar unos segundos)');
+                  ajax(API + '/split', { method: 'POST', data: { item_id: itemId, from_msg_id: msg, use_orig_title: useOrigTitle() } }, function(e3, res) {
+                    setBusy(null);
+                    if (e3) { toast('Split falló: ' + (e3.message || e3)); return; }
+                    var nid = (res && res.new_item_id) || null;
+                    var afterSplit = function() {
+                      close();
+                      try { openSlicerModal({ item_id: itemId, title: (itemData.title || itemId) }); } catch (eR) {}
+                      refreshAfterSplit(itemId, nid);
+                      toast('Corte creado: ' + newName);
+                    };
+                    if (res && res.central_refreshed === false) {
+                      ajax(API + '/resync', { method: 'POST', data: {} }, function() { afterSplit(); });
+                    } else {
+                      afterSplit();
+                    }
+                  });
+                });
+              };
+            })(cutones[co]);
+          }
+        } catch (eCut1) {}
+        // ---- Unir con el trozo siguiente (el hijo vuelve a este título) ----
+        try {
+          var unNext = body.querySelector('.slicer-unsplit-next');
+          if (unNext) unNext.onclick = function() {
+            var nid2 = unNext.getAttribute('data-id');
+            var nname = unNext.getAttribute('data-name') || nid2;
+            if (!nid2) return;
+            if (!confirm('Unir "' + nname + '" con este título?\nLos episodios vuelven aquí.')) return;
+            setBusy('Uniendo y sincronizando (puede tardar unos segundos)');
+            ajax(API + '/unsplit', { method: 'POST', data: { new_item_id: nid2 } }, function(eU, res) {
+              setBusy(null);
+              if (eU) { toast('Unir falló: ' + (eU.message || eU)); return; }
+              close();
+              try { openSlicerModal({ item_id: itemId, title: (itemData.title || itemId) }); } catch (eR3) {}
+              refreshAfterSplit(itemId, null);
+              toast('Unido con ' + nname);
+            });
+          };
+        } catch (eUn2) {}
         var btns = body.querySelectorAll('.slicer-cut[data-cut]');
         for (var k = 0; k < btns.length; k++) {
           (function(btn) {
