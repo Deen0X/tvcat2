@@ -611,6 +611,156 @@ function playMedia(itemData, episode) {
         try { doPlay(); } catch(e) { doFullscreen(); }
     }
 
+    // Capa de controles estilo HLS SEQ (réplica con imágenes). Se construye
+    // por reproducción; closePlayer la elimina. NO se usa en rama basic.
+    function buildSeqLayer() {
+        try {
+            var old = document.getElementById('tvcat-custom-layer');
+            if (old && old.parentNode) old.parentNode.removeChild(old);
+        } catch (e0) {}
+        if (!playerModal || !videoPlayer) return;
+        var IMG = '/plugin-static/tvcat_player_hls_seq/';
+        var layer = document.createElement('div');
+        layer.id = 'tvcat-custom-layer';
+        layer.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;z-index:100003;opacity:0;visibility:hidden;pointer-events:none;transition:opacity 0.2s;';
+        var hideT = null, justShown = false, justT = null;
+        var TIMEOUT_S = 3.5;
+        var isVis = function() { return parseFloat(layer.style.opacity || '0') >= 0.4; };
+        var showL = function() {
+            if (parseFloat(layer.style.opacity || '0') < 0.4) {
+                justShown = true;
+                try { if (justT) clearTimeout(justT); } catch (e) {}
+                justT = setTimeout(function() { justShown = false; }, 800);
+            }
+            layer.style.opacity = '1'; layer.style.visibility = 'visible';
+            setInter(true); resetT();
+        };
+        var hideL = function() {
+            layer.style.opacity = '0'; setInter(false);
+            setTimeout(function() { if (layer.style.opacity === '0') layer.style.visibility = 'hidden'; }, 220);
+        };
+        var resetT = function() {
+            try { if (hideT) clearTimeout(hideT); } catch (e) {}
+            hideT = setTimeout(hideL, TIMEOUT_S * 1000);
+            try { window._tvcatCLT = hideT; } catch (e2) {}
+        };
+        var setInter = function(on) {
+            if (on && parseFloat(layer.style.opacity || '0') < 0.4) {
+                layer.style.opacity = '1'; layer.style.visibility = 'visible';
+            }
+            var els = layer.querySelectorAll('[data-cc-interactive]');
+            for (var i = 0; i < els.length; i++) els[i].style.pointerEvents = on ? 'auto' : 'none';
+        };
+        var mkBtn = function(id, leftPct, topPct, imgName, fbText, fbColor, fbSize, action) {
+            var b = document.createElement('div');
+            b.id = id;
+            b.setAttribute('data-cc-interactive', '1');
+            b.style.cssText = 'position:absolute;left:' + leftPct + '%;top:' + topPct + '%;width:60px;height:60px;margin-left:-30px;margin-top:-30px;background:rgba(0,0,0,0.7);border:1px solid #888;text-align:center;line-height:60px;cursor:pointer;z-index:10;pointer-events:none;';
+            var im = document.createElement('img');
+            im.src = IMG + imgName;
+            im.style.cssText = 'width:48px;height:48px;margin-top:6px;';
+            im.onload = function() { b.style.background = 'transparent'; b.style.border = 'none'; };
+            im.onerror = function() { this.style.display = 'none'; b.textContent = fbText; b.style.color = fbColor; b.style.fontSize = fbSize; b.style.fontWeight = '600'; };
+            b.appendChild(im);
+            b.addEventListener('click', function(e) {
+                e.stopPropagation();
+                if (justShown || parseFloat(layer.style.opacity || '0') < 0.4) {
+                    justShown = false;
+                    try { if (justT) clearTimeout(justT); } catch (e2) {}
+                    showL(); return;
+                }
+                if (!isVis()) { showL(); return; }
+                resetT();
+                try { action(); } catch (err) {}
+            });
+            return b;
+        };
+        var doPlayPause = function() { try { var v = document.getElementById('tvcat-video-player') || videoPlayer; if (v.paused) v.play(); else v.pause(); } catch (e) {} };
+        var doFs = function() {
+            try {
+                if (document.fullscreenElement || document.webkitFullscreenElement) {
+                    if (document.exitFullscreen) document.exitFullscreen();
+                    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+                } else {
+                    var pm = document.getElementById('player-modal');
+                    if (pm.requestFullscreen) pm.requestFullscreen();
+                    else if (pm.webkitRequestFullscreen) pm.webkitRequestFullscreen();
+                }
+            } catch (e) {}
+        };
+        layer.appendChild(mkBtn('tvcl-prev', 20, 10, 'episode_prev.png', 'Anterior', '#fff', '11px', function() { try { playPrevious(); } catch (e) {} }));
+        layer.appendChild(mkBtn('tvcl-max', 50, 10, 'maximize.png', '^', '#ff0', '16px', doFs));
+        layer.appendChild(mkBtn('tvcl-next', 80, 10, 'episode_next.png', 'Siguiente', '#fff', '11px', function() { try { playNext(); } catch (e) {} }));
+        var fnL = document.createElement('div');
+        fnL.style.cssText = 'position:absolute;left:50%;top:18%;width:60%;margin-left:-30%;text-align:center;color:#fff;font-size:22px;opacity:0.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;z-index:11;pointer-events:none;';
+        var _ft = episodeTitle || '';
+        if (_ft.length > 80) _ft = _ft.slice(0, 80) + '…';
+        fnL.textContent = _ft;
+        layer.appendChild(fnL);
+        layer.appendChild(mkBtn('tvcl-play', 50, 46, 'play_pause.png', '▶', '#fff', '18px', doPlayPause));
+        layer.appendChild(mkBtn('tvcl-jbl', 6, 46, 'jump_back_long.png', '<<', '#f00', '20px', function() { try { jumpLarge(-1); } catch (e) {} }));
+        layer.appendChild(mkBtn('tvcl-jbs', 14, 46, 'jump_back_short.png', '<', '#fff', '20px', function() { try { jumpSmall(-1); } catch (e) {} }));
+        layer.appendChild(mkBtn('tvcl-jfs', 86, 46, 'jump_forw_short.png', '>', '#fff', '20px', function() { try { jumpSmall(1); } catch (e) {} }));
+        layer.appendChild(mkBtn('tvcl-jfl', 94, 46, 'jump_forw_long.png', '>>', '#f00', '20px', function() { try { jumpLarge(1); } catch (e) {} }));
+        layer.appendChild(mkBtn('tvcl-skip', 50, 62, 'skip_intro.png', 'Skip Intro', '#fff', '11px', function() { try { skipIntro(); } catch (e) {} }));
+        var xBtn = document.createElement('div');
+        xBtn.textContent = '×';
+        xBtn.setAttribute('data-cc-interactive', '1');
+        xBtn.style.cssText = 'position:absolute;top:12px;right:16px;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-size:1.5rem;color:#fff;background:rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.1);border-radius:50%;cursor:pointer;z-index:11;pointer-events:none;';
+        xBtn.addEventListener('click', function(e) {
+            e.stopPropagation(); e.preventDefault();
+            if (justShown || parseFloat(layer.style.opacity || '0') < 0.4) {
+                justShown = false;
+                try { if (justT) clearTimeout(justT); } catch (e2) {}
+                showL(); return;
+            }
+            try { closePlayer(); } catch (err) {}
+        });
+        layer.appendChild(xBtn);
+        // Mini barra de progreso (jugado/total).
+        var pbar = document.createElement('div');
+        pbar.style.cssText = 'position:absolute;left:5%;right:5%;bottom:8%;height:3px;background:rgba(255,255,255,0.2);border-radius:2px;z-index:11;pointer-events:none;';
+        var pfill = document.createElement('div');
+        pfill.style.cssText = 'height:100%;width:0%;background:#e11d48;border-radius:2px;';
+        pbar.appendChild(pfill);
+        layer.appendChild(pbar);
+        try {
+            var _pt = setInterval(function() {
+                try {
+                    if (!document.getElementById('tvcat-custom-layer')) { clearInterval(_pt); return; }
+                    var v = document.getElementById('tvcat-video-player');
+                    if (v && v.duration) pfill.style.width = Math.min(100, (v.currentTime / v.duration) * 100) + '%';
+                } catch (e) {}
+            }, 1000);
+            window._tvcatCLP = _pt;
+        } catch (e) {}
+        // Mostrar/ocultar: click/toque/movimiento (la X y botones usan su guarda 40%).
+        var onTap = function(e) {
+            try {
+                if (e.target && e.target.getAttribute && e.target.getAttribute('data-cc-interactive')) return;
+            } catch (e2) {}
+            showL();
+        };
+        try {
+            playerModal.addEventListener('click', onTap);
+            videoPlayer.addEventListener('click', onTap);
+            playerModal.addEventListener('touchstart', onTap, { passive: true });
+            videoPlayer.addEventListener('touchstart', onTap, { passive: true });
+            playerModal.addEventListener('mousemove', onTap);
+        } catch (e) {}
+        playerModal.appendChild(layer);
+        // Ocultar los botones de texto viejos (la capa los sustituye; si la
+        // capa falla, siguen debajo como respaldo visual mínimo).
+        try {
+            var _oldIds = ['skip-intro', 'btn-prev-ep', 'btn-next-ep', 'left-side', 'right-side'];
+            for (var oi = 0; oi < _oldIds.length; oi++) {
+                var _oe = document.getElementById(_oldIds[oi]);
+                if (_oe) _oe.style.display = 'none';
+            }
+        } catch (e) {}
+        showL();
+    }
+
     // Inyectar controles custom
     var injectCustomControls = function() {
         var getOrCreateControl = function(id, html) {
@@ -636,6 +786,11 @@ function playMedia(itemData, episode) {
     setTimeout(injectCustomControls, 100);
     setTimeout(injectCustomControls, 300);
     setTimeout(injectCustomControls, 500);
+
+    // Capa de controles estilo HLS SEQ (réplica con imágenes): prev/next,
+    // play/pausa, saltos, skip intro, fullscreen, cerrar + título + progreso.
+    // Solo ramas plyr/nativo (la basic de TV vieja conserva sus controles).
+    try { buildSeqLayer(); } catch (eCL) {}
 
     showCustomControls(true);
 
@@ -674,6 +829,7 @@ function playMedia(itemData, episode) {
         var curTime = Math.floor(videoPlayer.currentTime);
         var duration = Math.floor(videoPlayer.duration || 0);
         checkSkipIntro();
+        try { playbackHeartbeat(false); } catch (eHB) {}
         // Guardado periódico ligero (cada 20s). El guardado definitivo se hace al salir/cambiar/terminar.
         if (curTime > 5 && duration > 10 && curTime % 20 === 0 && curTime !== lastSavedPosition) {
             lastSavedPosition = curTime;
@@ -772,8 +928,49 @@ function playMedia(itemData, episode) {
     }});
 }
 
+// ===== F3 QueuePriority: demanda de reproducción =====
+// Avisa al árbitro con el buffer disponible (segundos). Throttle 5s.
+// Los players HLS/plugin pueden reutilizar playbackHeartbeat(true) con su
+// propio cálculo de buffer.
+function playbackHeartbeat(force) {
+    try {
+        var now = Date.now();
+        if (!force && now - (window._pbLastBeat || 0) < 5000) return;
+        window._pbLastBeat = now;
+        if (!window._pbPlayerId) {
+            window._pbPlayerId = 'p' + now.toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+        }
+        var buf = 0;
+        try {
+            var v = document.getElementById('tvcat-video-player');
+            if (v && v.buffered && v.buffered.length) {
+                buf = Math.max(0, v.buffered.end(v.buffered.length - 1) - (v.currentTime || 0));
+            }
+        } catch (e0) {}
+        window.API.ajax({ method: 'POST', url: '/api/playback/heartbeat',
+            data: { player_id: window._pbPlayerId, buffered: Math.round(buf) },
+            success: function() {}, error: function() {} });
+    } catch (e) {}
+}
+function playbackStop() {
+    try {
+        if (window._pbPlayerId) {
+            window.API.ajax({ method: 'POST', url: '/api/playback/stop',
+                data: { player_id: window._pbPlayerId },
+                success: function() {}, error: function() {} });
+            window._pbPlayerId = null;
+        }
+    } catch (e) {}
+}
 // ===== CLOSE PLAYER =====
 function closePlayer() {
+    try { playbackStop(); } catch (ePBS) {}
+    try {
+        var _cl = document.getElementById('tvcat-custom-layer');
+        if (_cl && _cl.parentNode) _cl.parentNode.removeChild(_cl);
+        if (window._tvcatCLT) { clearTimeout(window._tvcatCLT); window._tvcatCLT = null; }
+        if (window._tvcatCLP) { clearInterval(window._tvcatCLP); window._tvcatCLP = null; }
+    } catch (eCL) {}
     var playerModal = document.getElementById('player-modal');
     // Usar la referencia persistente (Plyr mueve el <video> dentro de .plyr y getElementById
     // puede devolver null al cerrar). currentTime sigue siendo legible desde la referencia.

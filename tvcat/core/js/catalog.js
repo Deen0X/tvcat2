@@ -1332,6 +1332,7 @@
                         pBtn.onclick = (function(pl) {
                             return function() {
                                 localStorage.setItem('tvcat_preferred_player', pl.playerType);
+                                Catalog._rememberPlayer(itemId, pl);
                                 if (typeof pl.play === 'function') { pl.play(item); }
                                 else { Catalog._playWithPlayer(item, itemId, hasEpisodes, subcat, pl); }
                             };
@@ -1371,7 +1372,7 @@
                                         b.innerHTML='<span class="btn-emoji">'+(pl.playIcon||'\u25B6')+'</span>'+(lbl2 ? lbl2 : '');
                                         var tip2 = pl.tooltip || pl.displayName || lbl2 || 'Reproducir';
                                         b.title = tip2; b.setAttribute('aria-label', tip2);
-                                        b.onclick=(function(p){return function(){ localStorage.setItem('tvcat_preferred_player',p.playerType); if(typeof p.play==='function') p.play(_item); else Catalog._playWithPlayer(_item,_itemId,_hasEpisodes,_subcat,p); };})(pl);
+                                        b.onclick=(function(p){return function(){ localStorage.setItem('tvcat_preferred_player',p.playerType); Catalog._rememberPlayer(_itemId, p); if(typeof p.play==='function') p.play(_item); else Catalog._playWithPlayer(_item,_itemId,_hasEpisodes,_subcat,p); };})(pl);
                                         sec.appendChild(b);
                                     } else {
                                         var b2=document.createElement('button'); b2.className='btn-stacked btn-play';
@@ -2245,9 +2246,111 @@
     };
 
     // ====== EPISODES MODAL ======
+    // Temporada a usar: recordada en servidor > primera con pendientes >
+    // primera clave. cb(seasonName|null). Respeta temporadas tipo 0/1.5/2.
+    Catalog.pickSeasonWithHistory = function(itemId, seasons, cb) {
+        var keys = [];
+        try { for (var k in seasons) { if (seasons.hasOwnProperty(k)) keys.push(k); } } catch (e) {}
+        if (!keys.length) { cb(null); return; }
+        var done = function(saved) {
+            window.API.ajax({
+                url: '/api/watch/history',
+                success: function(histRes) {
+                    var watchedMap = {};
+                    try {
+                        var hist = (histRes && histRes.history) || [];
+                        for (var j = 0; j < hist.length; j++) {
+                            var entry = hist[j];
+                            if (entry.episode_key) watchedMap['k:' + entry.episode_key] = entry;
+                            else watchedMap[String(entry.item_id) + ':' + String(entry.episode_id)] = entry;
+                        }
+                    } catch (e0) {}
+                    window.API.getWatchThresholds(function(th) {
+                        var minT = 0.05, maxT = 0.85;
+                        try { minT = th.min / 100; maxT = th.max / 100; } catch (e1) {}
+                        var order = [];
+                        if (saved && seasons.hasOwnProperty(saved)) order.push(saved);
+                        for (var i = 0; i < keys.length; i++) {
+                            if (keys[i] !== saved) order.push(keys[i]);
+                        }
+                        var chosen = order[0];
+                        for (var s = 0; s < order.length; s++) {
+                            var eps = seasons[order[s]] || [];
+                            if (!eps.length) continue;
+                            var pending = false;
+                            for (var x = 0; x < eps.length; x++) {
+                                var ek = eps[x].episode_key;
+                                var wk = ek ? ('k:' + ek) : (String(itemId) + ':' + String(eps[x].id));
+                                if (effectiveState(watchedMap[wk], { min: minT, max: maxT }) !== 3) { pending = true; break; }
+                            }
+                            if (pending) { chosen = order[s]; break; }
+                        }
+                        cb(chosen);
+                    });
+                },
+                error: function() { cb(keys[0]); }
+            });
+        };
+        window.API.ajax({
+            url: '/api/watch/last-season?item_id=' + encodeURIComponent(itemId),
+            success: function(r) { var s = null; try { s = (r && r.season) || null; } catch (e) {} done(s); },
+            error: function() { done(null); }
+        });
+    };
+
+    // Marcar vistos hasta el último visto (por posición en la temporada activa).
+    Catalog.markWatchedUpTo = function() {
+        var id = currentMediaId;
+        if (!id || !currentEpisodes[id]) return;
+        var mediaData = currentEpisodes[id];
+        var episodes = mediaData.seasons[mediaData.activeSeason] || [];
+        if (!episodes.length) return;
+        window.API.ajax({
+            url: '/api/watch/history',
+            success: function(histRes) {
+                var watchedMap = {};
+                try {
+                    var hist = (histRes && histRes.history) || [];
+                    for (var j = 0; j < hist.length; j++) {
+                        var entry = hist[j];
+                        if (entry.episode_key) watchedMap['k:' + entry.episode_key] = entry;
+                        else watchedMap[String(entry.item_id) + ':' + String(entry.episode_id)] = entry;
+                    }
+                } catch (e0) {}
+                window.API.getWatchThresholds(function(th) {
+                    var minT = 0.05, maxT = 0.85;
+                    try { minT = th.min / 100; maxT = th.max / 100; } catch (e1) {}
+                    var lastPos = -1;
+                    for (var i = 0; i < episodes.length; i++) {
+                        var ek = episodes[i].episode_key;
+                        var wk = ek ? ('k:' + ek) : (String(id) + ':' + String(episodes[i].id));
+                        var st = effectiveState(watchedMap[wk], { min: minT, max: maxT });
+                        if (st === 2 || st === 3) lastPos = i;
+                    }
+                    if (lastPos < 0) { alert('No hay ningún episodio visto o a medias en esta temporada.'); return; }
+                    var epN = episodes[lastPos];
+                    var label = (epN.episode_number || (lastPos + 1)) + '. ' + (epN.title || '');
+                    if (!confirm('¿Marcar como vistos hasta el ' + label + '?')) return;
+                    var batch = [];
+                    for (var b = 0; b <= lastPos; b++) {
+                        batch.push({ episode_id: episodes[b].id || 0, episode_key: episodes[b].episode_key || '', video_src: episodes[b].video_src || '' });
+                    }
+                    window.API.ajax({
+                        method: 'POST', url: '/api/watch/bulk',
+                        data: { item_id: id, episodes: batch },
+                        success: function() { renderEpisodesGrid(); },
+                        error: function() { alert('Error al marcar.'); }
+                    });
+                });
+            },
+            error: function() { alert('Error leyendo historial.'); }
+        });
+    };
+
     Catalog.openEpisodesModal = function(id) {
         var self = Catalog;
         currentMediaId = id;
+        try { window._seasonTouchedByUser = false; } catch (e) {}
 
         var modal = document.getElementById('episodes-modal');
         var seasonSelector = document.getElementById('season-selector');
@@ -2283,42 +2386,67 @@
                 }
             }
 
-            currentEpisodes[id] = {
-                activeSeason: activeSeasonName,
-                seasons: seasons || {}
+            var paintSeasons = function() {
+                if (currentMediaId !== id) return;
+                currentEpisodes[id] = {
+                    activeSeason: activeSeasonName,
+                    seasons: seasons || {}
+                };
+                doPaintSeasons();
             };
 
-            var mediaData = currentEpisodes[id];
+            // Última temporada vista (servidor): si llega a tiempo manda sobre
+            // la primera; si llega tarde y el usuario no tocó el combo, se aplica.
+            try {
+                window.API.ajax({
+                    url: '/api/watch/last-season?item_id=' + encodeURIComponent(id),
+                    success: function(r) {
+                        var s = null;
+                        try { s = (r && r.season) || null; } catch (e) {}
+                        if (!s || !seasons || !seasons.hasOwnProperty(s)) { paintSeasons(); return; }
+                        if (activeSeasonName) { paintSeasons(); return; }
+                        activeSeasonName = s;
+                        if (window._seasonTouchedByUser) { paintSeasons(); return; }
+                        paintSeasons();
+                    },
+                    error: function() { paintSeasons(); }
+                });
+            } catch (e) { paintSeasons(); }
 
-            seasonSelector.innerHTML = '';
-            var hasSeasons = false;
-            for (var seasonName in mediaData.seasons) {
-                if (mediaData.seasons.hasOwnProperty(seasonName)) {
-                    hasSeasons = true;
-                    var option = document.createElement('option');
-                    option.value = seasonName;
-                    option.text = seasonName;
-                    if (!mediaData.activeSeason) mediaData.activeSeason = seasonName;
-                    if (seasonName === mediaData.activeSeason) option.selected = true;
-                    seasonSelector.appendChild(option);
+            var doPaintSeasons = function() {
+                if (currentMediaId !== id) return;
+                var mediaData = currentEpisodes[id];
+
+                seasonSelector.innerHTML = '';
+                var hasSeasons = false;
+                for (var seasonName in mediaData.seasons) {
+                    if (mediaData.seasons.hasOwnProperty(seasonName)) {
+                        hasSeasons = true;
+                        var option = document.createElement('option');
+                        option.value = seasonName;
+                        option.text = seasonName;
+                        if (!mediaData.activeSeason) mediaData.activeSeason = seasonName;
+                        if (seasonName === mediaData.activeSeason) option.selected = true;
+                        seasonSelector.appendChild(option);
+                    }
                 }
-            }
 
-            if (!hasSeasons) {
-                grid.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 50px 20px;">' +
-                    '<span style="font-size: 3rem;">📭</span>' +
-                    '<div style="font-size: 1.1rem; font-weight: 600; color: #fff; margin-top: 15px;">No se encontraron capítulos</div>' +
-                    '<span style="font-size: 0.85rem; opacity: 0.7; max-width: 320px; line-height: 1.4; display:block;margin:10px auto;">Este título no contiene enlaces de vídeo válidos o no ha sido indexado correctamente en Telegram.</span></div>';
-                seasonSelector.innerHTML = '<option value="">Sin episodios</option>';
-            } else {
-                renderEpisodesGrid();
-            }
+                if (!hasSeasons) {
+                    grid.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 50px 20px;">' +
+                        '<span style="font-size: 3rem;">📭</span>' +
+                        '<div style="font-size: 1.1rem; font-weight: 600; color: #fff; margin-top: 15px;">No se encontraron capítulos</div>' +
+                        '<span style="font-size: 0.85rem; opacity: 0.7; max-width: 320px; line-height: 1.4; display:block;margin:10px auto;">Este título no contiene enlaces de vídeo válidos o no ha sido indexado correctamente en Telegram.</span></div>';
+                    seasonSelector.innerHTML = '<option value="">Sin episodios</option>';
+                } else {
+                    renderEpisodesGrid();
+                }
 
-            modal.classList.remove('hidden');
-            setTimeout(function() {
-                var target = modal.querySelector('.episode-card.next-to-play') || modal.querySelector('.episode-card');
-                if (target && window.navEngine) window.navEngine.focus(target);
-            }, 120);
+                modal.classList.remove('hidden');
+                setTimeout(function() {
+                    var target = modal.querySelector('.episode-card.next-to-play') || modal.querySelector('.episode-card');
+                    if (target && window.navEngine) window.navEngine.focus(target);
+                }, 120);
+            };
         };
 
         var _resetEpBtn = function() {
@@ -2375,6 +2503,13 @@
         var seasonSelector = document.getElementById('season-selector');
         if (!id || !currentEpisodes[id] || !seasonSelector) return;
         currentEpisodes[id].activeSeason = seasonSelector.value;
+        try { window._seasonTouchedByUser = true; } catch (eST) {}
+        // Recordar última temporada vista (servidor, multi-dispositivo).
+        try {
+            window.API.ajax({ method: 'POST', url: '/api/watch/last-season',
+                data: { item_id: id, season: seasonSelector.value },
+                success: function() {}, error: function() {} });
+        } catch (e) {}
         renderEpisodesGrid();
         var modal = document.getElementById('episodes-modal');
         if (modal) {
@@ -2470,20 +2605,9 @@
                             var card = document.createElement('div');
                             card.className = 'episode-card' + (isWatched ? ' watched' : '') + (isNext ? ' next-to-play' : '');
                             card.setAttribute('tabindex', '0');
-                             card.onclick = function() { 
-                                var ep = episodes[idx];
-                                if (!ep) return;
-                                var item = { id: currentMediaId, title: ep.title || ep.display_name || 'Episodio' };
-                                var activePlayers = [];
-                                try { activePlayers = window.pluginSystem && window.pluginSystem.getActivePlayers ? window.pluginSystem.getActivePlayers() : []; } catch(e) {}
-                                if (activePlayers.length === 1) {
-                                    var pl = activePlayers[0];
-                                    if (typeof pl.play === 'function') pl.play(item);
-                                    else Catalog._playWithPlayer(item, currentMediaId, true, '', pl);
-                                } else if (activePlayers.length > 1) {
-                                    Catalog._showPlayerSelector(item, currentMediaId, true, '', activePlayers);
-                                }
-                             };
+                             card.onclick = function() {
+                                 try { Catalog.playEpisode(idx); } catch (e) {}
+                              };
 
                             var displayTitle = (ep.episode_number || (idx + 1)) + '. ' + (ep.title || 'Episodio ' + (ep.episode_number || (idx + 1)));
 
@@ -2564,6 +2688,15 @@
         var ep = episodes[idx];
         if (!ep) return;
 
+        // Recordar la temporada que se está viendo.
+        try {
+            if (mediaData.activeSeason) {
+                window.API.ajax({ method: 'POST', url: '/api/watch/last-season',
+                    data: { item_id: id, season: mediaData.activeSeason },
+                    success: function() {}, error: function() {} });
+            }
+        } catch (eLS) {}
+
         var episodesModal = document.getElementById('episodes-modal');
         episodesModalWasOpen = episodesModal && !episodesModal.classList.contains('hidden');
         Catalog.closeEpisodesModal();
@@ -2589,6 +2722,7 @@
                 }
                 // Usar el plugin directamente, no playMedia genérico
                 var pl = activePlayers[0];
+                Catalog._rememberPlayer(id, pl);
                 if (typeof pl.play === 'function') { pl.play(itemArg, ep); }
                 else { Catalog._playWithPlayer(itemArg, id, true, subcat, pl); }
             } else {
@@ -2597,42 +2731,18 @@
             return;
         }
 
-        // Múltiples players: selector overlay
-        var existing = document.getElementById('player-selector-overlay');
-        if (existing) existing.remove();
-        var overlay = document.createElement('div');
-        overlay.id = 'player-selector-overlay';
-        overlay.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;z-index:1000;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;';
-        overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
-        var panel = document.createElement('div');
-        panel.style.cssText = 'background:#1a1a1e;border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:20px;min-width:260px;max-width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
-        var title = document.createElement('div');
-        title.style.cssText = 'font-size:0.9rem;font-weight:600;margin-bottom:12px;color:var(--text-primary);';
-        title.textContent = 'Selecciona un reproductor:';
-        panel.appendChild(title);
-        for (var pi = 0; pi < activePlayers.length; pi++) {
-            (function(plugin) {
-                var btn = document.createElement('button');
-                btn.style.cssText = 'display:flex;align-items:center;gap:10px;width:100%;padding:10px 14px;margin:4px 0;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:#fff;font-size:0.9rem;cursor:pointer;transition:0.2s;text-align:left;';
-                btn.onmouseenter = function() { this.style.background = 'rgba(225,29,72,0.15)'; };
-                btn.onmouseleave = function() { this.style.background = 'rgba(255,255,255,0.05)'; };
-                btn.innerHTML = '<span style="font-size:1.2rem;">\u25B6</span> <span>' + (plugin.displayName || plugin.name) + '</span>';
-                btn.onclick = function() {
-                    overlay.remove();
-                    localStorage.setItem('tvcat_preferred_player', plugin.playerType);
-                    if (typeof plugin.play === 'function') { plugin.play(itemArg, ep); }
-                    else { Catalog._playWithPlayer(itemArg, id, true, subcat, plugin); }
-                };
-                panel.appendChild(btn);
-            })(activePlayers[pi]);
-        }
-        var cancelBtn = document.createElement('button');
-        cancelBtn.textContent = 'Cancelar';
-        cancelBtn.style.cssText = 'width:100%;padding:8px;margin-top:8px;background:transparent;border:none;color:rgba(255,255,255,0.4);font-size:0.8rem;cursor:pointer;';
-        cancelBtn.onclick = function() { overlay.remove(); };
-        panel.appendChild(cancelBtn);
-        overlay.appendChild(panel);
-        document.body.appendChild(overlay);
+        // Múltiples players: el MISMO selector de la hero, con el episodio.
+        var _peSub = '';
+        try {
+            var _ci = (window.Catalog && window.Catalog.currentItems) || [];
+            for (var _cik = 0; _cik < _ci.length; _cik++) {
+                if (String(_ci[_cik].item_id) === String(id)) {
+                    _peSub = ((_ci[_cik].subcategory) || '').toLowerCase();
+                    break;
+                }
+            }
+        } catch (e) {}
+        Catalog._showPlayerSelector(itemArg, id, true, _peSub, activePlayers, ep);
     };
 
     Catalog.playNextEpisode = function(id) {
@@ -2641,12 +2751,13 @@
             url: '/api/media/' + id + '/episodes',
             success: function(seasons) {
                 if (!seasons) return;
-                var firstSeason = Object.keys(seasons)[0];
-                if (!firstSeason) return;
-                var episodes = seasons[firstSeason] || [];
-                if (episodes.length === 0) return;
+                // Temporada recordada (o primera con pendientes, o primera).
+                Catalog.pickSeasonWithHistory(id, seasons, function(picked) {
+                    if (!picked || !seasons[picked]) return;
+                    var episodes = seasons[picked] || [];
+                    if (episodes.length === 0) return;
 
-                currentEpisodes[id] = { activeSeason: firstSeason, seasons: seasons };
+                    currentEpisodes[id] = { activeSeason: picked, seasons: seasons };
 
                 window.API.ajax({
                     url: '/api/watch/history',
@@ -2676,6 +2787,7 @@
                             Catalog.playMedia({ item_id: id, title: targetEp.title || '' }, targetEp);
                         });
                     }
+                });
                 });
             }
         });
@@ -2732,10 +2844,87 @@
         console.log('[PLAY] Item:', data ? data.title : 'unknown', 'Episode:', episode ? episode.title : 'N/A');
     };
 
-    // Helper: show player selection overlay when multiple players exist
+    // Extensión de un fichero (file_name > title). '' si desconocida.
+    function _playerExt(ep, item) {
+        var names = [];
+        try {
+            if (ep) {
+                if (ep.file_name) names.push(ep.file_name);
+                if (ep.title) names.push(ep.title);
+            }
+            if (item) {
+                if (!ep && item.episodes && item.episodes.length) {
+                    var e0 = item.episodes[0];
+                    if (e0.file_name) names.push(e0.file_name);
+                    if (e0.title) names.push(e0.title);
+                }
+                if (item.title) names.push(item.title);
+            }
+            for (var i = 0; i < names.length; i++) {
+                var m = String(names[i] || '').match(/\.([a-z0-9]{2,5})(?:[?#]|$)/i);
+                if (m) return m[1].toLowerCase();
+            }
+        } catch (e) {}
+        return '';
+    }
+
+    // ¿El plugin declara ese formato? Sin `formats` vale para todo.
+    function _playerMatches(plugin, ext) {
+        try {
+            var fmts = plugin.formats;
+            if (!fmts || !fmts.length) return true;
+            if (!ext) return false;
+            for (var i = 0; i < fmts.length; i++) {
+                var f = String(fmts[i] || '').toLowerCase();
+                if (f === '*' || f === ext) return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    function _playerPrefs() {
+        try {
+            var u = (window.Catalog && window.Catalog.currentUser) || {};
+            var p = u.player_prefs;
+            if (typeof p === 'string') { try { p = JSON.parse(p); } catch (e) { p = {}; } }
+            return (p && typeof p === 'object') ? p : {};
+        } catch (e) { return {}; }
+    }
+
+    // Recuerda el último reproductor usado por título (servidor, genérico).
+    Catalog._rememberPlayer = function(itemId, plugin) {
+        try {
+            if (!itemId || !plugin || !plugin.name) return;
+            var prefs = _playerPrefs();
+            prefs[String(itemId)] = { player: plugin.name };
+            try { window.Catalog.currentUser.player_prefs = prefs; } catch (e2) {}
+            window.API.ajax({ method: 'POST', url: '/api/config',
+                data: { player_prefs: prefs },
+                success: function() {}, error: function() {} });
+        } catch (e) {}
+    };
+
+    // Pre-selección: recordado (si disponible) > formato (orden de lista) > primero.
+    Catalog._preselectPlayer = function(itemId, ext, activePlayers) {
+        try {
+            var prefs = _playerPrefs();
+            var rem = prefs && prefs[String(itemId)] && prefs[String(itemId)].player;
+            if (rem) {
+                for (var i = 0; i < activePlayers.length; i++) {
+                    if (activePlayers[i].name === rem && activePlayers[i].enabled !== false) return activePlayers[i];
+                }
+            }
+            for (var j = 0; j < activePlayers.length; j++) {
+                if (_playerMatches(activePlayers[j], ext)) return activePlayers[j];
+            }
+        } catch (e) {}
+        return activePlayers[0] || null;
+    };
 
     // Helper: show player selection overlay when multiple players exist
-    Catalog._showPlayerSelector = function(item, itemId, hasEpisodes, subcat, activePlayers) {
+    // ep (opcional): si se indica, reproduce ESE episodio (path lista de
+    // episodios); si no, el comportamiento de hero (título).
+    Catalog._showPlayerSelector = function(item, itemId, hasEpisodes, subcat, activePlayers, ep) {
         var existing = document.getElementById('player-selector-overlay');
         if (existing) existing.remove();
 
@@ -2752,6 +2941,10 @@
         title.textContent = 'Selecciona un reproductor:';
         panel.appendChild(title);
 
+        // Pre-selección (recordado > formato > primero) + foco inicial.
+        var ext = _playerExt(ep || null, item);
+        var pre = Catalog._preselectPlayer(itemId, ext, activePlayers);
+        var btns = [];
         for (var pi = 0; pi < activePlayers.length; pi++) {
             var pl = activePlayers[pi];
             var btn = document.createElement('button');
@@ -2769,9 +2962,10 @@
             var selTip = pl.tooltip || pl.displayName || selLabel;
             btn.title = selTip;
             btn.onclick = (function(plugin) {
-                return function() { overlay.remove(); localStorage.setItem('tvcat_preferred_player', plugin.playerType); if (typeof plugin.play === 'function') plugin.play(item); else Catalog._playWithPlayer(item, itemId, hasEpisodes, subcat, plugin); };
+                return function() { overlay.remove(); localStorage.setItem('tvcat_preferred_player', plugin.playerType); Catalog._rememberPlayer(itemId, plugin); if (typeof plugin.play === 'function') { if (typeof ep !== 'undefined' && ep) plugin.play(item, ep); else plugin.play(item); } else Catalog._playWithPlayer(item, itemId, hasEpisodes, subcat, plugin); };
             })(pl);
             panel.appendChild(btn);
+            btns.push(btn);
         }
 
         var cancelBtn = document.createElement('button');
@@ -2782,63 +2976,115 @@
 
         overlay.appendChild(panel);
         document.body.appendChild(overlay);
+
+        // Foco inicial en el pre-seleccionado + navegación por mando/teclado:
+        // Arriba/Abajo mueven, Enter/5 lanza, Escape cierra.
+        try {
+            var focusIdx = 0;
+            for (var fi = 0; fi < activePlayers.length; fi++) {
+                if (pre && activePlayers[fi].name === pre.name) { focusIdx = fi; break; }
+            }
+            var focusBtn = function(i) {
+                if (i < 0) i = 0;
+                if (i >= btns.length) i = btns.length - 1;
+                focusIdx = i;
+                try { btns[i].focus(); } catch (e) {}
+                return i;
+            };
+            focusBtn(focusIdx);
+            overlay.onkeydown = function(e) {
+                var kc = e.keyCode || e.which;
+                var dig = null;
+                try { dig = (window.keyMapper && window.keyMapper.getVirtualDigit) ? window.keyMapper.getVirtualDigit(e) : null; } catch (e0) {}
+                if (kc === 38 || kc === 40) {
+                    focusBtn(focusIdx + (kc === 38 ? -1 : 1));
+                    if (e.preventDefault) e.preventDefault();
+                } else if (kc === 13 || dig === '5') {
+                    try { btns[focusIdx].click(); } catch (e1) {}
+                    if (e.preventDefault) e.preventDefault();
+                } else if (kc === 27) {
+                    overlay.remove();
+                }
+            };
+            // El foco debe estar dentro para que lleguen las teclas (TV).
+            try { overlay.setAttribute('tabindex', '-1'); overlay.focus(); focusBtn(focusIdx); } catch (e2) {}
+        } catch (e) {}
     };
 
     // Helper: play with a specific player plugin
     Catalog._playWithPlayer = function(item, itemId, hasEpisodes, subcat, playerPlugin) {
         if (!playerPlugin || !playerPlugin.play) return;
+        Catalog._rememberPlayer(itemId, playerPlugin);
 
         if (hasEpisodes && subcat.match(/(anime|series|tv|various)/i)) {
-            // Series: find next unwatched episode, then play
+            // Series: temporada recordada (o primera con pendientes) + primer
+            // no-visto dentro. Si la recordada está completa, salta.
             window.API.ajax({
                 url: '/api/media/' + itemId + '/episodes',
                 success: function(seasonsData) {
-                    var allEps = [];
-                    var activeSeason = '';
-                    if (seasonsData) {
+                    if (!seasonsData) return;
+                    Catalog.pickSeasonWithHistory(itemId, seasonsData, function(picked) {
                         var keys = Object.keys(seasonsData);
+                        if (!picked || !seasonsData[picked]) picked = keys[0];
+                        if (!picked) return;
+                        var ordered = [picked];
                         for (var ki = 0; ki < keys.length; ki++) {
-                            var sName = keys[ki];
-                            if (!activeSeason) activeSeason = sName;
-                            allEps = allEps.concat(seasonsData[sName]);
+                            if (keys[ki] !== picked) ordered.push(keys[ki]);
                         }
-                    }
-                    // Store for prev/next navigation
-                    currentEpisodes[itemId] = {
-                        activeSeason: activeSeason,
-                        seasons: seasonsData || {}
-                    };
-                    if (allEps.length === 0) return;
-                    window.API.ajax({
-                        url: '/api/watch/history',
-                        success: function(histRes) {
-                            var history = (histRes && histRes.history) || [];
-                            var watched = {};
-                            for (var hi = 0; hi < history.length; hi++) {
-                                var h = history[hi];
-                                if (h.episode_key) watched['k:' + h.episode_key] = h;
-                                else watched[String(h.item_id) + ':' + String(h.episode_id)] = h;
-                            }
-                            var target = null;
-                            window.API.getWatchThresholds(function(th) {
-                                var minThresh = th.min / 100;
-                                var maxThresh = th.max / 100;
-                                for (var ei = 0; ei < allEps.length; ei++) {
-                                    var ek = allEps[ei].episode_key;
-                                    var wk = ek ? ('k:' + ek) : (String(itemId) + ':' + String(allEps[ei].id));
-                                    var w = watched[wk];
-                                    if (effectiveState(w, { min: minThresh, max: maxThresh }) !== 3) {
-                                        target = allEps[ei];
-                                        break;
-                                    }
+                        var allEps = [];
+                        for (var oi = 0; oi < ordered.length; oi++) {
+                            allEps = allEps.concat(seasonsData[ordered[oi]]);
+                        }
+                        // Store for prev/next navigation
+                        currentEpisodes[itemId] = {
+                            activeSeason: picked,
+                            seasons: seasonsData || {}
+                        };
+                        if (allEps.length === 0) return;
+                        window.API.ajax({
+                            url: '/api/watch/history',
+                            success: function(histRes) {
+                                var history = (histRes && histRes.history) || [];
+                                var watched = {};
+                                for (var hi = 0; hi < history.length; hi++) {
+                                    var h = history[hi];
+                                    if (h.episode_key) watched['k:' + h.episode_key] = h;
+                                    else watched[String(h.item_id) + ':' + String(h.episode_id)] = h;
                                 }
-                                if (!target) target = allEps[0];
-                                Catalog.playMedia(item, target);
-                            });
-                        },
-                        error: function() {
-                            Catalog.playMedia(item, allEps[0]);
-                        }
+                                var target = null;
+                                window.API.getWatchThresholds(function(th) {
+                                    var minThresh = th.min / 100;
+                                    var maxThresh = th.max / 100;
+                                    for (var ei = 0; ei < allEps.length; ei++) {
+                                        var ek = allEps[ei].episode_key;
+                                        var wk = ek ? ('k:' + ek) : (String(itemId) + ':' + String(allEps[ei].id));
+                                        var w = watched[wk];
+                                        if (effectiveState(w, { min: minThresh, max: maxThresh }) !== 3) {
+                                            target = allEps[ei];
+                                            break;
+                                        }
+                                    }
+                                    if (!target) target = allEps[0];
+                                    // Recordar la temporada del episodio elegido.
+                                    try {
+                                        var _ts = picked;
+                                        for (var si = 0; si < ordered.length; si++) {
+                                            var _sl = seasonsData[ordered[si]] || [];
+                                            for (var sj = 0; sj < _sl.length; sj++) {
+                                                if (_sl[sj] === target) { _ts = ordered[si]; si = ordered.length; break; }
+                                            }
+                                        }
+                                        window.API.ajax({ method: 'POST', url: '/api/watch/last-season',
+                                            data: { item_id: itemId, season: _ts },
+                                            success: function() {}, error: function() {} });
+                                    } catch (eLS2) {}
+                                    Catalog.playMedia(item, target);
+                                });
+                            },
+                            error: function() {
+                                Catalog.playMedia(item, allEps[0]);
+                            }
+                        });
                     });
                 },
                 error: function() {

@@ -100,7 +100,7 @@ def get_user_prefs(user_id: int) -> dict:
     """Devuelve las preferencias de perfil de un usuario (nick, avatar, color, etc.)."""
     conn = _get_conn()
     row = conn.execute(
-        "SELECT display_name, avatar, avatar_url, color, category_preferences, watch_threshold_min, watch_threshold_max, hls_title_prefs, header_image FROM tvcat_user_prefs WHERE user_id=?",
+        "SELECT display_name, avatar, avatar_url, color, category_preferences, watch_threshold_min, watch_threshold_max, hls_title_prefs, header_image, player_prefs FROM tvcat_user_prefs WHERE user_id=?",
         (user_id,)
     ).fetchone()
     conn.close()
@@ -128,6 +128,13 @@ def get_user_prefs(user_id: int) -> dict:
             prefs["header_image"] = {}
     except Exception:
         prefs["header_image"] = {}
+    try:
+        if prefs.get("player_prefs"):
+            prefs["player_prefs"] = json.loads(prefs["player_prefs"])
+        elif "player_prefs" in prefs:
+            prefs["player_prefs"] = {}
+    except Exception:
+        prefs["player_prefs"] = {}
     return {k: v for k, v in prefs.items() if v is not None}
 
 
@@ -139,7 +146,7 @@ def save_user_prefs(user_id: int, prefs: dict) -> None:
     c.execute("INSERT OR IGNORE INTO tvcat_user_prefs (user_id) VALUES (?)", (user_id,))
     fields = []
     values = []
-    for key in ("display_name", "avatar", "avatar_url", "color", "category_preferences", "watch_threshold_min", "watch_threshold_max", "hls_title_prefs", "header_image"):
+    for key in ("display_name", "avatar", "avatar_url", "color", "category_preferences", "watch_threshold_min", "watch_threshold_max", "hls_title_prefs", "header_image", "player_prefs"):
         if key in prefs:
             val = prefs[key]
             # Serializar dicts a JSON para columnas TEXT

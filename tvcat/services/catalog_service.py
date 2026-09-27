@@ -193,6 +193,11 @@ def init_db():
         c.execute("ALTER TABLE tvcat_user_prefs ADD COLUMN header_image TEXT DEFAULT '{}'")
     except sqlite3.OperationalError:
         pass
+    # Migración: último reproductor por título (JSON: {item_id: {player}}), genérico.
+    try:
+        c.execute("ALTER TABLE tvcat_user_prefs ADD COLUMN player_prefs TEXT DEFAULT '{}'")
+    except sqlite3.OperationalError:
+        pass
 
 
     c.execute("""

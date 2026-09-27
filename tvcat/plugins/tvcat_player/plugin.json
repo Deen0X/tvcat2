@@ -13,6 +13,7 @@
     "player.js"
   ],
   "css": [],
+  "formats": ["mp4"],
   "applies_to": [
     "media",
     "series",

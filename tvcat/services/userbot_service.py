@@ -874,8 +874,13 @@ class UserbotClient:
                     from pyrogram.file_id import FileId
                     _fid = FileId.decode(doc.file_id)
                     _mid, _ah, _fr = _fid.media_id, _fid.access_hash, _fid.file_reference
+                    try:
+                        _fid_dc = _fid.dc_id
+                    except Exception:
+                        _fid_dc = None
                 else:
                     _mid, _ah, _fr = doc.id, doc.access_hash, doc.file_reference
+                    _fid_dc = None
             except AttributeError:
                 print(" [ITER_DOWNLOAD] Pyrogram: sin localización, fallback a download_media")
                 data = await self.download_media(message)
@@ -890,6 +895,23 @@ class UserbotClient:
                 file_reference=bytes(_fr) if _fr else b"",
                 thumb_size=""
             )
+            # Sesión de medios del DC del fichero: el invoke directo sobre la
+            # sesión principal falla con FILE_MIGRATE_X si el fichero vive en
+            # otro DC. Se reutiliza la media session (export/import de
+            # autorización) igual que fast_download.
+            _msess = None
+            try:
+                _fdc = _fid_dc
+            except Exception:
+                _fdc = None
+            if _fdc:
+                try:
+                    from services.fast_download import _get_media_session as _gms
+                    _msess = await _gms(self._client, _fdc)
+                except Exception as e:
+                    print(f" [ITER_DOWNLOAD] Pyrogram: sin media session DC{_fdc} ({e}), invoke directo")
+                    _msess = None
+            _invoker = _msess if _msess is not None else self._client
             # Telegram capa upload.getFile en ~1MB por petición
             limit = max(4096, min(chunk_size, 1024 * 1024))
             expected = 0
@@ -921,7 +943,7 @@ class UserbotClient:
                     # El limit se pide SIEMPRE completo: el servidor devuelve menos
                     # bytes en la cola. Acortarlo rompe la invariante
                     # offset % limit == 0 → 400 LIMIT_INVALID (así lo hace Telethon).
-                    result = await self._client.invoke(GetFile(location=loc, offset=offset, limit=limit))
+                    result = await _invoker.invoke(GetFile(location=loc, offset=offset, limit=limit))
                 except Exception as e:
                     if type(e).__name__ in ("FloodWait", "FloodPremiumWait"):
                         _gate().bulk_flood_report(float(getattr(e, 'value', 0) or 0))

@@ -4210,12 +4210,26 @@ async def _hls_worker_loop():
                 continue
 
             # Pausar SOLO si se solicitó leave explícito (last_active==0).
-            # Se QUITA el guard de inactividad (>30s sin segmento) para que el worker
-            # siga descargando hacia adelante aunque el cliente esté en pausa o la
-            # reproducción esté estable (la descarga corre por delante del playback).
+            # Además, guard de inactividad: sin peticiones de segmento en 120s
+            # (pestaña cerrada sin leave, player olvidado en pausa, reintentos
+            # huérfanos tras reinicio) se saca de la cola conservando el
+            # parcial/sidecar. Al volver a pedir segmentos se re-encola solo.
+            # NOTA: no confundir con pausa voluntaria (el buffer lleno no pide
+            # segmentos; al reanudar, la primera petición lo reactiva).
             _last = state.get("last_active", 0)
             if _last == 0:
                 printLog(f" [HLS-WORKER] ep={episode_key} leave detectado, pausado")
+                _HLS_WORKER_QUEUE.pop(0)
+                await _hls_close_secondary(secondary)
+                secondary = []
+                current_ep = None
+                continue
+            try:
+                _idle = _t.time() - float(_last)
+            except Exception:
+                _idle = 0
+            if _idle > 120:
+                printLog(f" [HLS-WORKER] ep={episode_key} sin segmentos {_idle:.0f}s, pausado (parcial conservado)")
                 _HLS_WORKER_QUEUE.pop(0)
                 await _hls_close_secondary(secondary)
                 secondary = []
@@ -4763,6 +4777,7 @@ async def hls_seq_leave(episode_key: str):
         _ds.cancel(episode_key)
     except Exception:
         pass
+    _hls_seq_close_session(episode_key)
     state = _HLS_SPARSE.get(episode_key)
     if state is not None:
         state["last_active"] = 0
@@ -5139,10 +5154,57 @@ _HLS_SEQ_SEG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 os.makedirs(_HLS_SEQ_SEG_DIR, exist_ok=True)
 
 
-async def _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, prefer_block=None):
+# Sesiones de reproducción SEQ (F1-ajuste): solo la sesión activa genera
+# demanda de descarga. Un leave cierra la sesión; los reintentos de la sesión
+# muerta no relanzan (el player nuevo abre otra sesión con la playlist).
+_HLS_SEQ_SID = {}    # episode_key -> sid activo
+_HLS_SEQ_LEAVE = {}  # episode_key -> timestamp del último leave
+_HLS_SEQ_LEAVE_GRACE = 300  # s tras un leave sin sid válido: no relanzar
+
+
+def _hls_seq_demand_ok(episode_key, sid=None) -> bool:
+    """¿Esta petición puede (re)lanzar descarga? Actualiza sesión/leave."""
+    import time as _t3
+    try:
+        now = _t3.time()
+        sid = str(sid or "")
+        active = _HLS_SEQ_SID.get(episode_key)
+        if sid:
+            if active is None or sid == active:
+                _HLS_SEQ_SID[episode_key] = sid
+                _HLS_SEQ_LEAVE.pop(episode_key, None)
+                return True
+            return False  # sesión vieja: zombi
+        if active is not None:
+            return False  # hay dueño con sid; esto no es él
+        left = _HLS_SEQ_LEAVE.get(episode_key, 0) or 0
+        if left and (now - left) < _HLS_SEQ_LEAVE_GRACE:
+            return False  # leave reciente sin sid nuevo: probable zombi
+        _HLS_SEQ_SID[episode_key] = "_legacy"
+        return True
+    except Exception:
+        return True
+
+
+def _hls_seq_close_session(episode_key):
+    import time as _t4
+    try:
+        _HLS_SEQ_SID.pop(episode_key, None)
+        _HLS_SEQ_LEAVE[episode_key] = _t4.time()
+    except Exception:
+        pass
+
+
+async def _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, prefer_block=None, sid=None):
     """Asegura que el servicio central está descargando el sparse (relanza/reanuda si incompleto).
-    `prefer_block`: bloque (512KB) a descargar prioritariamente (punto de reproducción/seek)."""
+    `prefer_block`: bloque (512KB) a descargar prioritariamente (punto de reproducción/seek).
+    `sid`: sesión de reproducción. Solo relanza si la sesión es la activa (o si no
+    hay sesión activa ni leave reciente: demanda fresca). Los reintentos zombi de
+    una sesión cerrada NO relanzan (devuelve False; el segmento se sirve si la
+    zona está, si no 503 barato)."""
     from services.download_service import get_status, download_sparse, set_prefer
+    if not _hls_seq_demand_ok(episode_key, sid):
+        return False
     sparse = _hls_sparse_path(episode_key)
     st = get_status(episode_key)
     # Si el fichero no existe/tamaño erróneo, preasignar
@@ -5233,7 +5295,7 @@ async def _hls_ensure_tail(episode_key, sparse, file_size, msg, dc_id, nbytes, l
 
 
 @app.get(api_url("/api/hls_seq/{episode_key}/playlist.m3u8"))
-async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0, audio: int = 0):
+async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0, audio: int = 0, sid: str = ""):
     """Playlist HLS SEQ: segmentos de 6s desde `start` segundos.
     Usa el sparse descargado (download_service). No espera fichero completo:
     genera segmentos de la zona ya descargada.
@@ -5247,16 +5309,19 @@ async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0
     if not msg or file_size <= 0:
         raise HTTPException(404, "Episodio no encontrado")
 
-    # Asegurar sparse existe y el servicio está descargando (relanza si incompleto)
+    # Asegurar sparse existe y el servicio está descargando (relanza si incompleto).
+    # El sid de la petición abre/mantiene la sesión de reproducción.
     sparse = _hls_sparse_path(episode_key)
-    await _hls_seq_ensure_download(episode_key, msg, file_size, dc_id)
+    await _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, sid=sid or None)
 
     # Para MKV: asegurar Cues disponibles (últimos 2MB) antes de servir segmentos
-    # Igual que HLS actual asegura moov para MP4, aquí aseguramos Cues para FakeMKV
+    # Igual que HLS actual asegura moov para MP4, aquí aseguramos Cues para FakeMKV.
+    # Solo con demanda válida (sid): si no, son descargas zombi que auto-infligen FloodWait.
+    _pl_demand = _hls_seq_demand_ok(episode_key, sid or None)
     try:
         from services import fakemkv
-        cues = fakemkv.parse_mkv_cues_from_file(sparse)
-        if not cues:
+        cues = fakemkv.parse_mkv_cues_from_file(sparse) if _pl_demand else None
+        if _pl_demand and not cues:
             print(f" [HLS-SEQ] Cues no disponibles, descargando final 2MB para {episode_key}")
             await _hls_ensure_tail(episode_key, sparse, file_size, msg, dc_id, 2*1024*1024, "Cues")
     except Exception as e:
@@ -5264,8 +5329,9 @@ async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0
 
     # Para MP4 con moov al FINAL: asegurarlo (últimos 5MB) o ffmpeg no parsea.
     # Los TGHirayi salen con faststart (moov delante), pero los de origen no.
+    # Igual que arriba: solo con demanda válida.
     try:
-        if os.path.isfile(sparse) and file_size > 0:
+        if _pl_demand and os.path.isfile(sparse) and file_size > 0:
             with open(sparse, 'rb') as _hf:
                 _head = _hf.read(2*1024*1024)
             if b'ftyp' in _head[:64] and b'moov' not in _head:
@@ -5287,9 +5353,10 @@ async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0
         duration = file_size / (2.56 * 1024 * 1024 / 8)
 
     # Master multi-pista (igual que HLS actual): audios/subs embebidos
-    # Asegurar header/tracks para que el master liste audios/subs
+    # Asegurar header/tracks para que el master liste audios/subs.
+    # Solo con demanda válida (si no, cada playlist zombi golpea Telegram).
     try:
-        if msg and file_size > 0 and not _HLS_SEG_CACHE.get(episode_key, {}).get("tracks"):
+        if _pl_demand and msg and file_size > 0 and not _HLS_SEG_CACHE.get(episode_key, {}).get("tracks"):
             from services.userbot_service import get_active_client as _gac2
             ub2 = await _gac2()
             if ub2:
@@ -5324,7 +5391,8 @@ async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0
         extra += ',SUBTITLES="subs"'
     lines.append(f'#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS="avc1.64001f,mp4a.40.2"{extra}')
     audio_q = max(0, int(audio or 0))
-    lines.append(f"/api/hls_seq/{episode_key}/media.m3u8?audio={audio_q}&start={start}")
+    _sid_q = ("&sid=" + str(sid)) if sid else ""
+    lines.append(f"/api/hls_seq/{episode_key}/media.m3u8?audio={audio_q}&start={start}{_sid_q}")
 
     from fastapi.responses import Response
     return Response(content="\n".join(lines), media_type="application/vnd.apple.mpegurl",
@@ -5332,13 +5400,13 @@ async def hls_seq_playlist(episode_key: str, prefetch: int = 2, start: float = 0
 
 
 @app.get(api_url("/api/hls_seq/{episode_key}/media.m3u8"))
-async def hls_seq_media(episode_key: str, start: float = 0, audio: int = 0):
+async def hls_seq_media(episode_key: str, start: float = 0, audio: int = 0, sid: str = ""):
     """Playlist media SEQ: lista de segmentos desde el segmento `start/6`."""
     msg, chat_entity, file_size, dc_id = await _hls_resolve_episode(episode_key)
     if not msg or file_size <= 0:
         raise HTTPException(404, "Episodio no encontrado")
     # Asegurar descarga (por si el player recarga el media tras cambiar audio)
-    await _hls_seq_ensure_download(episode_key, msg, file_size, dc_id)
+    await _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, sid=sid or None)
     duration = _HLS_SEG_CACHE.get(episode_key, {}).get("duration", 0)
     if duration <= 0:
         try:
@@ -5352,6 +5420,7 @@ async def hls_seq_media(episode_key: str, start: float = 0, audio: int = 0):
     # El `start` NO desplaza MEDIA-SEQUENCE (eso movía el "0" del progreso y desalineaba
     # los timestamps al recargar por cambio de audio). El player hace el seek vía currentTime.
     qseg = f"?audio={audio}" if audio else ""
+    _sid_seg = ("&sid=" + str(sid)) if (sid and qseg) else (("?sid=" + str(sid)) if sid else "")
 
     lines = [
         "#EXTM3U",
@@ -5361,7 +5430,7 @@ async def hls_seq_media(episode_key: str, start: float = 0, audio: int = 0):
     ]
     for i in range(0, total_segments):
         lines.append("#EXTINF:%.3f," % _HLS_SEG_DURATION)
-        lines.append(f"/api/hls_seq/{episode_key}/segment/{i}.ts{qseg}")
+        lines.append(f"/api/hls_seq/{episode_key}/segment/{i}.ts{qseg}{_sid_seg}")
     lines.append("#EXT-X-ENDLIST")
 
     from fastapi.responses import Response
@@ -5370,7 +5439,7 @@ async def hls_seq_media(episode_key: str, start: float = 0, audio: int = 0):
 
 
 @app.get(api_url("/api/hls_seq/{episode_key}/segment/{n}.ts"))
-async def hls_seq_segment(episode_key: str, n: int, audio: int = 0):
+async def hls_seq_segment(episode_key: str, n: int, audio: int = 0, sid: str = ""):
     """Segmento HLS SEQ: remuxa el rango [X, X+Δ] del sparse usando FakeMKV.
     X = n*6 segundos. Busca el cluster del keyframe de X, recorta los clusters
     contiguos hasta X+Δ, construye mini-MKV, ffmpeg -> .ts.
@@ -5400,9 +5469,10 @@ async def hls_seq_segment(episode_key: str, n: int, audio: int = 0):
     # Bloque prioritario = zona del segmento pedido (para que el servicio descargue esa zona primero)
     # se calcula con estimación lineal (valida para priorizar; el cluster exacto se usa luego)
     prefer_block = int((target_time / duration) * (file_size / (512*1024))) if duration > 0 else 0
-    # Asegurar que el servicio está descargando (relanza si incompleto) priorizando el bloque pedido
+    # Asegurar que el servicio está descargando (relanza si incompleto) priorizando el bloque pedido.
+    # Con sid de sesión muerta no relanza (solo sirve si la zona está).
     try:
-        await _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, prefer_block=prefer_block)
+        await _hls_seq_ensure_download(episode_key, msg, file_size, dc_id, prefer_block=prefer_block, sid=sid or None)
     except Exception:
         pass
 
@@ -5519,6 +5589,75 @@ async def hls_seq_segment(episode_key: str, n: int, audio: int = 0):
                        headers={"Cache-Control": "max-age=3600", "Access-Control-Allow-Origin": "*"})
 
 
+@app.get(api_url("/api/hls_seq/{episode_key}/ready"))
+async def hls_seq_ready(episode_key: str, start: float = 0, segs: int = 2, sid: str = ""):
+    """¿Listo para arrancar? Progreso HONESTO de la ventana [start, start+segs].
+    Barato (DB+disco, sin red): bitmap por sondas del sparse + velocidad del
+    servicio. `start` = punto de resume en segundos."""
+    import math as _mrd
+    info = _HLS_SEG_CACHE.get(episode_key, {})
+    file_size = info.get("file_size", 0) or 0
+    duration = info.get("duration", 0) or 0
+    sparse = _hls_sparse_path(episode_key)
+    try:
+        if not file_size and os.path.isfile(sparse):
+            file_size = os.path.getsize(sparse)
+    except Exception:
+        pass
+    if file_size <= 0:
+        return {"phase": "header", "pct": 0, "win_done_mb": 0, "win_total_mb": 0,
+                "speed": 0, "eta": -1, "ready": False}
+    if duration <= 0:
+        duration = file_size / (2.56 * 1024 * 1024 / 8)
+    try:
+        segs = max(1, min(10, int(segs or 2)))
+    except Exception:
+        segs = 2
+    total_blocks = max(1, _mrd.ceil(file_size / float(_HLS_BLOCK_SIZE)))
+    try:
+        start_block = min(total_blocks - 1, max(0, int(float(start or 0) / duration * total_blocks)))
+    except Exception:
+        start_block = 0
+    win_blocks = max(1, _mrd.ceil(segs * _HLS_SEG_DURATION / duration * total_blocks))
+    win_blocks = min(win_blocks, total_blocks - start_block)
+    header_ok = bool(info.get("moov_bytes") or info.get("header_bytes"))
+    filled = 0
+    try:
+        if os.path.isfile(sparse):
+            with open(sparse, "rb") as _f:
+                for _b in range(start_block, start_block + win_blocks):
+                    try:
+                        _f.seek(_b * _HLS_BLOCK_SIZE)
+                        _h = _f.read(4096)
+                        if _h and _h.strip(b"\x00"):
+                            filled += 1
+                    except Exception:
+                        pass
+    except Exception:
+        filled = 0
+    win_total_mb = win_blocks * _HLS_BLOCK_SIZE / (1024 * 1024)
+    win_done_mb = filled * _HLS_BLOCK_SIZE / (1024 * 1024)
+    pct = round(filled * 100.0 / max(1, win_blocks), 1)
+    speed = 0
+    try:
+        from services.download_service import get_status as _gs
+        speed = float((_gs(episode_key) or {}).get("speed", 0) or 0)
+    except Exception:
+        speed = 0
+    eta = -1
+    try:
+        if speed > 0 and filled < win_blocks:
+            eta = int((win_blocks - filled) * _HLS_BLOCK_SIZE / speed)
+    except Exception:
+        eta = -1
+    ready = (filled >= win_blocks)
+    phase = "ready" if ready else ("download" if header_ok else "header")
+    return {"phase": phase, "pct": pct, "win_done_mb": round(win_done_mb, 1),
+            "win_total_mb": round(win_total_mb, 1), "speed": int(speed),
+            "eta": eta, "ready": bool(ready),
+            "start_seg": int(float(start or 0) / _HLS_SEG_DURATION)}
+
+
 @app.get(api_url("/api/hls_seq/{episode_key}/status"))
 async def hls_seq_status(episode_key: str):
     """Estado de la descarga SEQ (progreso del servicio central) + pistas para el combo."""
@@ -5528,19 +5667,25 @@ async def hls_seq_status(episode_key: str):
     tr = info2.get("tracks", [])
     audio_tracks = [t for t in tr if t.get("type") == "audio"] if tr else []
     sub_tracks = [t for t in tr if t.get("type") == "subs"] if tr else []
-    # Asegurar tracks si aún no (master ya lo intenta; aquí por si el player lo pide antes)
+    # Asegurar tracks si aún no (master ya lo intenta; aquí por si el player lo pide antes).
+    # Con cooldown 30s: sin esto, cada poll (1s) con tracks=[] golpea Telegram y
+    # auto-inflige FloodWait, que a su vez impide descargar (espiral 503).
     if not tr:
         try:
-            msg_h, _, fs_h, dc_h = await _hls_resolve_episode(episode_key)
-            if msg_h and fs_h > 0:
-                from services.userbot_service import get_active_client as _gac3
-                ub3 = await _gac3()
-                if ub3:
-                    await _hls_ensure_header_cache(ub3, msg_h, dc_h, fs_h, episode_key)
-            info2 = _HLS_SEG_CACHE.get(episode_key, {})
-            tr = info2.get("tracks", [])
-            audio_tracks = [t for t in tr if t.get("type") == "audio"] if tr else []
-            sub_tracks = [t for t in tr if t.get("type") == "subs"] if tr else []
+            import time as _t_hdr
+            _last_hdr = float((info2.get("_hdr_try_ts") or 0))
+            if _t_hdr.time() - _last_hdr > 30:
+                info2["_hdr_try_ts"] = _t_hdr.time()
+                msg_h, _, fs_h, dc_h = await _hls_resolve_episode(episode_key)
+                if msg_h and fs_h > 0:
+                    from services.userbot_service import get_active_client as _gac3
+                    ub3 = await _gac3()
+                    if ub3:
+                        await _hls_ensure_header_cache(ub3, msg_h, dc_h, fs_h, episode_key)
+                info2 = _HLS_SEG_CACHE.get(episode_key, {})
+                tr = info2.get("tracks", [])
+                audio_tracks = [t for t in tr if t.get("type") == "audio"] if tr else []
+                sub_tracks = [t for t in tr if t.get("type") == "subs"] if tr else []
         except Exception:
             pass
     status["audio_tracks"] = audio_tracks
@@ -6452,7 +6597,7 @@ async def get_item_episodes(item_id: str):
         int_id_str = str(cat_int["id"]) if cat_int else vid
         label = vr["season_display"] or vr["title"] or f"Season {len(seasons)+1}"
         eps = [dict(e) for e in conn.execute(
-            "SELECT id, item_id, episode_key, episode_number, season_number, title, duration, telegram_msg_id, telegram_link, caption, file_size FROM item_episodes WHERE item_id=? OR item_id=? ORDER BY episode_number ASC", (vid, int_id_str)).fetchall()]
+            "SELECT id, item_id, episode_key, episode_number, season_number, title, duration, telegram_msg_id, telegram_link, caption, file_name, file_size FROM item_episodes WHERE item_id=? OR item_id=? ORDER BY episode_number ASC", (vid, int_id_str)).fetchall()]
         if not eps:
             # Fallback: buscar en BDs de plugins
             eps = _find_episodes_in_plugin_dbs(vid)
@@ -8199,6 +8344,37 @@ async def watch_progress(request: Request):
     update_progress(session.get("profile_id") or session["user_id"], body.get("item_id",""), body.get("episode_key") or "", body.get("episode_id",0), float(body.get("progress",0)), float(body.get("duration",0)), int(body.get("completed",0)), int(body.get("watched_state",0)))
     return {"success": True}
 
+@app.post(api_url("/api/watch/bulk"))
+async def watch_bulk(request: Request):
+    """Marca varios episodios como vistos de una vez (hasta X)."""
+    from services.favorites_service import bulk_mark_watched
+    from services.auth_service import get_session
+    session = get_session(request.cookies.get("tvcat_session",""))
+    if not session: raise HTTPException(401)
+    body = await request.json()
+    n = bulk_mark_watched(session.get("profile_id") or session["user_id"],
+                          body.get("item_id", ""), body.get("episodes") or [])
+    return {"success": True, "marked": n}
+
+@app.get(api_url("/api/watch/last-season"))
+async def watch_last_season_get(request: Request, item_id: str = ""):
+    from services.favorites_service import get_last_season
+    from services.auth_service import get_session
+    session = get_session(request.cookies.get("tvcat_session",""))
+    if not session: raise HTTPException(401)
+    return {"season": get_last_season(session.get("profile_id") or session["user_id"], item_id or "")}
+
+@app.post(api_url("/api/watch/last-season"))
+async def watch_last_season_set(request: Request):
+    from services.favorites_service import set_last_season
+    from services.auth_service import get_session
+    session = get_session(request.cookies.get("tvcat_session",""))
+    if not session: raise HTTPException(401)
+    body = await request.json()
+    ok = set_last_season(session.get("profile_id") or session["user_id"],
+                         body.get("item_id", ""), body.get("season", ""))
+    return {"success": bool(ok)}
+
 @app.get(api_url("/api/admin/log/tail"))
 async def admin_log_tail(request: Request, lines: int = 1000):
     from services.auth_service import get_session
@@ -8311,7 +8487,7 @@ async def sync_refresh():
 async def check_updates():
     return _plugin_loader.check_updates()
 
-_USER_PREF_KEYS = ("display_name", "avatar", "avatar_url", "color", "category_preferences", "watch_threshold_min", "watch_threshold_max", "hls_title_prefs", "header_image")
+_USER_PREF_KEYS = ("display_name", "avatar", "avatar_url", "color", "category_preferences", "watch_threshold_min", "watch_threshold_max", "hls_title_prefs", "header_image", "player_prefs")
 
 @app.get(api_url("/api/config"))
 async def get_config(request: Request):
@@ -8674,6 +8850,55 @@ async def admin_header_set(request: Request):
         d["fit"] = "cover"
     _header_setting_set(d)
     return {"ok": True, "server_default": d}
+
+# ─── Demanda de reproducción (F3 QueuePriority) ───
+@app.post(api_url("/api/playback/heartbeat"))
+async def playback_heartbeat(request: Request):
+    """Los reproductores avisan cada pocos segundos con su buffer.
+    Sin sesión no se registra (pero no se bloquea el player)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        from services.auth_service import get_session
+        token = request.cookies.get("tvcat_session", "")
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+        session = get_session(token) if token else None
+        if not session:
+            return {"ok": False}
+        from services import playback_demand as _pd
+        _pd.note_heartbeat(str((body or {}).get("player_id") or session.get("user_id")),
+                           (body or {}).get("buffered"))
+        _pd.evaluate()
+    except Exception:
+        pass
+    return {"ok": True}
+
+@app.post(api_url("/api/playback/stop"))
+async def playback_stop(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        from services.auth_service import get_session
+        token = request.cookies.get("tvcat_session", "")
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+        session = get_session(token) if token else None
+        if session:
+            from services import playback_demand as _pd
+            _pd.drop_player(str((body or {}).get("player_id") or session.get("user_id")))
+            _pd.evaluate()
+    except Exception:
+        pass
+    return {"ok": True}
 
 @app.get(api_url("/api/admin/users"))
 async def admin_users(request: Request):

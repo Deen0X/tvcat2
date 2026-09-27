@@ -721,6 +721,12 @@ function loadUserbotConfig() {
             if (fuw) fuw.value = settings.tg_fastul_workers || '8';
             var fus = document.getElementById('setting-tg-fastul-sessions');
             if (fus) fus.value = settings.tg_fastul_sessions || '1';
+            var bgd = document.getElementById('setting-tg-bg-downloads');
+            if (bgd) bgd.checked = String(settings.tg_bg_downloads || '0') === '1';
+            var blo = document.getElementById('setting-tg-buf-low');
+            if (blo) blo.value = settings.tg_buf_low || '24';
+            var bhi = document.getElementById('setting-tg-buf-high');
+            if (bhi) bhi.value = settings.tg_buf_high || '60';
         }
     });
 
@@ -1840,6 +1846,12 @@ window.saveTelegramSettings = function() {
     if (fdw) data.tg_fastdl_workers = String(Math.max(1, Math.min(16, parseInt(fdw.value, 10) || 8)));
     if (fuw) data.tg_fastul_workers = String(Math.max(1, Math.min(16, parseInt(fuw.value, 10) || 8)));
     if (fus) data.tg_fastul_sessions = String(Math.max(1, Math.min(8, parseInt(fus.value, 10) || 1)));
+    var bgd = document.getElementById('setting-tg-bg-downloads');
+    if (bgd) data.tg_bg_downloads = bgd.checked ? '1' : '0';
+    var blo = document.getElementById('setting-tg-buf-low');
+    if (blo) data.tg_buf_low = String(Math.max(4, Math.min(120, parseInt(blo.value, 10) || 24)));
+    var bhi = document.getElementById('setting-tg-buf-high');
+    if (bhi) data.tg_buf_high = String(Math.max(8, Math.min(300, parseInt(bhi.value, 10) || 60)));
     if (!Object.keys(data).length) return;
     window.API.ajax({
         method: 'POST',
@@ -2718,6 +2730,7 @@ function loadSettings() {
                         avatar_url: config.avatar_url || '',
                         color: config.color || '#e11d48',
                         header_image: config.header_image || {},
+                        player_prefs: config.player_prefs || {},
                         category_preferences: config.category_preferences || {}
                     };
                     try { if (window.refreshHiddenNav) window.refreshHiddenNav(); } catch (eH) {}

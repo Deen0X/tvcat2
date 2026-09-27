@@ -12,9 +12,10 @@
   "priority": 3,
   "js": [
     "hls.min.js?v=20260935z21",
-    "player_hls.js?v=20260914l"
+    "player_hls.js?v=20260923g"
   ],
   "css": [],
+  "formats": ["*"],
   "applies_to": [
     "media",
     "series",

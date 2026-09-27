@@ -128,6 +128,103 @@ def update_progress(profile_id: int, item_id: str, episode_key: str, episode_id:
     conn.close()
 
 
+def bulk_mark_watched(profile_id: int, item_id: str, episodes: list) -> int:
+    """Marca varios episodios como vistos (completed=1, watched_state=3) de una
+    vez. Conserva progress/duration existentes (no se inventa posición).
+    episodes: [{episode_id, episode_key, video_src}]. Devuelve nº marcados."""
+    n = 0
+    try:
+        conn = _get_conn()
+    except Exception:
+        return 0
+    try:
+        for ep in episodes or []:
+            try:
+                epk = str((ep or {}).get("episode_key") or "")
+                eid = int((ep or {}).get("episode_id") or 0)
+            except Exception:
+                continue
+            row = None
+            try:
+                if epk:
+                    row = conn.execute(
+                        "SELECT progress, duration FROM watch_progress WHERE profile_id=? AND item_id=? AND episode_key=?",
+                        (profile_id, item_id, epk)).fetchone()
+                if row is None:
+                    row = conn.execute(
+                        "SELECT progress, duration FROM watch_progress WHERE profile_id=? AND item_id=? AND episode_id=?",
+                        (profile_id, item_id, eid)).fetchone()
+            except Exception:
+                row = None
+            prog = float((row["progress"] if row else 0) or 0)
+            dur = float((row["duration"] if row else 0) or 0)
+            conn.execute("""
+                INSERT OR REPLACE INTO watch_progress
+                    (profile_id, item_id, episode_key, episode_id, progress, duration, updated_at, completed, watched_state)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1, 3)
+            """, (profile_id, item_id, epk, eid, prog, dur))
+            n += 1
+        conn.commit()
+    except Exception:
+        n = 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return n
+
+
+def get_last_season(profile_id: int, item_id: str):
+    """Última temporada vista de un título (o None)."""
+    try:
+        conn = _get_conn()
+    except Exception:
+        return None
+    try:
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS watch_last_season (profile_id INTEGER, item_id TEXT, season TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (profile_id, item_id))")
+        except Exception:
+            pass
+        row = conn.execute(
+            "SELECT season FROM watch_last_season WHERE profile_id=? AND item_id=?",
+            (profile_id, item_id)).fetchone()
+        return (row["season"] if row else None) or None
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def set_last_season(profile_id: int, item_id: str, season: str) -> bool:
+    """Guarda la última temporada vista de un título."""
+    if not item_id or season is None:
+        return False
+    try:
+        conn = _get_conn()
+    except Exception:
+        return False
+    try:
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS watch_last_season (profile_id INTEGER, item_id TEXT, season TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (profile_id, item_id))")
+        except Exception:
+            pass
+        conn.execute("INSERT OR REPLACE INTO watch_last_season (profile_id, item_id, season, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                     (profile_id, item_id, str(season)))
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def get_continue_watching(profile_id: int, limit: int = 200) -> list:
     """Items con al menos 1 episodio en estado 'viendo' (2 forzado, o auto con progreso dentro del rango min..max)."""
     tmin, tmax = _get_thresholds(profile_id)

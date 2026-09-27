@@ -782,7 +782,10 @@ async def _parallel_upload(client, file_path, file_size, threads, part_size_kb, 
                 await _tl_helpers._maybe_await(progress_callback(pos[0], file_size))
 
     async def _upload_range(c, indices):
+        from services.abort_flags import should_abort_upload, UploadAborted
         for idx in indices:
+            if should_abort_upload():
+                raise UploadAborted("subida detenida por el usuario")
             with open(file_path, 'rb') as f:
                 f.seek(idx * part_size)
                 part = f.read(part_size)

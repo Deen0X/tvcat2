@@ -170,6 +170,7 @@
         type: 'player',
         displayName: 'Reproductor TVCat TV',
         playerType: 'auto',
+        formats: ['mp4'],
         applies_to: ['media', 'series', 'video', 'anime', 'tv', 'peliculas'],
         action_category: 'playback',
         play: function(item) {

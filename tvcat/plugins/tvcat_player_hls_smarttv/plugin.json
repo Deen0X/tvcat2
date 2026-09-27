@@ -11,7 +11,7 @@
     "single_button":  true,
     "priority":  3,
     "js":  [
-               "hls_smarttv.js?v=20260935"
+               "hls_smarttv.js?v=20260923a"
            ],
     "css":  [
 

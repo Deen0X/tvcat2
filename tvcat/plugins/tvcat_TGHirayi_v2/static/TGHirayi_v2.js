@@ -647,10 +647,19 @@
             var html = '';
 
             // ─── Estado del worker ───
-            html += '<div style="display:flex;align-items:center;gap:8px;padding:8px;background:rgba(255,255,255,0.04);border-radius:6px;margin-bottom:8px;">';
-            html += '<span style="width:10px;height:10px;border-radius:50%;background:' + (paused ? '#eab308' : '#22c55e') + ';"></span>';
-            html += '<span style="flex:1;font-size:13px;">Worker: ' + (paused ? 'Pausado' : 'Activo') + '</span>';
-            html += '<button onclick="window._tgcopy2ToggleWorker()" style="padding:4px 10px;background:' + (paused ? '#22c55e' : '#eab308') + ';border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;">' + (paused ? 'Reanudar' : 'Pausar') + '</button>';
+            var wstate = res.worker_state || (paused ? 'pausada' : 'activa');
+            var wlabel = { activa: 'Activo', pausada: 'Pausado', detenida: 'Detenido (descargas)', detenida_plus: 'Detenido +' }[wstate] || wstate;
+            var wcolor = wstate === 'activa' ? '#22c55e' : (wstate === 'pausada' ? '#eab308' : '#ef4444');
+            html += '<div style="display:flex;align-items:center;gap:6px;padding:8px;background:rgba(255,255,255,0.04);border-radius:6px;margin-bottom:8px;flex-wrap:wrap;">';
+            html += '<span style="width:10px;height:10px;border-radius:50%;background:' + wcolor + ';flex-shrink:0;"></span>';
+            html += '<span style="flex:1;font-size:13px;min-width:120px;">Worker: ' + wlabel + '</span>';
+            if (wstate === 'activa') {
+                html += '<button onclick="window._tgcopy2SetWorkerState(\'pausada\')" title="Termina la fase en curso y no pilla más jobs" style="padding:4px 10px;background:#eab308;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;">Pausar</button>';
+                html += '<button onclick="window._tgcopy2SetWorkerState(\'detenida\')" title="Pausa + cancela descargas (las subidas terminan el fichero)" style="padding:4px 10px;background:#f97316;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;">Detener</button>';
+                html += '<button onclick="window._tgcopy2SetWorkerState(\'detenida_plus\')" title="Pausa + detiene descargas y subidas" style="padding:4px 10px;background:#ef4444;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;">Det+</button>';
+            } else {
+                html += '<button onclick="window._tgcopy2SetWorkerState(\'activa\')" style="padding:4px 10px;background:#22c55e;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;">Reanudar</button>';
+            }
             html += '</div>';
             // ─── Estado de archives (procesado en paralelo) ───
             var pArch = res.pending_archives || 0;
@@ -1126,7 +1135,14 @@ html += '</div>';
 
     // ─── Funciones globales para botones inline ───
     window._tgcopy2ToggleWorker = function() {
-        api(API + '/worker/toggle', { method: 'POST' }, function() {});
+        api(API + '/worker/toggle', { method: 'POST' }, function() {
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
+        });
+    };
+    window._tgcopy2SetWorkerState = function(state) {
+        api(API + '/worker/state', { method: 'POST', data: { state: state } }, function() {
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
+        });
     };
 
     window._tgcopy2Move = function(jobId, dir) {

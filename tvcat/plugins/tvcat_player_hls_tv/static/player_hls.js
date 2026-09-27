@@ -1091,11 +1091,32 @@
             version: "1.0.0",
             applies_to: ["media", "series", "video"],
             action_category: "playback",
-            play: function(item) {
+            play: function(item, ep) {
                 log("play called");
+                // Si viene episodio concreto (lista de episodios), resolver su
+                // índice por identidad en vez de reproducir siempre el 0.
+                function idxOf(list, target) {
+                    if (!target) return 0;
+                    try {
+                        var keys = ["episode_key", "id", "telegram_msg_id", "msg_id"];
+                        for (var k = 0; k < keys.length; k++) {
+                            var tv = target[keys[k]];
+                            if (tv === undefined || tv === null || tv === "") continue;
+                            for (var i = 0; i < list.length; i++) {
+                                if (list[i] && String(list[i][keys[k]]) === String(tv)) return i;
+                            }
+                        }
+                        if (target.episode_number) {
+                            for (var j = 0; j < list.length; j++) {
+                                if (String(list[j].episode_number) === String(target.episode_number)) return j;
+                            }
+                        }
+                    } catch (e) {}
+                    return 0;
+                }
                 var episodes = item.episodes || [];
                 if (episodes.length > 0) {
-                    hlsPlayMedia(item, episodes, 0);
+                    hlsPlayMedia(item, episodes, idxOf(episodes, ep));
                     return;
                 }
                 // Sin episodes en el item: el telegram_link del item puede ser el cover.
@@ -1107,7 +1128,7 @@
                     success: function(data) {
                         var allEps = (data && data.episodes) || [];
                         if (allEps.length === 0) { log("sin episodios tras cargar por API"); return; }
-                        hlsPlayMedia(item, allEps, 0);
+                        hlsPlayMedia(item, allEps, idxOf(allEps, ep));
                     },
                     error: function(e) { log("error cargando episodios: " + e); }
                 });

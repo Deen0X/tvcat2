@@ -134,7 +134,11 @@ def _build_location(file_id_obj):
 
 async def _get_media_session(client, dc_id):
     """Reutiliza la sesión de medios de ese DC (igual que `Client.get_file()`
-    por dentro): no reinventa autenticación ni import de autorización."""
+    por dentro): no reinventa autenticación ni import de autorización.
+    Todo acotado con timeouts: sin esto, un handshake colgado deja la
+    petición HTTP esperando eternamente (reproductor que "no inicia")."""
+    import asyncio as _aio
+    import time as _tm
     from pyrogram import raw
     from pyrogram.errors import AuthBytesInvalid
     from pyrogram.session import Auth, Session
@@ -143,34 +147,55 @@ async def _get_media_session(client, dc_id):
     if session:
         return session
 
+    _t0 = _tm.monotonic()
+    try:
+        _auth_key = await _aio.wait_for(
+            Auth(client, dc_id, await client.storage.test_mode()).create()
+            if dc_id != await client.storage.dc_id()
+            else _aio.sleep(0, result=await client.storage.auth_key()),
+            timeout=30)
+    except Exception as e:
+        print(f" [MEDIA-SESS] DC{dc_id}: auth falló ({type(e).__name__})", flush=True)
+        raise
     session = client.media_sessions[dc_id] = Session(
-        client, dc_id,
-        await Auth(client, dc_id, await client.storage.test_mode()).create()
-        if dc_id != await client.storage.dc_id()
-        else await client.storage.auth_key(),
+        client, dc_id, _auth_key,
         await client.storage.test_mode(),
         is_media=True,
     )
-    await session.start()
+    try:
+        await _aio.wait_for(session.start(), timeout=30)
+    except Exception as e:
+        print(f" [MEDIA-SESS] DC{dc_id}: start falló ({type(e).__name__})", flush=True)
+        try:
+            client.media_sessions.pop(dc_id, None)
+        except Exception:
+            pass
+        raise
 
     if dc_id != await client.storage.dc_id():
         for _ in range(3):
-            exported_auth = await client.invoke(
-                raw.functions.auth.ExportAuthorization(dc_id=dc_id)
-            )
             try:
-                await session.invoke(
+                exported_auth = await _aio.wait_for(
+                    client.invoke(raw.functions.auth.ExportAuthorization(dc_id=dc_id)),
+                    timeout=30)
+            except Exception as e:
+                print(f" [MEDIA-SESS] DC{dc_id}: export falló ({type(e).__name__})", flush=True)
+                raise
+            try:
+                await _aio.wait_for(session.invoke(
                     raw.functions.auth.ImportAuthorization(
-                        id=exported_auth.id, bytes=exported_auth.bytes
-                    )
-                )
+                        id=exported_auth.id, bytes=exported_auth.bytes)), timeout=30)
             except AuthBytesInvalid:
                 continue
+            except Exception as e:
+                print(f" [MEDIA-SESS] DC{dc_id}: import falló ({type(e).__name__})", flush=True)
+                raise
             else:
                 break
         else:
             raise AuthBytesInvalid
 
+    print(f" [MEDIA-SESS] DC{dc_id} lista en {_tm.monotonic() - _t0:.1f}s", flush=True)
     return session
 
 
@@ -318,10 +343,13 @@ async def fast_download_media(client, message, file_path: str,
     """Descarga el medio a `file_path` con N trozos en paralelo (1 sola conexión).
 
     `message`: mensaje Pyrogram o file_id (string). Si es file_id, `file_size`
-    es obligatorio. `workers`: nº de GetFile concurrentes (None = ajuste global
+    es obligatorio.     `workers`: nº de GetFile concurrentes (None = ajuste global
     `tg_fastdl_workers`, defecto 8; 1 = fallback). `progress`: callback
     `cb(cur, tot)` sync o async. `bulk_priority`: 0 streaming, 1 copia, 2 fondo.
     Devuelve `file_path` en éxito, None si hay que usar la descarga normal.
+    Sidecar F2 (`file_path.chunks`): los parciales se continúan, no se
+    borran (salvo fallback a descarga normal o parada cooperativa, que los
+    conserva para continuar).
     """
     try:
         from pyrogram.file_id import FileId
@@ -355,13 +383,49 @@ async def fast_download_media(client, message, file_path: str,
         bytes_done_lock = asyncio.Lock()
         loop = asyncio.get_running_loop()
 
-        # Preasignar el fichero al tamaño final (el parcial truncado se borra
-        # en el except general si la descarga no se completa).
-        fd = os.open(file_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        # Sidecar F2: offsets de chunks completados ('.chunks'). Si existe un
+        # parcial del tamaño final + sidecar, se continúa (no desde 0).
+        import json as _js_sc
+        chunks_side = file_path + ".chunks"
+        done = set()
         try:
-            os.ftruncate(fd, file_size)
-        finally:
-            os.close(fd)
+            if os.path.isfile(file_path) and os.path.getsize(file_path) == file_size \
+                    and os.path.isfile(chunks_side):
+                with open(chunks_side, "r", encoding="utf-8") as _fsc:
+                    done = {int(x) for x in _js_sc.load(_fsc)}
+                done = {o for o in done
+                        if isinstance(o, int) and 0 <= o < file_size and o % CHUNK_SIZE == 0}
+                bytes_done = min(len(done) * CHUNK_SIZE, file_size)
+        except Exception:
+            done = set()
+            bytes_done = 0
+
+        def _save_chunks():
+            try:
+                with open(chunks_side, "w", encoding="utf-8") as _fsc:
+                    _js_sc.dump(sorted(done), _fsc)
+            except Exception:
+                pass
+
+        # Preasignar el fichero al tamaño final (si ya existe del tamaño
+        # correcto se conserva para continuar; si no, se crea/trunca).
+        try:
+            _exists_ok = os.path.isfile(file_path) and os.path.getsize(file_path) == file_size
+        except Exception:
+            _exists_ok = False
+        if not _exists_ok:
+            done = set()
+            bytes_done = 0
+            try:
+                if os.path.isfile(chunks_side):
+                    os.remove(chunks_side)
+            except Exception:
+                pass
+            fd = os.open(file_path, os.O_WRONLY | os.O_CREAT, 0o644)
+            try:
+                os.ftruncate(fd, file_size)
+            finally:
+                os.close(fd)
 
         def _write_at(path, data, offset):
             # os.pwrite NO existe en Windows: open/seek/write/close por
@@ -372,6 +436,14 @@ async def fast_download_media(client, message, file_path: str,
 
         async def worker(chunk_index):
             nonlocal bytes_done
+            try:
+                from services.abort_flags import should_abort_download, DownloadAborted
+                if should_abort_download():
+                    raise DownloadAborted("descarga detenida por el usuario")
+            except DownloadAborted:
+                raise
+            except Exception:
+                pass
             offset = chunk_index * CHUNK_SIZE
             limit = min(CHUNK_SIZE, file_size - offset)
             # El limit se pide completo (offset % limit == 0); el servidor
@@ -385,22 +457,41 @@ async def fast_download_media(client, message, file_path: str,
             async with bytes_done_lock:
                 bytes_done += limit
                 current = bytes_done
+                done.add(offset)
+                _save_chunks()
             await _report_progress(progress, current, file_size)
 
-        await asyncio.gather(*(worker(i) for i in range(total_chunks)))
+        pending = [i for i in range(total_chunks) if (i * CHUNK_SIZE) not in done]
+        await asyncio.gather(*(worker(i) for i in pending))
 
         await _report_progress(progress, file_size, file_size)
+        try:
+            if os.path.isfile(chunks_side):
+                os.remove(chunks_side)
+        except Exception:
+            pass
         return file_path
 
     except _UnsupportedForFastDownload as e:
         log.info(f"fast_download: fallback a descarga normal ({e})")
     except Exception as e:
+        # Parada cooperativa: propagar sin fallback y SIN borrar el parcial.
+        try:
+            from services.abort_flags import DownloadAborted as _DAb
+        except Exception:
+            _DAb = None
+        if _DAb is not None and isinstance(e, _DAb):
+            raise
         log.warning(f"fast_download: fallo inesperado, fallback a descarga normal ({e})")
         # Borrar el parcial (truncado a tamaño final pero incompleto) para que
-        # el fallback no escriba sobre un fichero a medias.
+        # el fallback no escriba sobre un fichero a medias. El sidecar también
+        # (el fallback empieza de 0). En parada cooperativa no se llega aquí
+        # (se propaga arriba sin tocar nada).
         try:
             if file_path and os.path.exists(file_path):
                 os.remove(file_path)
+            if file_path and os.path.exists(file_path + ".chunks"):
+                os.remove(file_path + ".chunks")
         except Exception:
             pass
 

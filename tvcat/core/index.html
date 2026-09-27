@@ -544,6 +544,19 @@
                                 <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Sesiones subida:</label>
                                 <input type="number" id="setting-tg-fastul-sessions" min="1" max="8" step="1" value="1" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
                             </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Si OFF (defecto), la cola pausa sus descargas mientras se reproduce. Si ON, la cola puede seguir en segundo plano cuando el reproductor tiene buffer de sobra.">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Descargas en fondo:</label>
+                                <input type="checkbox" id="setting-tg-bg-downloads" style="accent-color:var(--accent);">
+                                <span style="font-size:0.72rem;color:var(--text-secondary);">permitir cola durante reproducción</span>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Si el buffer del reproductor baja de aquí (segundos), la cola cede la red.">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Buffer bajo (s):</label>
+                                <input type="number" id="setting-tg-buf-low" min="4" max="120" step="1" value="24" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="La cola solo usa la red sobrante cuando el buffer supera esto (segundos).">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Buffer alto (s):</label>
+                                <input type="number" id="setting-tg-buf-high" min="8" max="300" step="1" value="60" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
                         </div>
                     </div>
 
@@ -1031,6 +1044,7 @@
                 <div class="season-row">
                     <label for="season-selector" style="font-size: 0.85rem; color: var(--text-secondary);">Temporada:</label>
                     <select id="season-selector" class="season-combo" onchange="Catalog.onSeasonChange()"></select>
+                    <button id="season-mark-watched" title="Marcar vistos hasta el último visto de esta temporada" onclick="Catalog.markWatchedUpTo()" style="background:none;border:1px solid var(--border-color);color:var(--text-secondary);border-radius:6px;cursor:pointer;font-size:0.95rem;padding:3px 9px;line-height:1;">👁</button>
                 </div>
             </div>
             <div id="episodes-list" class="episodes-grid-floating"></div>
@@ -1044,9 +1058,9 @@
     <script src="js/assistants.js?v=20260910a"></script>    <script src="js/navEngine.js?v=20260923a"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
     <script src="js/inputHelper.js?v=20260903q"></script>
-    <script src="js/catalog.js?v=20260923e"></script>
-    <script src="js/player.js?v=20260801"></script>
+    <script src="js/catalog.js?v=20260923j"></script>
+    <script src="js/player.js?v=20260923b"></script>
     <script src="js/ui2.js?v=20260923c"></script>
-    <script src="js/app.js?v=20260923j"></script>
+    <script src="js/app.js?v=20260923l"></script>
 </body>
 </html>

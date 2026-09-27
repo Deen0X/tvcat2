@@ -370,12 +370,28 @@
         var customTimeoutSec = 3.5;
         var customLayerReady = false;
         try { var ct = localStorage.getItem("tvcat_player_hls_custom_controls_timeout"); if(ct!==null) customTimeoutSec = parseFloat(JSON.parse(ct))||3.5; } catch(e){}
-        function isCustomVisible() { return customLayer && parseFloat(customLayer.style.opacity||"0") >= 0.5; }
-        function showCustomLayer() { if (!customLayer || !customLayerReady) return; syncCustomLayerToVideo(); customLayer.style.opacity="1"; customLayer.style.visibility="visible"; setLayerInteractive(true); resetCustomTimer(); }
+        // Regla táctil 40%: si la capa está a <0.4 NO se acciona (el toque
+        // solo la muestra); el siguiente toque, ya visible, sí acciona.
+        var _ccJustShown = false;
+        var _ccJustShownTimer = null;
+        function isCustomVisible() { return customLayer && parseFloat(customLayer.style.opacity||"0") >= 0.4; }
+        function showCustomLayer() {
+            if (!customLayer || !customLayerReady) return;
+            if (parseFloat(customLayer.style.opacity||"0") < 0.4) {
+                _ccJustShown = true;
+                try { if (_ccJustShownTimer) clearTimeout(_ccJustShownTimer); } catch (e) {}
+                _ccJustShownTimer = setTimeout(function() { _ccJustShown = false; }, 800);
+            }
+            syncCustomLayerToVideo(); customLayer.style.opacity="1"; customLayer.style.visibility="visible"; setLayerInteractive(true); resetCustomTimer();
+        }
         function hideCustomLayer() { if (!customLayer) return; customLayer.style.opacity="0"; setLayerInteractive(false); setTimeout(function(){ if(customLayer && customLayer.style.opacity==="0") customLayer.style.visibility="hidden"; }, 220); }
         function resetCustomTimer(){ if(customHideTimer) clearTimeout(customHideTimer); customHideTimer=setTimeout(hideCustomLayer, customTimeoutSec*1000); }
         function setLayerInteractive(on){
             if(!customLayer) return;
+            // Solo habilitar interacción cuando la capa está >=40% visible.
+            if(on && parseFloat(customLayer.style.opacity||"0")<0.4){
+                customLayer.style.opacity="1"; customLayer.style.visibility="visible";
+            }
             var els=customLayer.querySelectorAll("[data-cc-interactive]");
             for(var i=0;i<els.length;i++) els[i].style.pointerEvents = on ? "auto" : "none";
         }
@@ -395,7 +411,17 @@
             img.onload=function(){ btn.style.background="transparent"; btn.style.border="none"; };
             img.onerror=function(){ this.style.display="none"; btn.textContent=fallbackText; btn.style.color=fallbackColor; btn.style.fontSize=fallbackSize; btn.style.fontWeight="600"; };
             btn.appendChild(img);
-            btn.addEventListener("click", function(e){ e.stopPropagation(); if(!isCustomVisible()){ showCustomLayer(); return; } resetCustomTimer(); try{ action(); }catch(err){ log("custom btn error "+err); } });
+            btn.addEventListener("click", function(e){
+                e.stopPropagation();
+                // Regla 40%: recién mostrada o aún <0.4 → solo mostrar, no accionar.
+                if (_ccJustShown || parseFloat(customLayer.style.opacity||"0") < 0.4) {
+                    _ccJustShown = false;
+                    try { if (_ccJustShownTimer) clearTimeout(_ccJustShownTimer); } catch (e2) {}
+                    showCustomLayer(); return;
+                }
+                if(!isCustomVisible()){ showCustomLayer(); return; }
+                resetCustomTimer(); try{ action(); }catch(err){ log("custom btn error "+err); }
+            });
             return btn;
         }
         if(!customLayer){
@@ -407,6 +433,12 @@
             btnClose.onmouseleave=function(){ this.style.opacity="0.6"; this.style.color="#fff"; this.style.background="rgba(0,0,0,0.4)"; };
             btnClose.addEventListener("click", function(e){
                 e.stopPropagation(); e.preventDefault();
+                // Regla 40%: recién mostrada → solo mostrar, no cerrar.
+                if (_ccJustShown || parseFloat(customLayer.style.opacity||"0") < 0.4) {
+                    _ccJustShown = false;
+                    try { if (_ccJustShownTimer) clearTimeout(_ccJustShownTimer); } catch (e2) {}
+                    showCustomLayer(); return;
+                }
                 log("close X clicked");
                 try{
                     if(document.fullscreenElement){ try{ document.exitFullscreen(); }catch(err){} }
@@ -417,18 +449,6 @@
                 }, 80);
             });
             customLayer.appendChild(btnClose);
-            var btnRestart=document.createElement("div"); btnRestart.id="cc-restart"; btnRestart.textContent="↻"; btnRestart.title="Reiniciar servidor"; btnRestart.setAttribute("data-cc-interactive","1");
-            btnRestart.style.cssText="position:absolute;top:1%;right:8%;width:36px;height:36px;text-align:center;line-height:30px;font-size:18px;color:#fff;background:rgba(180,0,0,0.7);border:1px solid #f88;border-radius:50%;cursor:pointer;z-index:11;pointer-events:none;";
-            btnRestart.addEventListener("click", function(e){
-                e.stopPropagation(); e.preventDefault();
-                if(!confirm("¿Reiniciar el servidor?\nSe reiniciará para todos los usuarios.")) return;
-                log("Restart solicitado desde HLS player");
-                fetch("/api/admin/restart", {method:"POST", credentials:"include"}).then(function(r){
-                    if(r.ok) alert("Reiniciando... reconecta en 10s");
-                    else alert("Error al reiniciar: "+r.status);
-                }).catch(function(err){ alert("Error reiniciar: "+err); });
-            });
-            customLayer.appendChild(btnRestart);
             // Icono + nombre del plugin arriba a la izquierda
             var titleWrap=document.createElement("div"); titleWrap.setAttribute("data-cc-interactive","1");
             titleWrap.style.cssText="position:absolute;top:1%;left:2%;display:flex;align-items:center;gap:8px;z-index:11;pointer-events:none;";
@@ -1002,11 +1022,32 @@
             version: "1.0.0",
             applies_to: ["media", "series", "video"],
             action_category: "playback",
-            play: function(item) {
+            play: function(item, ep) {
                 log("play called");
+                // Si viene episodio concreto (lista de episodios), resolver su
+                // índice por identidad en vez de reproducir siempre el 0.
+                function idxOf(list, target) {
+                    if (!target) return 0;
+                    try {
+                        var keys = ["episode_key", "id", "telegram_msg_id", "msg_id"];
+                        for (var k = 0; k < keys.length; k++) {
+                            var tv = target[keys[k]];
+                            if (tv === undefined || tv === null || tv === "") continue;
+                            for (var i = 0; i < list.length; i++) {
+                                if (list[i] && String(list[i][keys[k]]) === String(tv)) return i;
+                            }
+                        }
+                        if (target.episode_number) {
+                            for (var j = 0; j < list.length; j++) {
+                                if (String(list[j].episode_number) === String(target.episode_number)) return j;
+                            }
+                        }
+                    } catch (e) {}
+                    return 0;
+                }
                 var episodes = item.episodes || [];
                 if (episodes.length > 0) {
-                    hlsPlayMedia(item, episodes, 0);
+                    hlsPlayMedia(item, episodes, idxOf(episodes, ep));
                     return;
                 }
                 // Sin episodes en el item: el telegram_link del item puede ser el cover.
@@ -1018,7 +1059,7 @@
                     success: function(data) {
                         var allEps = (data && data.episodes) || [];
                         if (allEps.length === 0) { log("sin episodios tras cargar por API"); return; }
-                        hlsPlayMedia(item, allEps, 0);
+                        hlsPlayMedia(item, allEps, idxOf(allEps, ep));
                     },
                     error: function(e) { log("error cargando episodios: " + e); }
                 });

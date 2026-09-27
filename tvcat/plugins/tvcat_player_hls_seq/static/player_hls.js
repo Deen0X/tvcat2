@@ -16,7 +16,7 @@
     function ensureHls(callback) {
         if (typeof Hls !== "undefined") { callback(); return; }
         var s = document.createElement("script");
-        s.src = "/plugin-static/tvcat_player_hls/hls.min.js?v=20260902";
+        s.src = "/plugin-static/tvcat_player_hls_seq/hls.min.js?v=20260902";
         s.onload = callback;
         s.onerror = function() { log("hls.min.js no cargado, se usarÃ¡ nativo si es posible"); callback(); };
         document.head.appendChild(s);
@@ -200,7 +200,51 @@
         loadTitlePrefs();
 
         // El resume se resuelve asincrónicamente; usamos start=0 inicial y hls.js saltará con seek.
-        var playlistUrl = "/api/hls_seq/" + episodeKey + "/playlist.m3u8?prefetch=" + prefetchAhead + "&start=0";
+        // Sesión de reproducción (F1-ajuste): identifica la demanda de descarga;
+        // al cerrar (leave) los reintentos de esta sesión ya no relanzan.
+        try {
+            window._hlsSeqSid = 's' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+        } catch (e) { window._hlsSeqSid = 's' + String(Date.now()); }
+        window._hlsSeqReady = false;
+        window._hlsSeqReadyPolling = true;
+        window._hlsSeqResumeTime = 0;
+        var playlistUrl = "/api/hls_seq/" + episodeKey + "/playlist.m3u8?prefetch=" + prefetchAhead + "&start=0&sid=" + encodeURIComponent(window._hlsSeqSid);
+        // Pedir la playlist YA (arranca ensure/descarga en servidor) pero NO
+        // hacer loadSource hasta que la ventana esté lista (ver _gatedStart).
+        try { fetch(playlistUrl).catch(function(){}); } catch (eF) {}
+        // Poll de avance real cada 500ms (ventana desde el punto de resume).
+        function pollReady() {
+            try {
+                if (window._hlsSeqReady || !episodeKey) return;
+                if (playerModal.classList.contains("hidden") || playerModal.style.display === "none") {
+                    try { if (window._hlsSeqReadyTimer) { clearInterval(window._hlsSeqReadyTimer); window._hlsSeqReadyTimer = null; } } catch (e) {}
+                    window._hlsSeqReadyPolling = false;
+                    return;
+                }
+                var st = 0;
+                try { st = window._hlsSeqResumeTime || 0; } catch (e) {}
+                window.API.ajax({
+                    url: "/api/hls_seq/" + episodeKey + "/ready?start=" + Math.floor(st) + "&segs=2",
+                    success: function(r) {
+                        r = r || {};
+                        try { updateLoaderFill(r.pct || 0); } catch (e0) {}
+                        var txt = document.getElementById("hls-loader-text");
+                        if (r.phase === "header") { if (txt) txt.textContent = "Preparando cabecera…"; }
+                        else if (!r.ready) {
+                            var eta = (r.eta !== undefined && r.eta >= 0) ? " (~" + r.eta + "s)" : "";
+                            if (txt) txt.textContent = "Descargando " + (r.win_done_mb || 0) + " de " + (r.win_total_mb || 0) + " MB" + eta;
+                        } else {
+                            window._hlsSeqReady = true;
+                            if (txt) txt.textContent = "Listo";
+                        }
+                    },
+                    error: function() {}
+                });
+            } catch (e) {}
+        }
+        pollReady();
+        try { if (window._hlsSeqReadyTimer) clearInterval(window._hlsSeqReadyTimer); } catch (e) {}
+        window._hlsSeqReadyTimer = null;
         log("Reproduciendo HLS SEQ (master): " + playlistUrl);
 
         // Resume: buscar progreso previo (igual que tvcat_player)
@@ -220,6 +264,7 @@
                         }
                         if(resumeTime>5){
                             log("Resume detectado: "+resumeTime+"s");
+                            try { window._hlsSeqResumeTime = resumeTime; } catch (eR) {}
                             var applyResume=function(){
                                 try{ if(videoPlayer.duration && resumeTime > videoPlayer.duration-10) return; videoPlayer.currentTime=resumeTime; log("Reanudando en "+resumeTime); }catch(e){ log("resume error "+e); }
                             };
@@ -319,14 +364,14 @@
             var loaderImgWrap=document.createElement("div");
             loaderImgWrap.style.cssText="position:relative;width:160px;height:160px;";
             var imgGray=document.createElement("img");
-            imgGray.src="/plugin-static/tvcat_player_hls/plugin_icon.png";
+            imgGray.src="/plugin-static/tvcat_player_hls_seq/plugin_icon.png";
             imgGray.style.cssText="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;filter:grayscale(1) brightness(0.5);";
             imgGray.onerror=function(){ this.style.display="none"; var em=document.createElement("div"); em.textContent="ðŸ“¡"; em.style.cssText="position:absolute;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:80px;"; loaderImgWrap.appendChild(em); };
             var imgColorWrap=document.createElement("div");
             imgColorWrap.id="hls-loader-fill";
             imgColorWrap.style.cssText="position:absolute;bottom:0;left:0;width:100%;height:0%;overflow:hidden;transition:height 0.3s;";
             var imgColor=document.createElement("img");
-            imgColor.src="/plugin-static/tvcat_player_hls/plugin_icon.png";
+            imgColor.src="/plugin-static/tvcat_player_hls_seq/plugin_icon.png";
             imgColor.style.cssText="position:absolute;bottom:0;left:0;width:160px;height:160px;object-fit:contain;";
             imgColor.onerror=function(){ this.style.display="none"; var em2=document.createElement("div"); em2.textContent="ðŸ“¡"; em2.style.cssText="position:absolute;bottom:0;left:0;width:160px;height:160px;display:flex;align-items:center;justify-content:center;font-size:80px;color:#4a9eff;"; imgColorWrap.appendChild(em2); };
             imgColorWrap.appendChild(imgColor);
@@ -413,16 +458,28 @@
         var customTimeoutSec = 3.5;
         var customLayerReady = false;
         try { var ct = localStorage.getItem("tvcat_player_hls_custom_controls_timeout"); if(ct!==null) customTimeoutSec = parseFloat(JSON.parse(ct))||3.5; } catch(e){}
-        function isCustomVisible() { return customLayer && parseFloat(customLayer.style.opacity||"0") >= 0.5; }
-        function showCustomLayer() { if (!customLayer || !customLayerReady) return; syncCustomLayerToVideo(); customLayer.style.opacity="1"; customLayer.style.visibility="visible"; setLayerInteractive(true); resetCustomTimer(); }
+        // Regla táctil 40%: si la capa está a <0.4 NO se acciona (el toque
+        // solo la muestra); el siguiente toque, ya visible, sí acciona.
+        var _ccJustShown = false;
+        var _ccJustShownTimer = null;
+        function isCustomVisible() { return customLayer && parseFloat(customLayer.style.opacity||"0") >= 0.4; }
+        function showCustomLayer() {
+            if (!customLayer || !customLayerReady) return;
+            if (parseFloat(customLayer.style.opacity||"0") < 0.4) {
+                _ccJustShown = true;
+                try { if (_ccJustShownTimer) clearTimeout(_ccJustShownTimer); } catch (e) {}
+                _ccJustShownTimer = setTimeout(function() { _ccJustShown = false; }, 800);
+            }
+            syncCustomLayerToVideo(); customLayer.style.opacity="1"; customLayer.style.visibility="visible"; setLayerInteractive(true); resetCustomTimer();
+        }
         function hideCustomLayer() { if (!customLayer) return; customLayer.style.opacity="0"; setLayerInteractive(false); setTimeout(function(){ if(customLayer && customLayer.style.opacity==="0") customLayer.style.visibility="hidden"; }, 220); }
         function resetCustomTimer(){ if(customHideTimer) clearTimeout(customHideTimer); customHideTimer=setTimeout(hideCustomLayer, customTimeoutSec*1000); }
         function setLayerInteractive(on){
             if(!customLayer) return;
-            // Solo habilitar interacción cuando la capa está >=50% visible.
-            // Si on=true pero opacidad <0.5, se fuerza a 1 para que 'mantener presionado'
-            // active al superar el 50%. Si on=false, se deshabilita si o si.
-            if(on && parseFloat(customLayer.style.opacity||"0")<0.5){
+            // Solo habilitar interacción cuando la capa está >=40% visible.
+            // Si on=true pero opacidad <0.4, se fuerza a 1 para que 'mantener presionado'
+            // active al superar el 40%. Si on=false, se deshabilita si o si.
+            if(on && parseFloat(customLayer.style.opacity||"0")<0.4){
                 customLayer.style.opacity="1"; customLayer.style.visibility="visible";
             }
             var els=customLayer.querySelectorAll("[data-cc-interactive]");
@@ -439,12 +496,22 @@
             var btn=document.createElement("div"); btn.id=id;
             btn.setAttribute("data-cc-interactive","1");
             btn.style.cssText="position:absolute;left:"+leftPct+"%;top:"+topPct+"%;width:60px;height:60px;margin-left:-30px;margin-top:-30px;background:rgba(0,0,0,0.7);border:1px solid #888;text-align:center;line-height:60px;cursor:pointer;z-index:10;pointer-events:none;";
-            var img=document.createElement("img"); img.src="/plugin-static/tvcat_player_hls/"+imgName;
+            var img=document.createElement("img"); img.src="/plugin-static/tvcat_player_hls_seq/"+imgName;
             img.style.cssText="width:48px;height:48px;margin-top:6px;";
             img.onload=function(){ btn.style.background="transparent"; btn.style.border="none"; };
             img.onerror=function(){ this.style.display="none"; btn.textContent=fallbackText; btn.style.color=fallbackColor; btn.style.fontSize=fallbackSize; btn.style.fontWeight="600"; };
             btn.appendChild(img);
-            btn.addEventListener("click", function(e){ e.stopPropagation(); if(!isCustomVisible()){ showCustomLayer(); return; } resetCustomTimer(); try{ action(); }catch(err){ log("custom btn error "+err); } });
+            btn.addEventListener("click", function(e){
+                e.stopPropagation();
+                // Regla 40%: recién mostrada o aún <0.4 → solo mostrar, no accionar.
+                if (_ccJustShown || parseFloat(customLayer.style.opacity||"0") < 0.4) {
+                    _ccJustShown = false;
+                    try { if (_ccJustShownTimer) clearTimeout(_ccJustShownTimer); } catch (e2) {}
+                    showCustomLayer(); return;
+                }
+                if(!isCustomVisible()){ showCustomLayer(); return; }
+                resetCustomTimer(); try{ action(); }catch(err){ log("custom btn error "+err); }
+            });
             return btn;
         }
         if(!customLayer){
@@ -456,6 +523,12 @@
             btnClose.onmouseleave=function(){ this.style.opacity="0.6"; this.style.color="#fff"; this.style.background="rgba(0,0,0,0.4)"; };
             btnClose.addEventListener("click", function(e){
                 e.stopPropagation(); e.preventDefault();
+                // Regla 40%: recién mostrada → solo mostrar, no cerrar.
+                if (_ccJustShown || parseFloat(customLayer.style.opacity||"0") < 0.4) {
+                    _ccJustShown = false;
+                    try { if (_ccJustShownTimer) clearTimeout(_ccJustShownTimer); } catch (e2) {}
+                    showCustomLayer(); return;
+                }
                 log("close X clicked");
                 try{
                     if(document.fullscreenElement){ try{ document.exitFullscreen(); }catch(err){} }
@@ -466,23 +539,11 @@
                 }, 80);
             });
             customLayer.appendChild(btnClose);
-            var btnRestart=document.createElement("div"); btnRestart.id="cc-restart"; btnRestart.textContent="↻"; btnRestart.title="Reiniciar servidor"; btnRestart.setAttribute("data-cc-interactive","1");
-            btnRestart.style.cssText="position:absolute;top:1%;left:2%;width:36px;height:36px;text-align:center;line-height:30px;font-size:18px;color:#fff;background:rgba(180,0,0,0.7);border:1px solid #f88;border-radius:50%;cursor:pointer;z-index:11;pointer-events:none;";
-            btnRestart.addEventListener("click", function(e){
-                e.stopPropagation(); e.preventDefault();
-                if(!confirm("¿Reiniciar el servidor?\nSe reiniciará para todos los usuarios.")) return;
-                log("Restart solicitado desde HLS player");
-                fetch("/api/admin/restart", {method:"POST", credentials:"include"}).then(function(r){
-                    if(r.ok) alert("Reiniciando... reconecta en 10s");
-                    else alert("Error al reiniciar: "+r.status);
-                }).catch(function(err){ alert("Error reiniciar: "+err); });
-            });
-            customLayer.appendChild(btnRestart);
             // Icono + nombre del plugin arriba a la izquierda
             var titleWrap=document.createElement("div"); titleWrap.setAttribute("data-cc-interactive","1");
             titleWrap.style.cssText="position:absolute;top:1%;left:7%;display:flex;align-items:center;gap:8px;z-index:11;pointer-events:none;";
             var iconImg=document.createElement("img");
-            iconImg.src="/plugin-static/tvcat_player_hls/plugin_icon.png";
+            iconImg.src="/plugin-static/tvcat_player_hls_seq/plugin_icon.png";
             iconImg.style.cssText="width:28px;height:28px;border-radius:4px;object-fit:cover;";
             iconImg.onerror=function(){ this.style.display="none"; var em=document.createElement("span"); em.textContent="ðŸ“¡"; em.style.fontSize="22px"; titleWrap.insertBefore(em, titleWrap.firstChild); };
             titleWrap.appendChild(iconImg);
@@ -704,7 +765,9 @@
                         var cur = videoPlayer.currentTime || 0;
                         if (h) {
                             // Vía ligera: recargar el MASTER con la pista elegida (conserva SUBTITLES).
-                            var newUrl = "/api/hls_seq/" + episodeKey + "/playlist.m3u8?audio=" + idx;
+                            var _sidA = "";
+                            try { if (window._hlsSeqSid) _sidA = "&sid=" + encodeURIComponent(window._hlsSeqSid); } catch (eS) {}
+                            var newUrl = "/api/hls_seq/" + episodeKey + "/playlist.m3u8?audio=" + idx + _sidA;
                             log("loadSource audio=" + idx + " " + newUrl + " cur=" + cur);
                             var onParsed = function(){ try{ if(cur>0){ videoPlayer.currentTime = cur; } videoPlayer.play(); }catch(e){} try{ h.off(Hls.Events.MANIFEST_PARSED, onParsed); }catch(e){} };
                             h.on(Hls.Events.MANIFEST_PARSED, onParsed);
@@ -863,6 +926,11 @@
                     }
                     // actualizar loader segÃºn bloques faltantes del segmento actual (X -> 0)
                     try{
+                        // Mientras el gate-ready está activo, el texto/fill los lleva
+                        // el poll de /ready (no pisar); al arrancar, este retoma.
+                        if (window._hlsSeqReadyPolling && !window._hlsSeqReady) {
+                            log("loader: gate-ready manda, skip legacy");
+                        } else {
                         log("cache-status loader seg="+(data.loader_seg||"-")+" miss="+(data.loader_missing||0)+"/"+(data.loader_initial||0)+" filled="+data.filled_blocks+"/"+data.total_blocks);
                         if(data && data.loader_initial && data.loader_initial>0){
                             var curMiss = data.loader_missing||0;
@@ -879,6 +947,7 @@
                             updateLoaderFill(pct2);
                             if(videoPlayer.readyState>=2 && hlsLoaderVisible && pct2>10) hideLoader();
                         }
+                        }
                     }catch(e){ log("loader update error "+e); }
                     // actualizar punto blanco de reproducciÃ³n
                     var dur = videoPlayer.duration || 0;
@@ -893,6 +962,9 @@
         }
         pollCacheStatus();
         var cachePollTimer = setInterval(pollCacheStatus, 1000);
+        // Poll de avance real: aquí playerModal ya existe (arriba aún no).
+        try { if (window._hlsSeqReadyTimer) clearInterval(window._hlsSeqReadyTimer); } catch (e) {}
+        window._hlsSeqReadyTimer = setInterval(function() { try { pollReady(); } catch (e) {} }, 500);
         // limpiar al cerrar el player (best effort)
         if (window.__hlsCachePollTimer) clearInterval(window.__hlsCachePollTimer);
         window.__hlsCachePollTimer = cachePollTimer;
@@ -902,6 +974,10 @@
             if (_leaveSentFor === episodeKey) return;
             _leaveSentFor = episodeKey;
             customLayerReady=false;
+            try { if (window.__hlsSeqBeat) { clearInterval(window.__hlsSeqBeat); window.__hlsSeqBeat = null; } } catch(e) {}
+            try { if (window._hlsSeqReadyTimer) { clearInterval(window._hlsSeqReadyTimer); window._hlsSeqReadyTimer = null; } } catch(e) {}
+            window._hlsSeqReadyPolling = false;
+            try { if (typeof playbackStop === 'function') playbackStop(); } catch(e) {}
             try{
                 if(customLayer){
                     customLayer.style.opacity="0"; customLayer.style.visibility="hidden"; setLayerInteractive(false);
@@ -930,12 +1006,45 @@
                         for(var hi3=0; hi3<hideEls3.length; hi3++) try{ hideEls3[hi3].style.display=""; }catch(e){}
                     }catch(e){}
                     try { if (episodeKey) window.API.ajax({ method: 'POST', url: '/api/hls_seq/' + episodeKey + '/leave' }); } catch(e) {}
+                    try { if (window.__hlsSeqBeat) { clearInterval(window.__hlsSeqBeat); window.__hlsSeqBeat = null; } } catch(e) {}
+                    try { if (typeof playbackStop === 'function') playbackStop(); } catch(e) {}
                     try { if (videoPlayer._hls) { videoPlayer._hls.stopLoad(); videoPlayer._hls.destroy(); videoPlayer._hls = null; } } catch(e) {}
                     try { videoPlayer.pause(); } catch(e) {}
                     return origClosePlayer.apply(this, arguments);
                 };
                 window.closePlayer._hlsWrapped = true;
             }
+        } catch(e) {}
+        // Cierre de pestaña/recarga sin pasar por closePlayer: leave por beacon.
+        try {
+            if (!window._hlsSeqPagehide) {
+                window._hlsSeqPagehide = true;
+                var _seqLeaveBeacon = function() {
+                    try {
+                        if (navigator.sendBeacon) navigator.sendBeacon('/api/hls_seq/' + episodeKey + '/leave', '{}');
+                    } catch(e) {}
+                    try { if (window.__hlsSeqBeat) { clearInterval(window.__hlsSeqBeat); window.__hlsSeqBeat = null; } } catch(e) {}
+                };
+                window.addEventListener('pagehide', _seqLeaveBeacon);
+                window.addEventListener('beforeunload', _seqLeaveBeacon);
+            }
+        } catch(e) {}
+        // Heartbeat al árbitro (F3): la cola cede descargas mientras se ve.
+        // Reusa el helper del core si está cargado; si no, latido directo.
+        try {
+            if (window.__hlsSeqBeat) clearInterval(window.__hlsSeqBeat);
+            window.__hlsSeqBeat = setInterval(function() {
+                try {
+                    if (typeof playbackHeartbeat === 'function') { playbackHeartbeat(false); return; }
+                    var v = videoPlayer, buf = 0;
+                    try {
+                        if (v && v.buffered && v.buffered.length) buf = Math.max(0, v.buffered.end(v.buffered.length - 1) - (v.currentTime || 0));
+                    } catch(e0) {}
+                    window.API.ajax({ method: 'POST', url: '/api/playback/heartbeat',
+                        data: { player_id: 'hlsseq-' + episodeKey, buffered: Math.round(buf) },
+                        success: function(){}, error: function(){} });
+                } catch(e) {}
+            }, 5000);
         } catch(e) {}
         // WebKit antigua (Tizen 2.4) no tiene MutationObserver â€” guard para no romper registro del plugin
         try {
@@ -1021,13 +1130,13 @@
                 levelLoadingTimeOut: 15000,
                 fragLoadingMaxRetry: 1000,
                 fragLoadingMaxRetryTimeout: 0,
-                fragLoadingRetryDelay: 500,
+                fragLoadingRetryDelay: 4000,
                 manifestLoadingMaxRetry: 1000,
                 manifestLoadingMaxRetryTimeout: 0,
-                manifestLoadingRetryDelay: 500,
+                manifestLoadingRetryDelay: 2000,
                 levelLoadingMaxRetry: 1000,
                 levelLoadingMaxRetryTimeout: 0,
-                levelLoadingRetryDelay: 500
+                levelLoadingRetryDelay: 2000
             });
             videoPlayer._hls = hls;
             window._autoSelDone = {audio:false, subs:false};
@@ -1262,8 +1371,10 @@
                     var elapsed = Date.now() - t0;
                     var tpref = null;
                     try{ tpref = (window._hlsTitlePrefs && currentItemId && window._hlsTitlePrefs[currentItemId]) ? window._hlsTitlePrefs[currentItemId] : null; }catch(e5){}
-                    if((audT && titleReady) || elapsed > 8000){
+                    if((audT && titleReady && window._hlsSeqReady) || elapsed > 8000){
                         window._hlsSeqGatedStarted = true;
+                        window._hlsSeqReadyPolling = false;
+                        try { if (window._hlsSeqReadyTimer) { clearInterval(window._hlsSeqReadyTimer); window._hlsSeqReadyTimer = null; } } catch (eRT) {}
                         var startAudio = 0;
                         try{
                             if(tpref && tpref.audio!=null && tpref.audio>=0){ startAudio = tpref.audio; }
@@ -1354,13 +1465,35 @@
             displayName: "Player HLS SEQ",
             playerType: "hls",
             version: "1.0.0",
+            formats: ["*"],
             applies_to: ["media", "series", "video"],
             action_category: "playback",
-            play: function(item) {
+            play: function(item, ep) {
                 log("play called");
+                // Si viene episodio concreto (lista de episodios), resolver su
+                // índice por identidad en vez de reproducir siempre el 0.
+                function idxOf(list, target) {
+                    if (!target) return 0;
+                    try {
+                        var keys = ["episode_key", "id", "telegram_msg_id", "msg_id"];
+                        for (var k = 0; k < keys.length; k++) {
+                            var tv = target[keys[k]];
+                            if (tv === undefined || tv === null || tv === "") continue;
+                            for (var i = 0; i < list.length; i++) {
+                                if (list[i] && String(list[i][keys[k]]) === String(tv)) return i;
+                            }
+                        }
+                        if (target.episode_number) {
+                            for (var j = 0; j < list.length; j++) {
+                                if (String(list[j].episode_number) === String(target.episode_number)) return j;
+                            }
+                        }
+                    } catch (e) {}
+                    return 0;
+                }
                 var episodes = item.episodes || [];
                 if (episodes.length > 0) {
-                    hlsPlayMedia(item, episodes, 0);
+                    hlsPlayMedia(item, episodes, idxOf(episodes, ep));
                     return;
                 }
                 // Sin episodes en el item: el telegram_link del item puede ser el cover.
@@ -1372,7 +1505,7 @@
                     success: function(data) {
                         var allEps = (data && data.episodes) || [];
                         if (allEps.length === 0) { log("sin episodios tras cargar por API"); return; }
-                        hlsPlayMedia(item, allEps, 0);
+                        hlsPlayMedia(item, allEps, idxOf(allEps, ep));
                     },
                     error: function(e) { log("error cargando episodios: " + e); }
                 });

@@ -47,12 +47,128 @@ os.makedirs(_CACHE_DIR, exist_ok=True)
 _worker_task: Optional[asyncio.Task] = None
 _worker_paused = True  # Inicia en pausa
 _worker_running = False
+# F1 QueuePriority: estados 'activa' | 'pausada' | 'detenida' | 'detenida_plus'.
+# _worker_paused se mantiene sincronizado (True si estado != activa) para no
+# tocar todos los chequeos existentes.
+_WORKER_STATES = ("activa", "pausada", "detenida", "detenida_plus")
+_worker_state = "pausada"
+
+
+def _set_worker_state(state: str) -> str:
+    """Fija el estado y sincroniza pausas + banderas de parada cooperativa."""
+    global _worker_state, _worker_paused
+    if state not in _WORKER_STATES:
+        state = "pausada"
+    _worker_state = state
+    _worker_paused = (state != "activa")
+    # F5: al detener, suspender el recode en curso (0% CPU, continúa luego);
+    # al activar, reanudarlo.
+    try:
+        if state in ("detenida", "detenida_plus"):
+            _encode_suspend()
+        elif state == "activa":
+            _encode_resume()
+    except Exception:
+        pass
+    try:
+        try:
+            from services import abort_flags as _af
+        except Exception:
+            from tvcat.services import abort_flags as _af
+        if state == "activa":
+            _af.clear()
+        elif state == "detenida":
+            _af.set_stop_download(True)
+            _af.set_stop_upload(False)
+        elif state == "detenida_plus":
+            _af.set_stop_download(True)
+            _af.set_stop_upload(True)
+        else:  # pausada: terminar fase en curso sin abortos
+            _af.set_stop_download(False)
+            _af.set_stop_upload(False)
+    except Exception:
+        pass
+    return _worker_state
 _worker_gen = 0  # generacion para evitar race condition
 _current_job: Optional[dict] = None
 
 # Registro del proceso ffmpeg en curso (recodificación). Un solo encode activo a la vez
 # (slot de procesado de archives); permite matarlo desde la API con confirmación.
 _encode_proc_registry: dict = {}
+
+
+def _recode_max_threads() -> int:
+    """Hilos máx. para ffmpeg recode. Config `recode_max_threads` (0/auto =
+    cpu-1, mín. 1). F5 QueuePriority."""
+    try:
+        cfg = _load_config()
+        n = int(cfg.get("recode_max_threads") or 0)
+        if n > 0:
+            return max(1, min(64, n))
+    except Exception:
+        pass
+    try:
+        import os as _os
+        return max(1, (_os.cpu_count() or 2) - 1)
+    except Exception:
+        return 1
+
+
+def _encode_proc():
+    try:
+        p = _encode_proc_registry.get("proc")
+        if p is not None and p.poll() is None:
+            return p
+    except Exception:
+        pass
+    return None
+
+
+def _encode_suspend() -> bool:
+    """F5: congela el ffmpeg en curso a 0% CPU sin perder el pase (SIGSTOP o
+    psutil.suspend). Vuelve con _encode_resume()."""
+    try:
+        p = _encode_proc()
+        if p is None:
+            return False
+        try:
+            import psutil as _ps
+            _ps.Process(p.pid).suspend()
+            print(f"[TGHirayi_v2] Encode pid {p.pid} suspendido", flush=True)
+            return True
+        except Exception:
+            pass
+        if os.name != "nt":
+            import signal as _sg
+            os.kill(p.pid, _sg.SIGSTOP)
+            print(f"[TGHirayi_v2] Encode pid {p.pid} SIGSTOP", flush=True)
+            return True
+    except Exception as e:
+        print(f"[TGHirayi_v2] No se pudo suspender encode: {e}", flush=True)
+    return False
+
+
+def _encode_resume() -> bool:
+    """F5: reanuda un encode suspendido (SIGCONT o psutil.resume)."""
+    try:
+        p = _encode_proc()
+        if p is None:
+            return False
+        try:
+            import psutil as _ps
+            _ps.Process(p.pid).resume()
+            print(f"[TGHirayi_v2] Encode pid {p.pid} reanudado", flush=True)
+            return True
+        except Exception:
+            pass
+        if os.name != "nt":
+            import signal as _sg
+            os.kill(p.pid, _sg.SIGCONT)
+            print(f"[TGHirayi_v2] Encode pid {p.pid} SIGCONT", flush=True)
+            return True
+    except Exception as e:
+        print(f"[TGHirayi_v2] No se pudo reanudar encode: {e}", flush=True)
+    return False
 
 # ─── Slot de procesado de ARCHIVES en segundo plano ───────────────
 # 1 slot: extraer+recodificar un archive corre como asyncio.Task independiente del
@@ -209,6 +325,7 @@ class ConfigUpdate(BaseModel):
     upload_threads: Optional[int] = None       # Hilos subida (Telethon paralelo / workers fast pyro)
     pyro_workers: Optional[int] = None         # Workers de red Pyrofork (>2GB)
     download_threads: Optional[int] = None     # Hilos descarga (fast pyro N GetFile / Telethon paralelo)
+    recode_max_threads: Optional[int] = None     # Hilos máx. ffmpeg recode (0/auto = cpu-1)
     download_chunk_size_kb: Optional[int] = None
     real_copy_if_owner: Optional[bool] = None   # CB1: si el origen es del usuario → copia real en destino 1
     real_copy_rest: Optional[bool] = None       # CB2: copia real en el resto (solo si hay primera copia real)
@@ -343,6 +460,7 @@ def _load_config():
         "upload_threads": 4,
         "pyro_workers": 16,
         "download_threads": 8,
+        "recode_max_threads": 0,
         "download_chunk_size_kb": 1024,
         "real_copy_if_owner": False,
         "real_copy_rest": False,
@@ -786,6 +904,7 @@ async def get_config(request: Request):
         "sessions": [{"name": s["name"], "tg_name": s.get("tg_name", ""), "is_active": s.get("is_active", 0)} for s in sessions],
         "worker_paused": _worker_paused,
         "worker_running": _worker_running,
+        "worker_state": _worker_state,
     }
 
 
@@ -807,6 +926,8 @@ async def update_config(body: ConfigUpdate, request: Request):
         cfg["pyro_workers"] = max(1, min(64, body.pyro_workers))
     if body.download_threads is not None:
         cfg["download_threads"] = max(1, min(16, body.download_threads))
+    if body.recode_max_threads is not None:
+        cfg["recode_max_threads"] = max(0, min(64, int(body.recode_max_threads or 0)))
     if body.download_chunk_size_kb is not None:
         cfg["download_chunk_size_kb"] = max(64, min(4096, body.download_chunk_size_kb))
     if body.real_copy_if_owner is not None:
@@ -1712,6 +1833,7 @@ async def list_queue(request: Request):
         "current_job": _public_job(current) if current else current,
         "worker_paused": _worker_paused,
         "worker_running": _worker_running,
+        "worker_state": _worker_state,
         "pending_archives": len(_count_pending_archives(db.get("queue", []))),
         "pending_archives_info": _pending_archives_info(db.get("queue", [])),
         "archive_slot_owner": _archive_slot_owner,
@@ -1807,7 +1929,7 @@ async def add_to_queue(body: QueueAdd, request: Request):
         job["needs_pyro"] = False
     _save_db(db)
     # Si el worker esta pausado y hay trabajos, sugerir reanudar
-    return {"ok": True, "job_id": job["id"], "worker_paused": _worker_paused}
+    return {"ok": True, "job_id": job["id"], "worker_paused": _worker_paused, "worker_state": _worker_state}
 
 
 @router.delete("/api/telegram-copy-v2/queue/{job_id}")
@@ -1822,6 +1944,23 @@ async def remove_job(job_id: str, request: Request):
     if job and job.get("encode_state") and _pid_alive(job.get("encode_state", {}).get("pid")):
         _kill_pid(job["encode_state"]["pid"])
         print(f"[TGHirayi_v2] Job {job_id} eliminado: ffmpeg pid {job['encode_state']['pid']} matado", flush=True)
+    # F5: si el encode EN CURSO es de este job, matarlo (Eliminar cancela recode).
+    try:
+        if _encode_proc_registry.get("job_id") in (None, job_id):
+            _ep = _encode_proc()
+            if _ep is not None:
+                try:
+                    _ep.kill()
+                    try:
+                        _ep.wait(timeout=10)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                _encode_proc_registry.pop("proc", None)
+                print(f"[TGHirayi_v2] Job {job_id} eliminado: encode en curso cancelado", flush=True)
+    except Exception:
+        pass
     if job:
         _cleanup_archive_workdir(job_id)
     db["queue"] = [j for j in db.get("queue", []) if j["id"] != job_id]
@@ -2545,7 +2684,7 @@ async def toggle_worker(request: Request):
     if not session or session["role"] != "admin":
         raise HTTPException(403, "Solo admin")
     global _worker_paused, _worker_task, _worker_running, _current_job, _worker_gen
-    _worker_paused = not _worker_paused
+    _set_worker_state("activa" if _worker_paused else "pausada")
     if not _worker_paused:
         # Al reanudar: refrescar pausas por Pyrogram (misma pasada que al arrancar).
         try:
@@ -2558,7 +2697,34 @@ async def toggle_worker(request: Request):
             _worker_running = False
             _current_job = None
             _worker_task = asyncio.ensure_future(_start_worker(_worker_gen))
-    return {"ok": True, "paused": _worker_paused}
+    return {"ok": True, "paused": _worker_paused, "worker_state": _worker_state}
+
+
+@router.post("/api/telegram-copy-v2/worker/state")
+async def set_worker_state(request: Request):
+    """F1: fija el estado (activa|pausada|detenida|detenida_plus). Solo admin.
+    Al pasar a activa se asegura worker corriendo (igual que el toggle)."""
+    session = _session_user(request)
+    if not session or session["role"] != "admin":
+        raise HTTPException(403, "Solo admin")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    state = str((body or {}).get("state") or "pausada")
+    global _worker_task, _worker_running, _current_job, _worker_gen
+    _set_worker_state(state)
+    if _worker_state == "activa":
+        try:
+            await _refresh_pyro_paused_jobs(_load_db())
+        except Exception as e:
+            print(f" [TGHirayi_v2] Error en refresh pyro (state): {e}", flush=True)
+        if not _worker_running or (_worker_task is None) or _worker_task.done():
+            _worker_gen += 1
+            _worker_running = False
+            _current_job = None
+            _worker_task = asyncio.ensure_future(_start_worker(_worker_gen))
+    return {"ok": True, "paused": _worker_paused, "worker_state": _worker_state}
 
 
 # ─── Worker de Background ─────────────────────────────────────────
@@ -2645,7 +2811,7 @@ async def _start_worker(gen: int = 0):
         print(" [TGHirayi_v2] Worker ya estaba corriendo, saliendo", flush=True)
         return
     _worker_running = True
-    _worker_paused = False
+    # NOTA F1: no se fuerza estado aquí; lo fija quien arranca (toggle/state/init).
     print(f" [TGHirayi_v2] Worker iniciado (gen={gen})", flush=True)
 
     # Reiniciar estado del slot de archives (un reinicio no mantiene tasks en vuelo)
@@ -3335,6 +3501,36 @@ async def _process_job(job: dict, db: dict):
             except Exception:
                 _all_omit_ep = False
 
+            # F3 QueuePriority: ceder descargas a la reproducción. Si el árbitro
+            # dice que no (player activo y fondo desactivado o sin margen),
+            # esperar aquí sin marcar error; al liberarse continúa solo.
+            if first_real and not _all_omit_ep:
+                try:
+                    from services import playback_demand as _pbd
+                except Exception:
+                    try:
+                        from tvcat.services import playback_demand as _pbd
+                    except Exception:
+                        _pbd = None
+                if _pbd is not None:
+                    _waited = 0
+                    _yielded_once = False
+                    while not _pbd.queue_may_download():
+                        if _worker_paused or not _worker_running or job.get("paused"):
+                            job["status"] = "paused_by_worker"
+                            job["status_text"] = "Pausado por usuario"
+                            _persist_job(job)
+                            return
+                        if not _yielded_once:
+                            job["status_text"] = "En espera: reproducción en curso…"
+                            _persist_job(job)
+                            _yielded_once = True
+                            print(f"[TGHirayi_v2] Job {job['id']} cede descargas a reproducción", flush=True)
+                        await asyncio.sleep(10)
+                        _waited += 10
+                    if _yielded_once:
+                        print(f"[TGHirayi_v2] Job {job['id']} retoma descargas", flush=True)
+
             if (not first_real) or _all_omit_ep:
                 # Todo telegram (origen propio + CB1=false): no se descarga media del origen
                 media_data = []
@@ -3763,10 +3959,7 @@ async def _process_job(job: dict, db: dict):
                             "(¿dos gateways a la vez? ¿cambio de IP/VPN?). Regenera la sesión del userbot "
                             "en Configuración y reanuda la cola. Detalle: " + str(e)[:200])
             job["status_text"] = "Sesión invalidada: regenera sesión y reanuda"
-            try:
-                globals()["_worker_paused"] = True
-            except Exception:
-                pass
+            _set_worker_state("pausada")
             print(f"[TGHirayi_v2] Worker pausado por sesión invalidada", flush=True)
         else:
             job["status"] = "error"
@@ -6199,12 +6392,37 @@ def _run_ffmpeg_progress(cmd: list, duration: float, base: float = 0.0, span: fl
                 pass
     else:
         full += ["-progress", "pipe:1"]
-    _err = open(err_log, "wb") if err_log else subprocess.DEVNULL
+    # F5 QueuePriority: el recode es fondo → hilos capados + prioridad baja.
+    # -threads solo si es seguro (una única salida al final y sin -threads ya).
     try:
-        proc = subprocess.Popen(full,
-                                stdout=subprocess.DEVNULL if progress_path else subprocess.PIPE,
-                                stderr=_err,
-                                universal_newlines=True, errors="replace", bufsize=1)
+        _nth = _recode_max_threads()
+        if _nth and "-threads" not in full and len(full) >= 2 and not str(full[-1]).startswith("-"):
+            full = full[:-1] + ["-threads", str(_nth)] + full[-1:]
+    except Exception:
+        pass
+    _err = open(err_log, "wb") if err_log else subprocess.DEVNULL
+    _preexec = None
+    _cflags = 0
+    try:
+        if os.name == "nt":
+            _cflags = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+        else:
+            def _preexec():
+                try:
+                    os.nice(10)
+                except Exception:
+                    pass
+    except Exception:
+        _preexec = None
+        _cflags = 0
+    try:
+        _pk = {"stdout": subprocess.DEVNULL if progress_path else subprocess.PIPE,
+               "stderr": _err, "universal_newlines": True, "errors": "replace", "bufsize": 1}
+        if _preexec is not None:
+            _pk["preexec_fn"] = _preexec
+        if _cflags:
+            _pk["creationflags"] = _cflags
+        proc = subprocess.Popen(full, **_pk)
     except Exception:
         if err_log:
             try:
@@ -8319,9 +8537,8 @@ def init_plugin():
     """Inicializa el plugin al cargarse."""
     cfg = _load_config()
     global _worker_paused, _worker_running, _worker_task
-    _worker_paused = not cfg.get("resume_on_startup", False)
+    _set_worker_state("activa" if cfg.get("resume_on_startup", False) else "pausada")
     if cfg.get("resume_on_startup", False):
-        _worker_paused = False
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():

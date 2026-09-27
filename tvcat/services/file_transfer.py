@@ -213,12 +213,17 @@ async def _telethon_parallel_download(client, chat_id, msg_id, file_path: str,
 
     async def _dl_range(c, range_start, range_end, retries=3):
         from telethon.errors.rpcerrorlist import FileMigrateError, FileReferenceExpiredError, FilerefUpgradeNeededError
+        from services.abort_flags import should_abort_download, DownloadAborted
+        if should_abort_download():
+            raise DownloadAborted("descarga detenida por el usuario")
         last_err = None
         migrated_sender = None
         for attempt in range(1, retries + 1):
             try:
                 with open(file_path, 'r+b') as f:
                     for i in range(range_start, range_end):
+                        if should_abort_download():
+                            raise DownloadAborted("descarga detenida por el usuario")
                         if i in done:
                             continue
                         offset = i * CHUNK
@@ -261,6 +266,8 @@ async def _telethon_parallel_download(client, chat_id, msg_id, file_path: str,
                 last_err = "file-reference"
                 if not await _refresh_file_reference():
                     break
+            except DownloadAborted:
+                raise
             except Exception as e:
                 last_err = repr(e)
         _save_chunks()
@@ -590,6 +597,22 @@ async def _pyro_range(client, msg, offset: int, length: int, chunk_size: int,
     location = raw.types.InputDocumentFileLocation(
         id=_mid, access_hash=_ah,
         file_reference=bytes(_fr) if _fr else b"", thumb_size="")
+    # Sesión de medios del DC del fichero: el invoke directo sobre la sesión
+    # principal falla con FILE_MIGRATE_X si el fichero vive en otro DC (los
+    # fallos aquí eran silenciosos: break sin log y parcial vacío).
+    _invoker = client
+    try:
+        _fdc = FileId.decode(doc.file_id).dc_id if hasattr(doc, "file_id") and getattr(doc, "file_id") else None
+    except Exception:
+        _fdc = None
+    if _fdc:
+        try:
+            from services.fast_download import _get_media_session as _gms
+            _ms = await _gms(client, _fdc)
+            if _ms is not None:
+                _invoker = _ms
+        except Exception as e:
+            print(f" [PYRO-RANGE] sin media session DC{_fdc} ({e}), invoke directo", flush=True)
     limit = max(4096, min(int(chunk_size or 0) or 1024 * 1024, 1024 * 1024))
     base = (offset // limit) * limit
     skip = offset - base
@@ -601,11 +624,12 @@ async def _pyro_range(client, msg, offset: int, length: int, chunk_size: int,
         await gate.bulk_acquire(bulk_priority)
         try:
             result = await asyncio.wait_for(
-                client.invoke(raw.functions.upload.GetFile(location=location, offset=cur, limit=limit)),
+                _invoker.invoke(raw.functions.upload.GetFile(location=location, offset=cur, limit=limit)),
                 timeout=REQ_TIMEOUT)
         except Exception as e:
             if type(e).__name__ in ("FloodWaitError", "FloodWait", "FloodPremiumWait"):
                 gate.bulk_flood_report(float(getattr(e, 'seconds', getattr(e, 'value', 0)) or 0))
+            print(f" [PYRO-RANGE] GetFile offset={cur} falló: {type(e).__name__}: {str(e)[:120]}", flush=True)
             break
         finally:
             await gate.bulk_release()
