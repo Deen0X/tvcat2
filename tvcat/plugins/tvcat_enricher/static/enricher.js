@@ -34,6 +34,8 @@
                 }).catch(function(){});
             } catch(e){}
         }, 400);
+        // Botón auto-enriquecer (toggle en config; estado según tenga cover local).
+        setTimeout(function(){ try { refreshAutoEnrichBtn(itemData); } catch(e){} }, 400);
         return [{
             id: 'btn-enricher',
             icon: '<img src="/plugin-static/tvcat_enricher/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'✨\',20)">',
@@ -43,7 +45,99 @@
                 try { console.log('[Enricher] click', itemData); } catch(e) {}
                 openEnricher(itemData);
             }
+        }, {
+            id: 'btn-autoenrich',
+            icon: '<img src="/plugin-static/tvcat_enricher/auto_enrich.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'✨\',20)">',
+            tooltip: 'Auto-enriquecer',
+            label: '',
+            action: function () {
+                try { autoEnrichRun(itemData); } catch(e) {}
+            }
         }];
+    }
+
+    var _autoBusy = {};
+    function refreshAutoEnrichBtn(itemData) {
+        try {
+            var btn = document.getElementById('btn-autoenrich');
+            if (!btn || !itemData || !itemData.item_id) return;
+            var iid = String(itemData.item_id);
+            if (iid.indexOf('COL-') === 0) { btn.style.display = 'none'; return; }
+            fetch('/api/enrich/config').then(function(r){ return r.ok ? r.json() : null; }).then(function(cfg){
+                var on = !!(cfg && cfg.behavior && cfg.behavior.auto_enrich_button);
+                if (!on) { btn.style.display = 'none'; return; }
+                btn.style.display = '';
+                fetch('/api/enricher/item/' + encodeURIComponent(iid)).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
+                    var hasLocal = !!(d && d.has_enriched);
+                    setAutoBtnState(btn, itemData, hasLocal);
+                }).catch(function(){});
+            }).catch(function(){});
+        } catch(e){}
+    }
+    function setAutoBtnState(btn, itemData, hasLocal) {
+        if (hasLocal) {
+            btn.innerHTML = '<img src="/plugin-static/tvcat_enricher/back_to_original.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'↩️\',20)">';
+            btn.title = 'Volver a cover original';
+            btn.setAttribute('aria-label', 'Volver a cover original');
+            btn.onclick = function() { autoEnrichRevert(itemData); };
+        } else {
+            btn.innerHTML = '<img src="/plugin-static/tvcat_enricher/auto_enrich.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'✨\',20)">';
+            btn.title = 'Auto-enriquecer';
+            btn.setAttribute('aria-label', 'Auto-enriquecer');
+            btn.onclick = function() { autoEnrichRun(itemData); };
+        }
+    }
+    function autoEnrichRun(itemData) {
+        try {
+            var iid = String(itemData.item_id || '');
+            if (!iid || _autoBusy[iid]) return;
+            _autoBusy[iid] = true;
+            var btn = document.getElementById('btn-autoenrich');
+            var origHtml = btn ? btn.innerHTML : '';
+            var origTitle = btn ? btn.title : '';
+            if (btn) { btn.innerHTML = '⏳'; btn.title = 'Auto-enriqueciendo…'; }
+            var done = function() {
+                _autoBusy[iid] = false;
+                try {
+                    var b2 = document.getElementById('btn-autoenrich');
+                    if (b2) { b2.innerHTML = origHtml; b2.title = origTitle; }
+                } catch(e){}
+            };
+            fetch('/api/enricher/item/' + encodeURIComponent(iid) + '/auto-enrich', { method: 'POST' })
+            .then(function(r){ return r.json(); })
+            .then(function(res){
+                done();
+                if (res && res.applied) {
+                    try { console.log('[Enricher] auto aplicado:', res.candidate); } catch(e) {}
+                    try {
+                        if (window.Catalog && window.Catalog.refreshGridCover) window.Catalog.refreshGridCover(iid, res.catalog_title || undefined);
+                    } catch(e) {}
+                    // Recarga completa de la hero con los datos nuevos.
+                    try { if (window.openDetails) window.openDetails(iid); } catch(e) {}
+                    refreshAutoEnrichBtn(itemData);
+                } else if (res && (res.ambiguous || res.none)) {
+                    openEnricher(itemData, { presetQuery: res.query || '' });
+                } else {
+                    try { console.log('[Enricher] auto error:', res); } catch(e) {}
+                    refreshAutoEnrichBtn(itemData);
+                }
+            })
+            .catch(function(e){ done(); try { console.log('[Enricher] auto err', e); } catch(_e){} });
+        } catch(e){}
+    }
+    function autoEnrichRevert(itemData) {
+        try {
+            var iid = String(itemData.item_id || '');
+            if (!iid) return;
+            fetch('/api/enricher/item/' + encodeURIComponent(iid), { method: 'DELETE' })
+            .then(function(r){ return r.json(); })
+            .then(function(){
+                try { if (window.Catalog && window.Catalog.refreshHeroCover) window.Catalog.refreshHeroCover(iid); } catch(e) {}
+                try { if (window.Catalog && window.Catalog.refreshGridCover) window.Catalog.refreshGridCover(iid); } catch(e) {}
+                refreshAutoEnrichBtn(itemData);
+            })
+            .catch(function(){});
+        } catch(e){}
     }
 
     function openEnricher(itemData, opts) {
@@ -62,6 +156,17 @@
             var auth = vals[1] || { is_mine: false, author_user_id: null, reason: '' };
             if (!data) { alert('No se pudo cargar el item (¿gateway reiniciado?)'); return; }
             buildModal(data, auth, itemData, _opts);
+            // Preset de búsqueda (auto-enriquecer ambiguo/vacío): rellenar
+            // query y lanzar la búsqueda para elegir a mano.
+            try {
+                if (_opts && _opts.presetQuery !== undefined && _opts.presetQuery !== null) {
+                    var _pq = String(_opts.presetQuery || '');
+                    var _qi = document.getElementById('enricher-query');
+                    var _sb = document.getElementById('enricher-search');
+                    if (_qi) _qi.value = _pq;
+                    if (_sb) setTimeout(function(){ try { _sb.click(); } catch(e){} }, 350);
+                }
+            } catch(e){}
         }).catch(function(e){ try { console.error('[Enricher] open err', e); } catch(ex) {} alert('Error: '+e); });
     }
 

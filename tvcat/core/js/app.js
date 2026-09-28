@@ -825,6 +825,25 @@ function loadUserbotConfig() {
                 var overEl = document.getElementById('enrich-overwrite');
                 if (autoEl) autoEl.checked = !!beh.auto_scan;
                 if (overEl) overEl.checked = !!beh.overwrite;
+                var autoBtnEl = document.getElementById('enrich-auto-button');
+                var autoTplEl = document.getElementById('enrich-auto-template');
+                if (autoBtnEl) autoBtnEl.checked = !!beh.auto_enrich_button;
+                // Combo con las plantillas configuradas (+ Fallback vacío).
+                try {
+                    if (autoTplEl) {
+                        var _tl = ((cfg.templates || {}).templates) || [];
+                        autoTplEl.innerHTML = '<option value="">(vacío = Fallback)</option>';
+                        for (var _ti = 0; _ti < _tl.length; _ti++) {
+                            var _nm = String((_tl[_ti] || {}).name || '');
+                            if (!_nm) continue;
+                            var _op = document.createElement('option');
+                            _op.value = _nm;
+                            _op.textContent = _nm;
+                            autoTplEl.appendChild(_op);
+                        }
+                        autoTplEl.value = beh.auto_enrich_template || '';
+                    }
+                } catch (e) {}
 
             }
         });
@@ -1032,8 +1051,12 @@ function loadUserbotConfig() {
     window.saveEnrichBehavior = function() {
         var autoEl = document.getElementById('enrich-auto-scan');
         var overEl = document.getElementById('enrich-overwrite');
+        var autoBtnEl = document.getElementById('enrich-auto-button');
+        var autoTplEl = document.getElementById('enrich-auto-template');
         var st = document.getElementById('enrich-behavior-status');
-        var beh = { auto_scan: !!(autoEl && autoEl.checked), overwrite: !!(overEl && overEl.checked) };
+        var beh = { auto_scan: !!(autoEl && autoEl.checked), overwrite: !!(overEl && overEl.checked),
+                    auto_enrich_button: !!(autoBtnEl && autoBtnEl.checked),
+                    auto_enrich_template: (autoTplEl && autoTplEl.value || '').trim() };
         if (st) st.textContent = 'Guardando...';
         window.API.ajax({
             method: 'POST',

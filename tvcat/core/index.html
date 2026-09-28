@@ -721,6 +721,19 @@
                                 </div>
                                 <label class="switch"><input type="checkbox" id="enrich-overwrite" onchange="saveEnrichBehavior()"><span class="slider round"></span></label>
                             </div>
+                            <div style="display:flex;align-items:center;justify-content:space-between;">
+                                <div>
+                                    <label style="font-size:0.8rem;font-weight:600;">Mostrar botón autoenriquecer</label>
+                                    <p style="font-size:0.7rem;color:var(--text-secondary);margin:0;">Botón en la hero que enriquece en 1 clic (o abre el modal si hay dudas).</p>
+                                </div>
+                                <label class="switch"><input type="checkbox" id="enrich-auto-button" onchange="saveEnrichBehavior()"><span class="slider round"></span></label>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <label style="font-size:0.7rem;color:var(--text-secondary);min-width:90px;">Plantilla auto</label>
+                                <select id="enrich-auto-template" onchange="saveEnrichBehavior()" style="flex:1;padding:6px 8px;font-size:0.8rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+                                    <option value="">(vacío = Fallback)</option>
+                                </select>
+                            </div>
                             <span id="enrich-behavior-status" style="font-size:0.7rem;color:var(--text-secondary);"></span>
                         </div>
                     </div>
@@ -1079,9 +1092,9 @@
     <script src="js/assistants.js?v=20260910a"></script>    <script src="js/navEngine.js?v=20260923a"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
     <script src="js/inputHelper.js?v=20260903q"></script>
-    <script src="js/catalog.js?v=20260923r"></script>
+    <script src="js/catalog.js?v=20260923s"></script>
     <script src="js/player.js?v=20260923b"></script>
     <script src="js/ui2.js?v=20260923c"></script>
-    <script src="js/app.js?v=20260923r"></script>
+    <script src="js/app.js?v=20260923s"></script>
 </body>
 </html>

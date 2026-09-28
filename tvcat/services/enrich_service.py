@@ -270,7 +270,7 @@ def _split_season_query(q: str):
 
 
 async def search(query: str, category: str = "", subcategory: str = "",
-                 episode_count: int = None, provider_override: str = "") -> dict:
+                 episode_count: int = None, provider_override: str = "", year: int = None) -> dict:
     """Busca candidatos de un título. Devuelve {candidates, has_more, provider, threshold, season}.
     Si el texto es una URL directa conocida (TMDB/IGDB/Google Books/ComicVine),
     la URL es la autoridad: se resuelve ese candidato directamente (sin search),
@@ -457,8 +457,8 @@ async def search(query: str, category: str = "", subcategory: str = "",
         try:
             if provider_name == 'tmdb':
                 for mt in search_order:
-                    found = await provider.search(attempt, media_type=mt)
-                    print(f"[ENRICH] provider.search('{attempt}', media_type={mt}) -> {len(found) if found else 0} resultados", flush=True)
+                    found = await provider.search(attempt, media_type=mt, year=year)
+                    print(f"[ENRICH] provider.search('{attempt}', media_type={mt}, year={year}) -> {len(found) if found else 0} resultados", flush=True)
                     if found:
                         raw_candidates.extend(found)
             else:
@@ -548,19 +548,23 @@ def _load_behavior() -> dict:
     row = conn.execute("SELECT value FROM tvcat_settings WHERE key='enrich_behavior'").fetchone()
     conn.close()
     if not row or not row[0]:
-        return {"auto_scan": False, "overwrite": False}
+        return {"auto_scan": False, "overwrite": False,
+                "auto_enrich_button": False, "auto_enrich_template": ""}
     try:
         d = json.loads(row[0])
-        return {"auto_scan": bool(d.get("auto_scan")), "overwrite": bool(d.get("overwrite"))}
+        return {"auto_scan": bool(d.get("auto_scan")), "overwrite": bool(d.get("overwrite")),
+                "auto_enrich_button": bool(d.get("auto_enrich_button")),
+                "auto_enrich_template": str(d.get("auto_enrich_template") or "")}
     except Exception:
-        return {"auto_scan": False, "overwrite": False}
+        return {"auto_scan": False, "overwrite": False,
+                "auto_enrich_button": False, "auto_enrich_template": ""}
 
 def _save_behavior(behavior: dict):
     from .catalog_service import get_conn
     import json
     conn = get_conn()
     conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
-                 ("enrich_behavior", json.dumps({"auto_scan": bool(behavior.get("auto_scan")), "overwrite": bool(behavior.get("overwrite"))})))
+                 ("enrich_behavior", json.dumps({"auto_scan": bool(behavior.get("auto_scan")), "overwrite": bool(behavior.get("overwrite")), "auto_enrich_button": bool(behavior.get("auto_enrich_button")), "auto_enrich_template": str(behavior.get("auto_enrich_template") or "")})))
     conn.commit()
     conn.close()
 

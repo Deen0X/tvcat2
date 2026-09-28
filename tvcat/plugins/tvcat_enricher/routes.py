@@ -176,6 +176,7 @@ class SearchReq(BaseModel):
     subcategory: Optional[str] = None
     episode_count: Optional[int] = None
     provider: Optional[str] = None  # override manual (tabs del modal)
+    year: Optional[int] = None  # filtro año TMDB (movie: year, tv: first_air_date_year)
 
 
 class DetailsReq(BaseModel):
@@ -579,7 +580,7 @@ async def proxy_search(req: SearchReq):
         import services.enrich_service as es
         res = await es.search(req.query, req.category or "", req.subcategory or "",
                              episode_count=req.episode_count,
-                             provider_override=req.provider or "")
+                             provider_override=req.provider or "", year=req.year)
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -595,6 +596,192 @@ async def proxy_details(req: DetailsReq):
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _auto_clean_title(title: str):
+    """(título limpio, año|None): quita sufijo (YYYY)/🗓YYYY/📅YYYY."""
+    try:
+        t = str(title or "").strip()
+        year = None
+        m = re.search(r"[\U0001F5D3\U0001F4C5]\s*(\d{4})\s*$", t)
+        if not m:
+            m = re.search(r"\((\d{4})\)\s*$", t)
+        if m:
+            year = m.group(1)
+            t = t[:m.start()].strip()
+        return t, year
+    except Exception:
+        return str(title or "").strip(), None
+
+
+@router.post("/api/enricher/item/{item_id}/auto-enrich")
+async def auto_enrich(item_id: str, request: Request):
+    """Auto-enriquecido en 1 clic (botón hero): buscar título+año (fallback
+    solo título), si hay UN único candidato aplicar plantilla y guardar en
+    LOCAL. Si hay varios o ninguno → {ambiguous|none} con la query para que
+    el frontal abra el modal con la búsqueda hecha."""
+    import types as _types
+    try:
+        import services.enrich_service as es
+        from services.catalog_service import get_conn as _gc
+    except Exception:
+        import tvcat.services.enrich_service as es
+        from tvcat.services.catalog_service import get_conn as _gc
+    conn = _gc()
+    try:
+        row = conn.execute(
+            "SELECT item_id, title, category, subcategory, year, season_number"
+            " FROM unified_catalog WHERE item_id=?", (item_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="item no encontrado")
+        d0 = dict(row)
+        try:
+            ep_count = conn.execute(
+                "SELECT COUNT(*) FROM item_episodes WHERE item_id=? OR item_id=?",
+                (item_id, str(d0.get("id") or ""))).fetchone()[0]
+        except Exception:
+            try:
+                ep_count = conn.execute(
+                    "SELECT COUNT(*) FROM item_episodes WHERE item_id=?",
+                    (item_id,)).fetchone()[0]
+            except Exception:
+                ep_count = 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    title_raw = str(d0.get("title") or "")
+    clean, y_paren = _auto_clean_title(title_raw)
+    if not clean:
+        clean = title_raw
+    year = y_paren or (str(d0.get("year") or "").strip()[:4] or None)
+    if year and (not year.isdigit() or len(year) != 4):
+        year = None
+    category = str(d0.get("category") or "")
+    subcategory = str(d0.get("subcategory") or "")
+    try:
+        season = d0.get("season_number")
+        season = int(season) if season is not None and str(season).strip() not in ("", "None") else None
+    except Exception:
+        season = None
+    try:
+        yint = int(year) if year else 0
+    except Exception:
+        yint = 0
+    try:
+        # Año a la API (TMDB filtra en servidor) + post-filtro de seguridad.
+        res = await es.search(clean, category, subcategory, year=(yint or None))
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "query": clean}
+    cands = (res or {}).get("candidates") or []
+    provider = (res or {}).get("provider") or ""
+    if not cands:
+        return {"ok": True, "applied": False, "none": True, "query": clean,
+                "provider": provider}
+    def _cy(c):
+        try:
+            return str(c.get("year") or "")[:4]
+        except Exception:
+            return ""
+    year_hits = [c for c in cands if year and _cy(c) == year] if year else []
+    chosen = None
+    if len(year_hits) == 1:
+        chosen = year_hits[0]
+    elif len(year_hits) == 0 and len(cands) == 1:
+        chosen = cands[0]  # año distinto pero único: se tolera
+    if chosen is None:
+        return {"ok": True, "applied": False, "ambiguous": True, "query": clean,
+                "count": len(cands), "provider": provider,
+                "year_hits": len(year_hits)}
+    # Detalle + plantilla (configurada por nombre o fallback) + save local.
+    try:
+        details = await es.get_details(provider, str(chosen.get("id") or ""),
+                                       category, subcategory, season=season)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "query": clean}
+    if not details:
+        return {"ok": True, "applied": False, "none": True, "query": clean,
+                "provider": provider}
+    try:
+        beh = es._load_behavior()
+        tpl_name = str((beh or {}).get("auto_enrich_template") or "").strip().lower()
+        tpls = es._load_templates() or {}
+        content = ""
+        tpl_used = "fallback"
+        if tpl_name:
+            for t in (tpls.get("templates") or []):
+                if str((t or {}).get("name") or "").strip().lower() == tpl_name:
+                    content = str((t or {}).get("content") or "")
+                    tpl_used = str((t or {}).get("name") or "")
+                    break
+        if not content:
+            content = str(tpls.get("fallback") or "")
+        if not content:
+            return {"ok": False, "error": "Sin plantilla (fallback vacío)", "query": clean}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "query": clean}
+    _had_tag = ("{fmedialine}" in content or "{medialine}" in content
+                or "{_fmedialine}" in content or "{_medialine}" in content)
+    try:
+        try:
+            import services.enrich_tags as _et
+        except Exception:
+            import tvcat.services.enrich_tags as _et
+        # Media de central para {medialine}/{_f*}: asegurar sonda y esperar
+        # hasta 60s (el botón ya muestra espera; sin datos salen vacíos).
+        _media = {}
+        try:
+            try:
+                from services.media_probe_queue import (
+                    ensure_probed as _ens3, get_title_media as _gtm3)
+            except Exception:
+                from tvcat.services.media_probe_queue import (
+                    ensure_probed as _ens3, get_title_media as _gtm3)
+            try:
+                _ens3(item_id)
+            except Exception:
+                pass
+            import asyncio as _aio
+            for _w in range(20):
+                try:
+                    _media = _gtm3(item_id) or {}
+                except Exception:
+                    _media = {}
+                if _media:
+                    break
+                await _aio.sleep(3)
+        except Exception:
+            _media = {}
+        disp_title = str(details.get("api_title") or clean)
+        cover_text = _et.resolve_cover(content, disp_title, int(ep_count or 0),
+                                       details, media=_media)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "query": clean}
+    poster_url = ""
+    try:
+        import json as _js
+        _covers = _js.loads(details.get("api_cover") or "[]") or []
+        if _covers:
+            poster_url = str(_covers[0] or "")
+    except Exception:
+        pass
+    body = _types.SimpleNamespace(
+        cover_text=cover_text, enrich_details=details,
+        poster_b64=None, poster_mime=None, poster_url=poster_url or None)
+    try:
+        saved = await save_enriched(item_id, body, request)
+    except HTTPException as e:
+        return {"ok": False, "error": str(getattr(e, "detail", e))[:200], "query": clean}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "query": clean}
+    print(f" [ENRICH] auto-aplicado plantilla='{tpl_used}' medialine-tag={bool(_had_tag)} media_keys={len(_media or {})}", flush=True)
+    return {"ok": True, "applied": True, "query": clean,
+            "candidate": str(chosen.get("title") or ""),
+            "title_applied": bool((saved or {}).get("title_applied")),
+            "catalog_title": str((saved or {}).get("catalog_title") or ""),
+            "template": tpl_used, "had_tag": bool(_had_tag),
+            "media_keys": sorted(list((_media or {}).keys()))[:12]}
 
 
 @router.post("/api/enricher/item/{item_id}/save")

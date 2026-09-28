@@ -6237,8 +6237,63 @@ def _match_collection_entries(entries, norm_index, lit_index):
     return items, missing
 
 
+def _collection_keys_with_media(conn, key_members: dict, multi_audio: bool, subtitles: bool) -> set:
+    """De {collection_key: [member_item_ids]}, devuelve las claves con ALGÚN
+    miembro cumpliendo flags media (primer episodio). 2 consultas batch."""
+    try:
+        all_ids = set()
+        for _ids in (key_members or {}).values():
+            for _i in _ids or []:
+                if _i:
+                    all_ids.add(str(_i))
+        if not all_ids:
+            return set()
+        umap = {}
+        ph = ",".join("?" * len(all_ids))
+        for r in conn.execute(
+                "SELECT id, item_id FROM unified_catalog WHERE item_id IN (%s)" % ph,
+                list(all_ids)):
+            umap[str(r["id"])] = r["item_id"]
+            umap[r["item_id"]] = r["item_id"]
+        keys = list(set(all_ids) | set(umap.keys()))
+        first_key = {}
+        if keys:
+            ph3 = ",".join("?" * len(keys))
+            for r in conn.execute(
+                    "SELECT item_id, episode_key FROM item_episodes "
+                    "WHERE item_id IN (%s) ORDER BY "
+                    "COALESCE(episode_number, 999999), id" % ph3, keys):
+                _k = str(r["item_id"])
+                if _k not in first_key and r["episode_key"]:
+                    first_key[_k] = str(r["episode_key"])
+        ok_members = set()
+        if first_key:
+            inv = {}
+            for _k, _ek in first_key.items():
+                inv.setdefault(_ek, umap.get(_k, _k))
+            ph4 = ",".join("?" * len(inv))
+            conds = []
+            if multi_audio:
+                conds.append("has_multi_audio = 1")
+            if subtitles:
+                conds.append("has_subs = 1")
+            for r in conn.execute(
+                    "SELECT episode_key FROM episode_media WHERE episode_key IN (%s)"
+                    " AND %s" % (ph4, " AND ".join(conds)), list(inv.keys())):
+                _iid = inv.get(str(r["episode_key"]))
+                if _iid:
+                    ok_members.add(_iid)
+        keep = set()
+        for _ck, _ids in (key_members or {}).items():
+            if any(str(_i) in ok_members for _i in (_ids or []) if _i):
+                keep.add(_ck)
+        return keep
+    except Exception:
+        return set(key_members or {})
+
+
 @app.get(api_url("/api/collections"))
-async def list_collections(request: Request, limit: int = 200, search: str = "", fields: str = "title"):
+async def list_collections(request: Request, limit: int = 200, search: str = "", fields: str = "title", multi_audio: str = "", subtitles: str = ""):
     """Lista colecciones visibles: escaneadas + locales fusionadas.
     Reglas 2026-09-09: (a) solo se muestra la que resuelve >=1 título;
     (b) mismo (nombre, serial) en ambos lados => gana la más nueva
@@ -6255,8 +6310,11 @@ async def list_collections(request: Request, limit: int = 200, search: str = "",
     user_id = s.get("user_id")
     conn = get_conn()
     try:
+        _ma = multi_audio in ("1", "true", True)
+        _ss = subtitles in ("1", "true", True)
         norm_index, lit_index = _build_collection_index(conn, user_id)
         winners = {}
+        winner_members = {}
         # Escaneadas
         try:
             where, params = _collection_user_filters(conn, user_id)
@@ -6299,6 +6357,7 @@ async def list_collections(request: Request, limit: int = 200, search: str = "",
             prev = winners.get(key)
             if prev is None or date > prev[0]:
                 winners[key] = (date, payload)
+                winner_members[key] = [str(i.get("item_id") or "") for i in items]
         # Locales (tabla CORE, globales)
         try:
             from services.catalog_service import list_local_collections
@@ -6331,6 +6390,15 @@ async def list_collections(request: Request, limit: int = 200, search: str = "",
             prev = winners.get(key)
             if prev is None or date > prev[0]:
                 winners[key] = (date, payload)
+                winner_members[key] = [str(i.get("item_id") or "") for i in items]
+        # Filtro media: la colección pasa si ALGÚN miembro resuelto cumple
+        # (flags del primer episodio). Antes del corte por límite.
+        if (_ma or _ss) and winners:
+            try:
+                _keep = _collection_keys_with_media(conn, winner_members, _ma, _ss)
+                winners = {k: v for k, v in winners.items() if k in _keep}
+            except Exception:
+                pass
         items = [p for _, p in sorted(winners.values(), key=lambda t: str(t[1].get("title") or ""))][:min(limit, 200)]
         # Filtro de búsqueda (igual que el resto de secciones: a*b = partes
         # en orden dentro del mismo campo).
@@ -8096,6 +8164,55 @@ def _hidden_profile(session):
     return session.get("profile_id") or session.get("user_id")
 
 
+def _live_scan_channels(conn):
+    """Canales con scan-item habilitado (variantes con/sin -100). None si no
+    se puede determinar (fail-open)."""
+    try:
+        rows = conn.execute(
+            "SELECT channel_id FROM tvcat_scanned_channels WHERE enabled = 1").fetchall()
+        out = set()
+        for r in rows:
+            try:
+                c = str(r[0] if not isinstance(r, dict) else r.get("channel_id") or "")
+            except Exception:
+                continue
+            if not c:
+                continue
+            bare = c.replace("-100", "").lstrip("-")
+            out.add(c)
+            out.add(bare)
+            out.add("-100" + bare)
+        return out
+    except Exception:
+        return None
+
+
+def _filter_hidden_live(items, conn):
+    """Ocultos: solo items cuya fuente sigue viva (scan-item habilitado).
+    Sin link parseable se conservan (locales, colecciones...)."""
+    try:
+        import re as _re
+        live = _live_scan_channels(conn)
+        if live is None:
+            return items
+        kept = []
+        for it in items or []:
+            try:
+                link = str((it or {}).get("telegram_link") or "")
+                m = _re.search(r"/c/(\d+)/", link)
+                if not m:
+                    kept.append(it)
+                    continue
+                ch = m.group(1)
+                if ch in live or ("-100" + ch) in live:
+                    kept.append(it)
+            except Exception:
+                kept.append(it)
+        return kept
+    except Exception:
+        return items
+
+
 @app.get(api_url("/api/hidden"))
 async def hidden_list(request: Request, multi_audio: str = "", subtitles: str = ""):
     s = _hidden_session(request)
@@ -8121,6 +8238,10 @@ async def hidden_list(request: Request, multi_audio: str = "", subtitles: str = 
         items = [dict(r) for r in rows]
     except Exception:
         items = []
+    try:
+        items = _filter_hidden_live(items, conn)
+    except Exception:
+        pass
     try: conn.close()
     except: pass
     try:
@@ -8368,6 +8489,10 @@ async def hidden_blocked(request: Request, profile: int = 0, multi_audio: str = 
         items = [dict(r) for r in rows]
     except Exception:
         items = []
+    try:
+        items = _filter_hidden_live(items, conn)
+    except Exception:
+        pass
     try: conn.close()
     except: pass
     try:

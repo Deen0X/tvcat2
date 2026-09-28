@@ -673,6 +673,10 @@
             qs.push('fields=' + encodeURIComponent(fields.join(',')));
         }
         if (qs.length) url += '?' + qs.join('&');
+        if (window._activeFilters) {
+            if (window._activeFilters.multi_audio) url += (url.indexOf('?') === -1 ? '?' : '&') + 'multi_audio=1';
+            if (window._activeFilters.subtitles) url += (url.indexOf('?') === -1 ? '?' : '&') + 'subtitles=1';
+        }
         var mySeq = ++_loadSeq;
         showLoading(true);
         window.API.ajax({

@@ -27,11 +27,15 @@ class TMDBProvider:
     # la web busca en todos los idiomas. Se consultan los 3 y se fusionan por id.
     SEARCH_LANGUAGES = ("es-ES", "es-MX", "en-US")
 
-    async def search(self, title, media_type="movie"):
+    async def search(self, title, media_type="movie", year=None):
         if not self._enabled():
             return []
         url = f"{self.base_url}/search/{media_type}"
         seen = {}
+        try:
+            yint = int(year) if year else 0
+        except Exception:
+            yint = 0
         async with httpx.AsyncClient(timeout=20) as client:
             for lang in self.SEARCH_LANGUAGES:
                 params = {
@@ -40,6 +44,12 @@ class TMDBProvider:
                     "language": lang,
                     "include_adult": "false",
                 }
+                # Filtro de año en servidor (movie: year, tv: first_air_date_year).
+                if yint > 0:
+                    if media_type == "tv":
+                        params["first_air_date_year"] = yint
+                    else:
+                        params["year"] = yint
                 try:
                     resp = await client.get(url, params=params)
                     print(f"[TMDB] {url} lang={lang} -> status={resp.status_code}", flush=True)
