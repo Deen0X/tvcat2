@@ -1280,11 +1280,11 @@
                     // Ficha técnica de la sonda (primer episodio).
                     try {
                         var ts = item.tech_specs || {};
-                        if (ts.resolution) specsHTML += '<div class="spec-item"><span class="spec-label">Resolución</span><span class="spec-value">' + escapeHtml(ts.resolution) + '</span></div>';
-                        if (ts.video) specsHTML += '<div class="spec-item"><span class="spec-label">Vídeo</span><span class="spec-value">' + escapeHtml(ts.video) + '</span></div>';
-                        if (ts.audios) specsHTML += '<div class="spec-item"><span class="spec-label">Audios</span><span class="spec-value">' + escapeHtml(ts.audios) + '</span></div>';
-                        if (ts.subtitles) specsHTML += '<div class="spec-item"><span class="spec-label">Subtítulos</span><span class="spec-value">' + escapeHtml(ts.subtitles) + '</span></div>';
-                        if (ts.duration) specsHTML += '<div class="spec-item"><span class="spec-label">Duración</span><span class="spec-value">' + escapeHtml(ts.duration) + '</span></div>';
+                        if (ts.resolution) specsHTML += '<div class="spec-item spec-media"><span class="spec-label">Resolución</span><span class="spec-value">' + escapeHtml(ts.resolution) + '</span></div>';
+                        if (ts.video) specsHTML += '<div class="spec-item spec-media"><span class="spec-label">Vídeo</span><span class="spec-value">' + escapeHtml(ts.video) + '</span></div>';
+                        if (ts.audios) specsHTML += '<div class="spec-item spec-media"><span class="spec-label">Audios</span><span class="spec-value">' + escapeHtml(ts.audios) + '</span></div>';
+                        if (ts.subtitles) specsHTML += '<div class="spec-item spec-media"><span class="spec-label">Subtítulos</span><span class="spec-value">' + escapeHtml(ts.subtitles) + '</span></div>';
+                        if (ts.duration) specsHTML += '<div class="spec-item spec-media"><span class="spec-label">Duración</span><span class="spec-value">' + escapeHtml(ts.duration) + '</span></div>';
                     } catch (e) {}
                     if (item.subcategory) specsHTML += '<div class="spec-item"><span class="spec-label">Formato</span><span class="spec-value">' + item.subcategory.toUpperCase() + '</span></div>';
                     if (item.genres) specsHTML += '<div class="spec-item"><span class="spec-label">Géneros</span><span class="spec-value">' + item.genres + '</span></div>';
@@ -1573,6 +1573,8 @@
                 void modal.offsetWidth;
                 modal.classList.remove('hidden');
             }
+            // Vigilar la sonda priorizada: al llegar, refrescar hero en vivo.
+            try { _heroItem = item; _watchHeroProbe(itemId); } catch (e) {}
         };
 
         // If variant switch, just update metadata and backdrop
@@ -2222,6 +2224,7 @@
     window.closeDetails = function() {
         if (_slideshowTimeout) { clearTimeout(_slideshowTimeout); _slideshowTimeout = null; }
         try { stopHeroThumbs(); } catch (e) {}
+        try { _stopHeroProbe(); _heroItem = null; } catch (e) {}
         try {
             var hc = document.getElementById('hero-comment');
             if (hc && hc.parentNode) hc.parentNode.removeChild(hc);
@@ -2336,6 +2339,99 @@
         });
     }
     try { _pollProbeQueue(); setInterval(_pollProbeQueue, 5000); } catch (e) {}
+
+    // Item abierto en la hero (para refrescar badges/ficha al llegar la sonda).
+    var _heroItem = null;
+    var _heroProbeTimer = null;
+
+    function _stopHeroProbe() {
+        try { if (_heroProbeTimer) { clearInterval(_heroProbeTimer); _heroProbeTimer = null; } } catch (e) {}
+    }
+
+    // Re-render de badges media + ficha técnica de la hero con los datos
+    // ya disponibles (sin cerrar el modal). Idempotente.
+    function _refreshHeroMedia() {
+        try {
+            if (!_heroItem) return;
+            var catEl = document.getElementById('meta-category');
+            var favBtn = document.querySelector('#detail-modal .meta-fav-btn');
+            if (catEl && favBtn && favBtn.parentNode) {
+                var olds = favBtn.parentNode.querySelectorAll('.meta-media-icon');
+                for (var oi = 0; oi < olds.length; oi++) olds[oi].parentNode.removeChild(olds[oi]);
+                var anchor = favBtn;
+                if (_heroItem.has_multi_audio) {
+                    var d1 = document.createElement('span');
+                    d1.className = 'meta-media-icon';
+                    d1.title = 'Multi-audio';
+                    d1.innerHTML = '<img src="/static/multi_audio.png" onerror="this.parentNode.textContent=\'\uD83D\uDD0A\'">';
+                    anchor.parentNode.insertBefore(d1, anchor.nextSibling);
+                    anchor = d1;
+                }
+                if (_heroItem.has_subtitles) {
+                    var d2 = document.createElement('span');
+                    d2.className = 'meta-media-icon';
+                    d2.title = 'Subtítulos';
+                    d2.innerHTML = '<img src="/static/subtitles.png" onerror="this.parentNode.textContent=\'\uD83D\uDCAC\'">';
+                    anchor.parentNode.insertBefore(d2, anchor.nextSibling);
+                }
+            }
+            var specsEl = document.getElementById('detail-extra-specs');
+            var ts = (_heroItem && _heroItem.tech_specs) || {};
+            if (specsEl) {
+                var oldRows = specsEl.querySelectorAll('.spec-media');
+                for (var ri = 0; ri < oldRows.length; ri++) oldRows[ri].parentNode.removeChild(oldRows[ri]);
+                var html = '';
+                if (ts.resolution) html += '<div class="spec-item spec-media"><span class="spec-label">Resolución</span><span class="spec-value">' + escapeHtml(ts.resolution) + '</span></div>';
+                if (ts.video) html += '<div class="spec-item spec-media"><span class="spec-label">Vídeo</span><span class="spec-value">' + escapeHtml(ts.video) + '</span></div>';
+                if (ts.audios) html += '<div class="spec-item spec-media"><span class="spec-label">Audios</span><span class="spec-value">' + escapeHtml(ts.audios) + '</span></div>';
+                if (ts.subtitles) html += '<div class="spec-item spec-media"><span class="spec-label">Subtítulos</span><span class="spec-value">' + escapeHtml(ts.subtitles) + '</span></div>';
+                if (ts.duration) html += '<div class="spec-item spec-media"><span class="spec-label">Duración</span><span class="spec-value">' + escapeHtml(ts.duration) + '</span></div>';
+                if (html) {
+                    var h3 = specsEl.querySelector('h3');
+                    if (h3 && h3.nextSibling) {
+                        var tmp = document.createElement('div');
+                        tmp.innerHTML = html;
+                        while (tmp.firstChild) specsEl.insertBefore(tmp.firstChild, h3.nextSibling);
+                    } else {
+                        specsEl.innerHTML += html;
+                    }
+                }
+            }
+        } catch (e) {}
+    }
+
+    // Vigila la sonda del título abierto: al resolverse, actualiza hero + grid.
+    function _watchHeroProbe(itemId) {
+        _stopHeroProbe();
+        var tries = 0;
+        _heroProbeTimer = setInterval(function() {
+            tries++;
+            try {
+                var modal = document.getElementById('detail-modal');
+                if (!modal || modal.classList.contains('hidden') ||
+                    String(currentVariantId) !== String(itemId) || tries > 45) {
+                    _stopHeroProbe();
+                    return;
+                }
+                window.API.ajax({
+                    url: '/api/media/flags/' + encodeURIComponent(itemId),
+                    success: function(r) {
+                        if (!r || !r.ready) return;
+                        _stopHeroProbe();
+                        try {
+                            if (_heroItem && String(_heroItem.item_id || _heroItem.id || '') === String(itemId)) {
+                                _heroItem.has_multi_audio = r.has_multi_audio ? 1 : 0;
+                                _heroItem.has_subtitles = r.has_subtitles ? 1 : 0;
+                                _heroItem.tech_specs = r.tech_specs || null;
+                                _refreshHeroMedia();
+                            }
+                            _applyGridMediaBadges(itemId, r.has_multi_audio, r.has_subtitles);
+                        } catch (e) {}
+                    }
+                });
+            } catch (e) {}
+        }, 4000);
+    }
 
     // ===== Filtro de plugins 'player' por contenido (categoría/subcategoría, con '*') =====
     // Un plugin aplica si su categoría/subcategoría saneada coincide con las listas editables (por plugin).

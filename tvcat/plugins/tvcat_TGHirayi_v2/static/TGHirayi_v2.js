@@ -1042,6 +1042,7 @@ html += '</div>';
             if (j.paused) h += '<span style="font-size:10px;color:#eab308;font-weight:600;">PAUSADO</span>';
             if (j.archive_phase === 'processing') h += '<button onclick="window._tgcopy2KillEncode(\'' + j.id + '\')" title="Matar el ffmpeg en curso y re-encodar" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:10px;padding:2px 6px;white-space:nowrap;">✕ Kill</button>';
             h += '<button onclick="window._tgcopy2TogglePause(\'' + j.id + '\',' + (!j.paused) + ')" title="' + (j.paused ? 'Reanudar' : 'Pausar') + '" style="background:none;border:1px solid #3f3f46;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">' + (j.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
+            h += '<button onclick="window._tgcopy2RemoveRest(\'' + j.id + '\')" title="Eliminar desde aquí el resto" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#10005;&#11015;</button>';
         }
         if (isDone) {
             h += '<button onclick="window._tgcopy2Requeue(\'' + j.id + '\')" title="Volver a meter en la cola" style="background:none;border:1px solid #22c55e;color:#22c55e;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#8635;</button>';
@@ -1258,6 +1259,16 @@ html += '</div>';
 
     window._tgcopy2Remove = function(jobId) {
         api(API + '/queue/' + jobId, { method: 'DELETE' }, function() {
+            if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
+        });
+    };
+
+    // Eliminar desde este job hasta el final de la cola (con confirmación).
+    window._tgcopy2RemoveRest = function(jobId) {
+        var ok = confirm('¿Eliminar este job y TODOS los que están debajo en la cola?');
+        if (!ok) return;
+        api(API + '/queue/' + jobId + '/rest', { method: 'DELETE' }, function(r) {
+            showToast((r && r.ok) ? ('Cola recortada (' + (r.removed || 0) + ' eliminados)') : 'No se pudo recortar la cola');
             if (window._tgcopy2RefreshQueue) window._tgcopy2RefreshQueue();
         });
     };

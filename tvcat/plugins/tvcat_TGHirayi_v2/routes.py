@@ -1959,6 +1959,14 @@ async def remove_job(job_id: str, request: Request):
     if not session:
         raise HTTPException(401, "Inicia sesion")
     db = _load_db()
+    _drop_job(db, job_id)
+    _save_db(db)
+    return {"ok": True}
+
+
+def _drop_job(db: dict, job_id: str):
+    """Elimina un job de la cola matando encodes y limpiando workdir
+    (misma lógica que DELETE individual, reutilizada por el borrado en bloque)."""
     job = next((j for j in db.get("queue", []) if j["id"] == job_id), None)
     # Si el job es archive con un encode persistido (posible huérfano del reinicio),
     # matarlo antes de eliminar para no dejar ffmpeg sueltos consumiendo CPU.
@@ -1985,8 +1993,28 @@ async def remove_job(job_id: str, request: Request):
     if job:
         _cleanup_archive_workdir(job_id)
     db["queue"] = [j for j in db.get("queue", []) if j["id"] != job_id]
+
+
+@router.delete("/api/telegram-copy-v2/queue/{job_id}/rest")
+async def remove_job_rest(job_id: str, request: Request):
+    """Elimina desde el job indicado hasta el final de la cola (orden actual)."""
+    session = _session_user(request)
+    if not session:
+        raise HTTPException(401, "Inicia sesion")
+    db = _load_db()
+    queue = db.get("queue", [])
+    idx = next((i for i, j in enumerate(queue) if j["id"] == job_id), None)
+    if idx is None:
+        raise HTTPException(404, "Job no encontrado")
+    doomed = [str(j["id"]) for j in queue[idx:]]
+    for _jid in doomed:
+        try:
+            _drop_job(db, _jid)
+        except Exception as e:
+            print(f"[TGHirayi_v2] Error eliminando {_jid} en borrado en bloque: {e}", flush=True)
     _save_db(db)
-    return {"ok": True}
+    print(f"[TGHirayi_v2] Borrado en bloque desde {job_id}: {len(doomed)} job(s)", flush=True)
+    return {"ok": True, "removed": len(doomed)}
 
 
 @router.delete("/api/telegram-copy-v2/queue/completed/clean")

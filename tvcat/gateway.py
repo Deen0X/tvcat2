@@ -6645,25 +6645,9 @@ async def get_item_details(item_id: str, request: Request = None):
         result["has_multi_audio"] = 1 if _mf.get("multi_audio") else 0
         result["has_subtitles"] = 1 if _mf.get("has_subs") else 0
         # Ficha técnica hero (recuadro): 5 campos desde la sonda.
-        try:
-            _ts = {}
-            if _gtm_media.get("resolution"):
-                _ts["resolution"] = str(_gtm_media["resolution"])
-            _vv = str(_gtm_media.get("vcodec") or "")
-            if _gtm_media.get("_vprofile"):
-                _vv = (_vv + " " + str(_gtm_media["_vprofile"])) if _vv else str(_gtm_media["_vprofile"])
-            if _vv:
-                _ts["video"] = _vv
-            if _gtm_media.get("fullaudiotracks"):
-                _ts["audios"] = str(_gtm_media["fullaudiotracks"])
-            if _gtm_media.get("subtitles"):
-                _ts["subtitles"] = str(_gtm_media["subtitles"])
-            if _gtm_media.get("duration"):
-                _ts["duration"] = str(_gtm_media["duration"])
-            if _ts:
-                result["tech_specs"] = _ts
-        except Exception:
-            pass
+        _ts = _movie_tech_specs(item_id)
+        if _ts:
+            result["tech_specs"] = _ts
     except Exception:
         pass
     # La línea MediaLine es dato máquina: no se muestra en la ficha.
@@ -9144,6 +9128,33 @@ async def probe_missing_stop(request: Request):
         return {"ok": False, "error": str(e)[:200]}
 
 
+def _movie_tech_specs(item_id: str) -> dict:
+    """Ficha técnica (5 campos) desde la sonda del primer episodio. {} si no hay."""
+    try:
+        from services.media_probe_queue import get_title_media as _gtm
+        _m = _gtm(item_id) or {}
+    except Exception:
+        return {}
+    try:
+        _ts = {}
+        if _m.get("resolution"):
+            _ts["resolution"] = str(_m["resolution"])
+        _vv = str(_m.get("vcodec") or "")
+        if _m.get("_vprofile"):
+            _vv = (_vv + " " + str(_m["_vprofile"])) if _vv else str(_m["_vprofile"])
+        if _vv:
+            _ts["video"] = _vv
+        if _m.get("fullaudiotracks"):
+            _ts["audios"] = str(_m["fullaudiotracks"])
+        if _m.get("subtitles"):
+            _ts["subtitles"] = str(_m["subtitles"])
+        if _m.get("duration"):
+            _ts["duration"] = str(_m["duration"])
+        return _ts
+    except Exception:
+        return {}
+
+
 @app.get(api_url("/api/media/flags/{item_id}"))
 async def media_item_flags(item_id: str, request: Request):
     """Flags media de UN título para refrescar badges sin recargar el grid.
@@ -9164,7 +9175,7 @@ async def media_item_flags(item_id: str, request: Request):
         fl = _mfl(_gtm(item_id))
         return {"has_multi_audio": 1 if fl.get("multi_audio") else 0,
                 "has_subtitles": 1 if fl.get("has_subs") else 0,
-                "ready": True}
+                "ready": True, "tech_specs": _movie_tech_specs(item_id)}
     except Exception:
         return {"has_multi_audio": 0, "has_subtitles": 0, "ready": False}
 
