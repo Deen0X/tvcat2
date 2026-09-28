@@ -50,6 +50,8 @@
         if (window._activeFilters) {
             if (window._activeFilters.year_from) params.push('year_from=' + window._activeFilters.year_from);
             if (window._activeFilters.year_to) params.push('year_to=' + window._activeFilters.year_to);
+            if (window._activeFilters.multi_audio) params.push('multi_audio=1');
+            if (window._activeFilters.subtitles) params.push('subtitles=1');
         }
         var exg = excludedGenres();
         if (exg.length) params.push('genres=' + encodeURIComponent(exg.join(',')));
@@ -196,6 +198,8 @@
             url += '&fields=' + encodeURIComponent(fields.join(','));
             if (window._activeFilters.year_from) url += '&year_from=' + window._activeFilters.year_from;
             if (window._activeFilters.year_to) url += '&year_to=' + window._activeFilters.year_to;
+            if (window._activeFilters.multi_audio) url += '&multi_audio=1';
+            if (window._activeFilters.subtitles) url += '&subtitles=1';
         }
         var exg = excludedGenres();
         if (exg.length) url += '&genres=' + encodeURIComponent(exg.join(','));
@@ -248,6 +252,7 @@
     function renderItems(items) {
         var grid = document.getElementById('catalog-grid');
         if (!grid) return;
+        try { window._mediaFilteredCount = null; } catch (e0) {}
         updateSectionTitle();
         try { _renderLocalEditsToolbar(); } catch (e) {}
         // La cabecera de colección solo vive en modo colección.
@@ -270,6 +275,24 @@
                     var tb = ((b && b.title) || '').toString();
                     return ta.localeCompare(tb, 'es', { sensitivity: 'base' });
                 });
+            }
+        } catch (e) {}
+
+        // Filtro media (opciones del filtro de búsqueda): solo multi-audio
+        // y/o solo con subtítulos. Client-side sobre los flags del item
+        // (vienen del enrich; sin dato no pasa). Copia filtrada: currentItems
+        // queda intacto. Antes del recorte maxEl + badge con el conteo real.
+        try {
+            var _af = window._activeFilters || {};
+            if ((_af.multi_audio || _af.subtitles) && items && items.length) {
+                items = items.filter(function(it) {
+                    if (!it || it.item_id === '__back__') return true;
+                    if (_af.multi_audio && !it.has_multi_audio) return false;
+                    if (_af.subtitles && !it.has_subtitles) return false;
+                    return true;
+                });
+                try { window._mediaFilteredCount = items.length; } catch (e2) {}
+                try { updateBadge(items.length); } catch (e2) {}
             }
         } catch (e) {}
 
@@ -320,11 +343,16 @@
                 '<div class="grid-item-cover">' +
                 coverImg +
                 (item.is_collection ? '' : '<div class="grid-item-badge">' + cat.charAt(0).toUpperCase() + cat.slice(1) + '</div>') +
-                (item.has_mkv ? '<div class="grid-item-badge-mkv"><img src="/static/mkv.png" onerror="this.parentNode.textContent=\'\uD83D\uDCE6\'"></div>' : '') +
+                (item.has_mkv ? '<div class="grid-item-badge-mkv"><img src="/static/mkv.png" onerror="this.parentNode.textContent=\'📦\'"></div>' : '') +
+                (item.in_queue ? '<div class="grid-item-badge-queue"><img src="/static/tghirayi.png" onerror="this.outerHTML=\'📥\'"></div>' : '') +
+                (item.is_hidden ? '<div class="grid-item-badge-hidden"><img src="/static/hide_item.png" onerror="this.outerHTML=\'🙈\'"></div>' : '') +
+                ((item.episode_count || 0) > 0 ? '<div class="grid-item-badge-eps"><img src="/static/episode_count.png" onerror="this.style.display=\'none\'"><span>' + item.episode_count + '</span></div>' : '') +
                 (item.has_comment ? '<div class="grid-item-comment-badge"><img src="/static/comment-full.png" data-comment-badge="full" alt="" onerror="this.style.display=\'none\'"></div>' : '') +
                 '<button class="grid-item-fav' + favActive + '" data-fav="' + (item.fav ? 'true' : 'false') + '" data-rep-id="' + repId + '" onclick="Catalog.toggleGridFavorite(event,\'' + item.item_id + '\',\'' + cat + '\')">' +
                 '<svg viewBox="0 0 24 24" fill="' + favFill + '"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>' +
                 '</button>' +
+                (item.has_multi_audio ? '<div class="grid-item-badge-maudio"><img src="/static/multi_audio.png" title="Multi-audio" onerror="this.outerHTML=\'🔊\'"></div>' : '') +
+                (item.has_subtitles ? '<div class="grid-item-badge-subs"><img src="/static/subtitles.png" title="Subtítulos" onerror="this.outerHTML=\'💬\'"></div>' : '') +
                 '</div>' +
                 '<div class="grid-item-info">' +
                 '<div class="grid-item-title">' + escapeHtml(title) + '</div>' +
@@ -442,6 +470,13 @@
     function updateBadge(count) {
         var badge = document.getElementById('results-count');
         if (!badge) return;
+        // Si el filtro media recortó el grid, manda su conteo (el loader
+        // pasa el total sin filtrar después de renderizar).
+        try {
+            if (window._mediaFilteredCount !== null && window._mediaFilteredCount !== undefined) {
+                count = window._mediaFilteredCount;
+            }
+        } catch (e) {}
         var maxEl = 999999;
         if (window.UI && window.UI.getMaxElements) {
             maxEl = window.UI.getMaxElements();
@@ -659,6 +694,10 @@
     function _doHiddenLoad(query) {
         var isParental = (currentCategory === 'hidden_blocked');
         var url = isParental ? '/api/hidden/blocked?profile=0' : '/api/hidden';
+        if (window._activeFilters) {
+            if (window._activeFilters.multi_audio) url += (url.indexOf('?') === -1 ? '?' : '&') + 'multi_audio=1';
+            if (window._activeFilters.subtitles) url += (url.indexOf('?') === -1 ? '?' : '&') + 'subtitles=1';
+        }
         var q = window.sanitizeSearchText(query || '').trim().toLowerCase();
         var mySeq = ++_loadSeq;
         showLoading(true);
@@ -1199,6 +1238,9 @@
                 var cleanDesc = (item.description || 'Sin descripción disponible.');
                 cleanDesc = cleanDesc.replace(/\\n/g, '\n');
                 cleanDesc = cleanDesc.replace(/\u00a0/g, ' ');
+                // Línea MediaLine (dato máquina 🎞️ M1|...|😺): nunca se muestra.
+                try { cleanDesc = cleanDesc.replace(/\uD83C\uDF9E\uFE0F? M1\|[^\n]*\uD83D\uDE3A/g, ''); } catch (e) {}
+                cleanDesc = cleanDesc.replace(/\n{3,}/g, '\n\n');
                 cleanDesc = cleanDesc.replace(/\u25aa\ufe0f/g, '\n\u25aa\ufe0f');
                 var keywords = ['Actualizaci\u00f3n:', 'Idioma:', 'Tama\u00f1o:', 'Partes:', 'Medicina:', 'Contenido Extra:', 'Sinopsis:', 'Serial:', 'Formato:', 'Discos:', 'Funciona desde:', 'Fecha de estreno:'];
                 for (var ki = 0; ki < keywords.length; ki++) {
@@ -1235,6 +1277,15 @@
                         specsHTML += '<div class="spec-item"><span class="spec-label">Fecha de Lanzamiento</span><span class="spec-value">' + formattedDate + '</span></div>';
                     }
                 } else {
+                    // Ficha técnica de la sonda (primer episodio).
+                    try {
+                        var ts = item.tech_specs || {};
+                        if (ts.resolution) specsHTML += '<div class="spec-item"><span class="spec-label">Resolución</span><span class="spec-value">' + escapeHtml(ts.resolution) + '</span></div>';
+                        if (ts.video) specsHTML += '<div class="spec-item"><span class="spec-label">Vídeo</span><span class="spec-value">' + escapeHtml(ts.video) + '</span></div>';
+                        if (ts.audios) specsHTML += '<div class="spec-item"><span class="spec-label">Audios</span><span class="spec-value">' + escapeHtml(ts.audios) + '</span></div>';
+                        if (ts.subtitles) specsHTML += '<div class="spec-item"><span class="spec-label">Subtítulos</span><span class="spec-value">' + escapeHtml(ts.subtitles) + '</span></div>';
+                        if (ts.duration) specsHTML += '<div class="spec-item"><span class="spec-label">Duración</span><span class="spec-value">' + escapeHtml(ts.duration) + '</span></div>';
+                    } catch (e) {}
                     if (item.subcategory) specsHTML += '<div class="spec-item"><span class="spec-label">Formato</span><span class="spec-value">' + item.subcategory.toUpperCase() + '</span></div>';
                     if (item.genres) specsHTML += '<div class="spec-item"><span class="spec-label">Géneros</span><span class="spec-value">' + item.genres + '</span></div>';
                     if (item.age_rating) specsHTML += '<div class="spec-item"><span class="spec-label">Clasificación</span><span class="spec-value">' + item.age_rating + '</span></div>';
@@ -1488,6 +1539,27 @@
                     metaMkvIcon.innerHTML = '<img src="/static/mkv.png" onerror="this.parentNode.textContent=\'\uD83D\uDCE6\'">';
                     metaFavBtn.parentNode.insertBefore(metaMkvIcon, metaFavBtn.nextSibling);
                 }
+                // Badges media (misma línea que favoritos): multi-audio y subtítulos.
+                try {
+                    var oldMedia = categoryEl.parentNode.querySelectorAll('.meta-media-icon');
+                    for (var mdi = 0; mdi < oldMedia.length; mdi++) oldMedia[mdi].remove();
+                    var mediaAnchor = metaFavBtn;
+                    if (item.has_multi_audio) {
+                        var maIcon = document.createElement('span');
+                        maIcon.className = 'meta-media-icon';
+                        maIcon.title = 'Multi-audio';
+                        maIcon.innerHTML = '<img src="/static/multi_audio.png" onerror="this.parentNode.textContent=\'\uD83D\uDD0A\'">';
+                        mediaAnchor.parentNode.insertBefore(maIcon, mediaAnchor.nextSibling);
+                        mediaAnchor = maIcon;
+                    }
+                    if (item.has_subtitles) {
+                        var subIcon = document.createElement('span');
+                        subIcon.className = 'meta-media-icon';
+                        subIcon.title = 'Subtítulos';
+                        subIcon.innerHTML = '<img src="/static/subtitles.png" onerror="this.parentNode.textContent=\'\uD83D\uDCAC\'">';
+                        mediaAnchor.parentNode.insertBefore(subIcon, mediaAnchor.nextSibling);
+                    }
+                } catch (e) { console.log('media badges err', e); }
                 // Badge de colecciones: si el título resuelve en alguna, abre
                 // el modal de pertenencia (miniatura + nombre + abrir, + cerrar).
                 try { _setupHeroCollections(item, itemId, metaFavBtn); } catch (e) {}
@@ -2157,6 +2229,9 @@
         _heroCommentState = null;
         var modal = document.getElementById('detail-modal');
         if (modal) modal.classList.add('hidden');
+        // La sonda corre en fondo tras abrir la hero: al cerrar, refrescar
+        // los badges media de la tarjeta sin recargar el grid.
+        try { if (typeof currentVariantId !== 'undefined' && currentVariantId) _refreshGridMediaBadges(currentVariantId); } catch (e) {}
         setTimeout(function() {
             var focused = document.querySelector('.grid-item.focused');
             if (!focused) {
@@ -2165,6 +2240,102 @@
             }
         }, 100);
     };
+
+    // Aplica flags media a la(s) tarjeta(s) del grid + currentItems.
+    function _applyGridMediaBadges(itemId, ma, subs) {
+        try {
+            var cards = document.querySelectorAll('.grid-item[data-id="' + itemId + '"]');
+            for (var ci = 0; ci < cards.length; ci++) {
+                var cover = cards[ci].querySelector('.grid-item-cover');
+                if (!cover) continue;
+                var olds = cover.querySelectorAll('.grid-item-badge-maudio,.grid-item-badge-subs');
+                for (var oi = 0; oi < olds.length; oi++) olds[oi].parentNode.removeChild(olds[oi]);
+                var fav = cover.querySelector('.grid-item-fav');
+                var anchor = fav ? fav.nextSibling : null;
+                if (ma) {
+                    var d1 = document.createElement('div');
+                    d1.className = 'grid-item-badge-maudio';
+                    d1.innerHTML = '<img src="/static/multi_audio.png" title="Multi-audio" onerror="this.outerHTML=\'🔊\'">';
+                    cover.insertBefore(d1, anchor);
+                }
+                if (subs) {
+                    var d2 = document.createElement('div');
+                    d2.className = 'grid-item-badge-subs';
+                    d2.innerHTML = '<img src="/static/subtitles.png" title="Subtítulos" onerror="this.outerHTML=\'💬\'">';
+                    cover.insertBefore(d2, anchor);
+                }
+            }
+            try {
+                for (var k = 0; k < currentItems.length; k++) {
+                    if (String(currentItems[k].item_id) === String(itemId)) {
+                        currentItems[k].has_multi_audio = ma ? 1 : 0;
+                        currentItems[k].has_subtitles = subs ? 1 : 0;
+                        break;
+                    }
+                }
+            } catch (e) {}
+        } catch (e) {}
+    }
+
+    // Refresca los badges media (multi-audio/subs) de una tarjeta del grid
+    // tras cerrar la hero: la sonda termina en fondo y el grid quedó viejo.
+    // Sondea /api/media/flags hasta listo (60s máx) y parchea sin recargar.
+    function _refreshGridMediaBadges(itemId) {
+        var tries = 0;
+        function _poll() {
+            tries++;
+            window.API.ajax({
+                url: '/api/media/flags/' + encodeURIComponent(itemId),
+                success: function(r) {
+                    if (!r) return;
+                    if (!r.ready && tries < 15) { setTimeout(_poll, 4000); return; }
+                    _applyGridMediaBadges(itemId, r.has_multi_audio, r.has_subtitles);
+                },
+                error: function() { if (tries < 3) setTimeout(_poll, 4000); }
+            });
+        }
+        _poll();
+    }
+
+    // Barra verde de cola de sondas (1px bajo la de escaneo) + refresco en
+    // vivo del grid: a medida que el worker resuelve, parchea tarjetas.
+    var _probeLastSeq = 0;
+    var _probeLastDone = 0;
+    function _pollProbeQueue() {
+        window.API.ajax({
+            url: '/api/media/probe-status',
+            success: function(r) {
+                if (!r) return;
+                try {
+                    var bar = document.getElementById('probeprog');
+                    var fill = document.getElementById('probeprog-fill');
+                    var queued = parseInt(r.queued || 0, 10) || 0;
+                    var done = parseInt(r.done_session || 0, 10) || 0;
+                    if (done < _probeLastDone) _probeLastSeq = 0; // reinicio gateway
+                    _probeLastDone = done;
+                    var total = done + queued;
+                    if (bar && fill) {
+                        if (queued > 0 && total > 0) {
+                            bar.classList.remove('hidden');
+                            fill.style.width = Math.round(done * 100 / total) + '%';
+                            bar.title = 'Sondas: ' + done + '/' + total + ' (' + queued + ' en cola)' + (r.paused_by_playback ? ' — en pausa: reproduciendo' : '');
+                        } else {
+                            bar.classList.add('hidden');
+                        }
+                    }
+                    var recent = r.recent || [];
+                    for (var i = 0; i < recent.length; i++) {
+                        var it = recent[i] || {};
+                        if (it.seq && it.seq > _probeLastSeq) {
+                            _probeLastSeq = it.seq;
+                            if (it.item_id) _applyGridMediaBadges(it.item_id, it.ma, it.subs);
+                        }
+                    }
+                } catch (e) {}
+            }
+        });
+    }
+    try { _pollProbeQueue(); setInterval(_pollProbeQueue, 5000); } catch (e) {}
 
     // ===== Filtro de plugins 'player' por contenido (categoría/subcategoría, con '*') =====
     // Un plugin aplica si su categoría/subcategoría saneada coincide con las listas editables (por plugin).

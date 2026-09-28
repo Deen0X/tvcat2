@@ -1928,6 +1928,27 @@ async def add_to_queue(body: QueueAdd, request: Request):
     except Exception:
         job["needs_pyro"] = False
     _save_db(db)
+    # Sonda media con prioridad: al encolar se verifica tener los datos y si
+    # no, se lanza la sonda al frente (el gate de _process_job espera a
+    # tenerlos antes de descargar/subir).
+    try:
+        _mpq = None
+        try:
+            from services.media_probe_queue import ensure_probed as _mpq_ens
+            _mpq = _mpq_ens
+        except Exception:
+            try:
+                from tvcat.services.media_probe_queue import ensure_probed as _mpq_ens2
+                _mpq = _mpq_ens2
+            except Exception:
+                _mpq = None
+        if _mpq is not None:
+            _st = _mpq(str(job.get("item_id") or ""))
+            if _st == "pending":
+                print(f"[TGHirayi_v2] Job {job['id']}: sonda media lanzada "
+                      f"con prioridad", flush=True)
+    except Exception:
+        pass
     # Si el worker esta pausado y hay trabajos, sugerir reanudar
     return {"ok": True, "job_id": job["id"], "worker_paused": _worker_paused, "worker_state": _worker_state}
 
@@ -2411,7 +2432,7 @@ async def get_job_cover(job_id: str, request: Request):
         # Texto guardado sin tags: verbatim (la edición manual no se regenera).
         preview = stored
     elif template:
-        preview = _resolve_cover_tags(template, job.get("title", ""), ep_count, details)
+        preview = _resolve_cover_tags(template, job.get("title", ""), ep_count, details, media=_cover_media(job))
 
     try:
         if channel_id and source_msg_id:
@@ -2476,14 +2497,14 @@ async def preview_job_cover(job_id: str, body: dict, request: Request):
     ep_count = _job_episode_count(job)
     details = body.get("details") or job.get("enrich_details") or {}
     try:
-        preview = _resolve_cover_tags(template, job.get("title", ""), ep_count, details)
+        preview = _resolve_cover_tags(template, job.get("title", ""), ep_count, details, media=_cover_media(job))
     except Exception as e:
         print(f"[TGHirayi_v2] Error en preview cover: {e}", flush=True)
         preview = template
 
     resp = {"text": preview}
     if body.get("debug"):
-        resp["debug"] = _debug_cover_tags(template, job.get("title", ""), ep_count, details)
+        resp["debug"] = _debug_cover_tags(template, job.get("title", ""), ep_count, details, media=_cover_media(job))
     return resp
 
 
@@ -3124,6 +3145,60 @@ async def _process_job(job: dict, db: dict):
                 _persist_job(job)
                 return
 
+        # Gate sonda media: el título entra en procesamiento solo con la
+        # sonda ejecutada (los tags `_*` del cover la necesitan antes de
+        # descargar/subir). Espera activa con timeout: si la sonda
+        # falla/aparca, se sigue con aviso en vez de bloquear la cola.
+        try:
+            _mpq_probe = None
+            try:
+                from services.media_probe_queue import (
+                    probe_status as _mpq_st, ensure_probed as _mpq_en)
+                _mpq_probe = (_mpq_st, _mpq_en)
+            except Exception:
+                try:
+                    from tvcat.services.media_probe_queue import (
+                        probe_status as _mpq_st2, ensure_probed as _mpq_en2)
+                    _mpq_probe = (_mpq_st2, _mpq_en2)
+                except Exception:
+                    _mpq_probe = None
+            if _mpq_probe is not None:
+                _st_fn, _en_fn = _mpq_probe
+                _iid = str(job.get("item_id") or "")
+                _st = _st_fn(_iid)
+                if _st == "pending":
+                    try:
+                        _en_fn(_iid)
+                    except Exception:
+                        pass
+                    job["status"] = "processing"
+                    job["status_text"] = "Sondando (audio/vídeo)..."
+                    _persist_job(job)
+                    print(f"[TGHirayi_v2] Job {job['id']}: esperando sonda "
+                          f"media antes de procesar", flush=True)
+                    import asyncio as _aio
+                    _waited = 0
+                    while _waited < 600:
+                        await _aio.sleep(5)
+                        _waited += 5
+                        try:
+                            _st = _st_fn(_iid)
+                        except Exception:
+                            _st = "ready"
+                        if _st != "pending":
+                            break
+                        try:
+                            job["status_text"] = (
+                                f"Sondando (audio/vídeo)... {_waited}s")
+                            _persist_job(job)
+                        except Exception:
+                            pass
+                    if _st == "pending":
+                        print(f"[TGHirayi_v2] Job {job['id']}: timeout "
+                              f"esperando sonda, se sigue sin ella", flush=True)
+        except Exception as _e:
+            print(f"[TGHirayi_v2] gate sonda: {_e}", flush=True)
+
         job["status"] = "processing"
         job["progress"] = 0.0
         job["download_progress"] = 0.0
@@ -3132,6 +3207,10 @@ async def _process_job(job: dict, db: dict):
         job["_uploaded_to"] = {}
         job.pop("_dl_ep", None)
         job.pop("_ul_ep", None)
+        # Los topics se re-verifican una vez por run: un id cacheado puede
+        # haber sido borrado en Telegram entre runs (reinicio). El mapa
+        # `_topics` se conserva como candidato; el flag fuerza revalidar.
+        job.pop("_topics_verified", None)
         _persist_job(job)
         print(f"[TGHirayi_v2] Procesando job {job['id']}: {job['title']}", flush=True)
 
@@ -3335,19 +3414,18 @@ async def _process_job(job: dict, db: dict):
         #    Para jobs ARCHIVE el flag NO se fuerza aquí: lo gestiona _archive_upload_phase
         #    (solo marca True tras subir con éxito el PRIMER vídeo). Si se forzara con
         #    resume_from>0, un reinicio durante el primer vídeo (cover ya copiado pero vídeo
-        #    sin subir) dejaría el cover huérfano. En jobs NORMAL: solo resume_from>1
-        #    implica cover publicado (ep.1 completado). Con resume_from<=1 se VERIFICA
+        #    sin subir) dejaría el cover huérfano. Con resume_from<=1 se VERIFICA
         #    el cover real en destino (no basta el flag: un reinicio entre
         #    current_episode=1 y la copia dejaba el título sin cover).
+        #    Con resume_from>1 también se verifica (no se fuerza True): el topic
+        #    puede haber sido borrado en Telegram entre runs y el cover hay que
+        #    re-crearlo en el topic re-resuelto. Barato (fetch_one por destino).
         if not job.get("is_archive"):
-            if resume_from > 1:
-                job["_cover_done"] = True
-            else:
-                try:
-                    _ok = await _verify_cover_uploaded(job, client, destinations)
-                except Exception:
-                    _ok = False
-                job["_cover_done"] = bool(_ok)
+            try:
+                _ok = await _verify_cover_uploaded(job, client, destinations)
+            except Exception:
+                _ok = False
+            job["_cover_done"] = bool(_ok)
             print(f"[TGHirayi_v2] Cover programado para justo antes del 1er vídeo (_cover_done={job['_cover_done']})", flush=True)
 
         # 2. EPISODIOS (pipeline: descargar ep.N+1 mientras se sube ep.N)
@@ -3560,6 +3638,37 @@ async def _process_job(job: dict, db: dict):
                         job["download_finished"] = time.time()
                     _persist_job(job)
 
+                # Sonda del FICHERO FINAL (post-normalize) del primer episodio:
+                # el cover debe describir lo que se sube, no el origen
+                # (avi->mp4, remux faststart, re-mapeo de pistas...).
+                try:
+                    if ep_num == (first_pending or 1):
+                        _fp, _fsz = None, 0
+                        try:
+                            if media_data:
+                                _fp = (media_data[0] or {}).get("final_path")
+                                _fsz = int((media_data[0] or {}).get("file_size") or 0)
+                        except Exception:
+                            pass
+                        if _fp:
+                            try:
+                                from services.media_probe import probe_file as _pbf
+                            except Exception:
+                                try:
+                                    from tvcat.services.media_probe import probe_file as _pbf
+                                except Exception:
+                                    _pbf = None
+                            if _pbf is not None:
+                                _fm = await asyncio.to_thread(_pbf, _fp, 30, _fsz)
+                                if _fm:
+                                    job["_final_media"] = _fm
+                                    print(f"[TGHirayi_v2] Job {job.get('id')}: sonda final "
+                                          f"({(_fm.get('container') or '?')}/"
+                                          f"{(_fm.get('vcodec') or _fm.get('acodec') or '?')}/"
+                                          f"{(_fm.get('resolution') or '')})", flush=True)
+                except Exception as _e:
+                    print(f"[TGHirayi_v2] sonda final: {_e}", flush=True)
+
                 # Lanzar descarga del SIGUIENTE episodio en paralelo (si el
                 # paralelismo está activo; si no, cada episodio se descarga en
                 # el flujo principal con toda la velocidad disponible).
@@ -3589,10 +3698,27 @@ async def _process_job(job: dict, db: dict):
                 job["status_text"] = "Copiando cover..."
                 _persist_job(job)
                 # Sonda media del primer fichero (first-only) para los tags _*
-                # del cover. Sin fichero (copia Telegram) quedan vacíos.
-                # + sugerencia LLM de limpieza (una vez por job, default OFF).
+                # del cover. Solo si la plantilla los usa; si no, se omite.
                 try:
-                    await _ensure_job_media(job, media_data, client=client, episode=episode, source_channel_id=source_channel_id)
+                    _need_media = False
+                    try:
+                        from services.enrich_tags import needs_media as _needs_media
+                    except Exception:
+                        try:
+                            from tvcat.services.enrich_tags import needs_media as _needs_media
+                        except Exception:
+                            _needs_media = lambda t: False
+                    _stored_cov = (job.get("cover_text") or "")
+                    if _stored_cov and _needs_media(_stored_cov):
+                        _need_media = True
+                    elif job.get("enrich_details"):
+                        _dtpl = _default_cover_template(job.get("category", ""), job.get("subcategory", ""))
+                        if _dtpl and _needs_media(_dtpl):
+                            _need_media = True
+                    if _need_media:
+                        await _ensure_job_media(job, media_data, client=client, episode=episode, source_channel_id=source_channel_id)
+                    else:
+                        job["_media_probed"] = True
                 except Exception:
                     pass
                 try:
@@ -4203,6 +4329,111 @@ async def _get_topic_episode_msg_ids(client, dest: dict, topic_id: int) -> List[
     return out
 
 
+def _update_dest_topic_id(dest: dict, tid: int):
+    """Persiste el nuevo topic_id en la config del destino (el fijo murió).
+    Actualiza también el dict en memoria. Una sola toma del lock para no
+    pisar progreso de la cola (la queue de disco se devuelve intacta)."""
+    try:
+        did = str(dest.get("id") or "")
+        if not did:
+            return
+        with _DB_LOCK:
+            db = None
+            if os.path.exists(DB_FILE):
+                try:
+                    with open(DB_FILE, "r", encoding="utf-8") as f:
+                        db = json.load(f)
+                except Exception:
+                    db = None
+            if db is None:
+                db = {"destinations": {}, "queue": [], "job_id_counter": 0}
+            dests = db.get("destinations") or {}
+            if did in dests and isinstance(dests[did], dict):
+                dests[did]["topic_id"] = int(tid)
+                db["destinations"] = dests
+                with open(DB_FILE, "w", encoding="utf-8") as f:
+                    json.dump(db, f, indent=2, ensure_ascii=False)
+                print(f"[TGHirayi_v2] Destino {did} actualizado a topic {tid}", flush=True)
+        dest["topic_id"] = int(tid)
+    except Exception as e:
+        print(f"[TGHirayi_v2] No se pudo persistir topic {tid}: {e}", flush=True)
+
+
+async def _resolve_topo2_topic(client, dest: dict, dest_key: str, cached: dict, title: str, job: dict) -> Optional[int]:
+    """Topo 2: el topic es fijo en config, pero puede haber sido borrado en
+    Telegram. Se verifica vivo una vez por run (flag `_topics_verified`, que
+    se limpia al iniciar `_process_job`); si murió, se busca por título
+    (puede existir con otro id) y si no, se crea. El nuevo id se persiste
+    en la config del destino. Sin resolución → None (Anti-General)."""
+    if dest_key in cached and job.get("_topics_verified"):
+        return cached[dest_key]
+    fixed = dest.get("topic_id")
+    alive_items = None
+    try:
+        alive_items = await _svc().list_forum_topics(dest["channel_id"], **_svc_creds(job))
+    except Exception as e:
+        print(f"[TGHirayi_v2] Sin listado de topics en {dest.get('name', '?')} ({e}): fail-open con el fijo", flush=True)
+    if alive_items is not None:
+        try:
+            alive_ids = {int(t.get("id")) for t in (alive_items or [])
+                         if (t.get("id") if isinstance(t, dict) else getattr(t, 'id', None)) is not None}
+        except Exception:
+            alive_ids = set()
+        cand = cached.get(dest_key, fixed)
+        if cand is not None:
+            try:
+                if int(cand) in alive_ids:
+                    cached[dest_key] = int(cand)
+                    job["_topics_verified"] = True
+                    _persist_job(job)
+                    return int(cand)
+            except Exception:
+                pass
+        if fixed is not None:
+            print(f"[TGHirayi_v2] Topic fijo {fixed} de {dest.get('name', '?')} no existe: buscando '{title}'", flush=True)
+        tid = None
+        try:
+            for t in alive_items or []:
+                tn = (t.get("title") if isinstance(t, dict) else getattr(t, 'title', '')) or ''
+                if _topic_norm(tn) and _topic_norm(tn) == _topic_norm(title):
+                    _tid = (t.get("id") if isinstance(t, dict) else getattr(t, 'id', None))
+                    if _tid is not None:
+                        tid = int(_tid)
+                        break
+        except Exception:
+            tid = None
+        if tid:
+            print(f"[TGHirayi_v2] Topic topo2 re-resuelto por título '{title}' -> {tid}", flush=True)
+        else:
+            try:
+                tid = await _create_forum_topic(client, dest, title, job)
+                if tid:
+                    _topic_cache_add(dest, title, int(tid))
+            except Exception as e:
+                print(f"[TGHirayi_v2] Error creando topic topo2 '{title}': {e}", flush=True)
+        if tid:
+            cached[dest_key] = int(tid)
+            job["_topics_verified"] = True
+            job.setdefault("_topic_names", {})[dest_key] = title
+            job["_topics_traced"] = True
+            _persist_job(job)
+            _update_dest_topic_id(dest, int(tid))
+            print(f"[TGHirayi_v2] Topic resuelto '{title}' -> {int(tid)} en {dest.get('name', '?')}", flush=True)
+            return int(tid)
+        print(f"[TGHirayi_v2] Topic NO resuelto para '{title}' (topo 2) → General NO permitido", flush=True)
+        return None
+    # Sin listado (blip de red): fail-open con lo conocido; la verificación
+    # del cover lo confirma cuando vuelva la red.
+    if dest_key in cached:
+        return cached[dest_key]
+    if fixed is not None:
+        try:
+            return int(fixed)
+        except Exception:
+            return None
+    return None
+
+
 async def _resolve_topic_id_async(client, dest: dict, title: str, job: dict) -> Optional[int]:
     """Resuelve el topic_id para un destino. Para topología 3 busca por nombre del título
     en los topics existentes del grupo (vía caché F4); si no existe coincidencia exacta, lo crea.
@@ -4210,13 +4441,13 @@ async def _resolve_topic_id_async(client, dest: dict, title: str, job: dict) -> 
     topo = dest.get("topology", 1)
     if topo == 1:
         return None
-    elif topo == 2:
-        return dest.get("topic_id")
-    elif topo != 3:
+    elif topo not in (2, 3):
         return None
 
     dest_key = str(dest.get("id") or dest.get("channel_id") or dest.get("name") or 'dest')
     cached = job.setdefault("_topics", {})
+    if topo == 2:
+        return await _resolve_topo2_topic(client, dest, dest_key, cached, title, job)
     if dest_key in cached:
         # Validar UNA vez por job (flag): un id cacheado de otra época puede
         # estar borrado en Telegram (responder a un topic muerto cae a General
@@ -4873,7 +5104,7 @@ def _resolve_cover_override(job) -> Optional[str]:
     if stored:
         if "{f" in stored or "{_" in stored:
             cover_episodes = _job_episode_count(job)
-            return _resolve_cover_tags(stored, job.get("title", ""), cover_episodes, job.get("enrich_details") or {}, media=job.get("_media_info"))
+            return _resolve_cover_tags(stored, job.get("title", ""), cover_episodes, job.get("enrich_details") or {}, media=_cover_media(job))
         return stored
     # Sin cover_text: solo usar plantilla default si vino del enriquecedor
     if not job.get("enrich_details"):
@@ -4882,7 +5113,141 @@ def _resolve_cover_override(job) -> Optional[str]:
     if not dtpl:
         return None
     cover_episodes = _job_episode_count(job)
-    return _resolve_cover_tags(dtpl, job.get("title", ""), cover_episodes, job.get("enrich_details") or {}, media=job.get("_media_info"))
+    return _resolve_cover_tags(dtpl, job.get("title", ""), cover_episodes, job.get("enrich_details") or {}, media=_cover_media(job))
+
+
+def _cover_media(job) -> dict:
+    """Media para tags `_*` del cover: la sonda del FICHERO FINAL manda
+    (post-normalize: lo que se sube, no el origen); luego la fresca del job;
+    la central (`episode_media`, worker de fondo) rellena lo que falte."""
+    try:
+        base = {}
+        try:
+            from services.media_probe_queue import get_title_media as _gtm
+        except Exception:
+            try:
+                from tvcat.services.media_probe_queue import get_title_media as _gtm
+            except Exception:
+                _gtm = lambda iid: {}
+        if isinstance(job, dict) and job.get("item_id"):
+            base = _gtm(str(job.get("item_id"))) or {}
+        fresh = (job.get("_media_info") or {}) if isinstance(job, dict) else {}
+        if not isinstance(fresh, dict):
+            fresh = {}
+        final = (job.get("_final_media") or {}) if isinstance(job, dict) else {}
+        if not isinstance(final, dict):
+            final = {}
+        merged = dict(base)
+        merged.update({k: v for k, v in fresh.items() if v not in (None, "")})
+        merged.update({k: v for k, v in final.items() if v not in (None, "")})
+        return merged
+    except Exception:
+        try:
+            return dict((job or {}).get("_media_info") or {})
+        except Exception:
+            return {}
+
+
+_sender_premium = {"ts": 0, "premium": False}
+
+
+async def _sender_is_premium(client) -> bool:
+    """¿La cuenta que envía es premium? (límite caption 1024 vs 4096).
+    Cache 24h; ante duda, estándar (lado seguro)."""
+    try:
+        import time as _t
+        if _t.time() - float(_sender_premium.get("ts") or 0) < 86400:
+            return bool(_sender_premium.get("premium"))
+        me = None
+        try:
+            fn = getattr(client, "get_me", None)
+            if callable(fn):
+                import asyncio as _aio
+                r = fn()
+                me = await r if _aio.isfuture(r) or hasattr(r, "__await__") else r
+        except Exception:
+            me = None
+        prem = bool(getattr(me, "premium", getattr(me, "is_premium", False)))
+        _sender_premium["premium"] = prem
+        _sender_premium["ts"] = _t.time()
+        return prem
+    except Exception:
+        return False
+
+
+async def _ensure_medialine(text, job, client, has_photo: bool):
+    """Apendea la línea MediaLine al cover si la plantilla no traía
+    `{_fmedialine}` (ya resuelto inline) y cabe en el límite Telegram
+    (caption foto 1024 estándar / 4096 premium o texto). Silencioso."""
+    try:
+        if not text:
+            return text
+        try:
+            from services.media_line import (
+                MARK as _MK, encode_line as _ENC,
+                parse_media_line as _PML)
+        except Exception:
+            try:
+                from tvcat.services.media_line import (
+                    MARK as _MK, encode_line as _ENC,
+                    parse_media_line as _PML)
+            except Exception:
+                return text
+        # Colecciones: sin episodios propios, sin línea.
+        try:
+            from services.media_probe_queue import probe_status as _pst
+        except Exception:
+            try:
+                from tvcat.services.media_probe_queue import probe_status as _pst
+            except Exception:
+                _pst = lambda iid: "na"
+        try:
+            if _pst(str((job or {}).get("item_id") or "")) == "na":
+                return text
+        except Exception:
+            pass
+        line = _ENC(_cover_media(job))
+        if line:
+            # Fresca disponible (describe lo que se sube): manda sobre
+            # cualquier línea manual previa (puede ser del origen sin
+            # normalizar). Se quitan todas y se pone la fresca.
+            try:
+                from services.enrich_tags import strip_media_line as _sml
+            except Exception:
+                try:
+                    from tvcat.services.enrich_tags import strip_media_line as _sml
+                except Exception:
+                    _sml = lambda t: t
+            try:
+                text = _sml(text)
+            except Exception:
+                pass
+            premium = await _sender_is_premium(client)
+            limit = 4096 if (not has_photo or premium) else 1024
+            cand = text.rstrip() + "\n" + line
+            if len(cand) <= limit:
+                return cand
+            print(f"[TGHirayi_v2] medialine omitida: no cabe ({len(cand)}/{limit})",
+                  flush=True)
+            return text
+        # Sin sonda: se respeta la manual válida si la hay (mejor que nada);
+        # los restos rotos se quitan.
+        try:
+            _have = _PML(text)
+            if _have and (_have.get("resolution") or
+                         str(_have.get("audiocount") or "") not in ("", "0")):
+                return text
+        except Exception:
+            pass
+        try:
+            import re as _re
+            text = _re.sub(
+                r"\U0001F39E\uFE0F?\sM1\|[^\n]*", "", text).rstrip()
+        except Exception:
+            pass
+        return text
+    except Exception:
+        return text
 
 
 def _download_poster_bytes_sync(url, timeout=25):
@@ -5142,7 +5507,7 @@ async def _copy_cover_to_destinations(job, client, cover_messages, destinations,
                     dtpl = _default_cover_template(job.get("category", ""), job.get("subcategory", ""))
                     if dtpl and job.get("enrich_details"):
                         ep_cnt = _job_episode_count(job)
-                        cover_override = _resolve_cover_tags(dtpl, job.get("title", ""), ep_cnt, job.get("enrich_details") or {}, media=job.get("_media_info"))
+                        cover_override = _resolve_cover_tags(dtpl, job.get("title", ""), ep_cnt, job.get("enrich_details") or {}, media=_cover_media(job))
                     else:
                         cover_override = (job.get("title") or "").strip()
                 except Exception:
@@ -5191,6 +5556,13 @@ async def _copy_cover_to_destinations(job, client, cover_messages, destinations,
                 generic_blob = row["image_blob"]
         except Exception as e:
             print(f"[TGHirayi_v2] generic asset lookup error: {e}", flush=True)
+        # MediaLine: apendear sonda si la plantilla no la traía y cabe.
+        try:
+            cover_override = await _ensure_medialine(
+                cover_override, job, client,
+                bool(poster_bytes or generic_blob))
+        except Exception:
+            pass
         for dest in destinations:
             topic_id = await _resolve_topic_id_async(client, dest, job["title"], job)
             _dids: List[int] = []
@@ -5229,6 +5601,26 @@ async def _copy_cover_to_destinations(job, client, cover_messages, destinations,
         if _bt is not None:
             cover_override = _bt
             poster_bytes = _bp
+    # MediaLine: apendear sonda si la plantilla no la traía y cabe.
+    if cover_override is not None:
+        try:
+            _has_ph = bool(poster_bytes)
+            if not _has_ph:
+                try:
+                    for _m in (cover_messages or []):
+                        _t, _pb = (( _m.get("text") or "", _m.get("photo_bytes"))
+                                   if isinstance(_m, dict) else
+                                   (getattr(_m, "message", None) or getattr(_m, "text", "") or "",
+                                    getattr(_m, "photo_bytes", None)))
+                        if _pb:
+                            _has_ph = True
+                            break
+                except Exception:
+                    pass
+            cover_override = await _ensure_medialine(
+                cover_override, job, client, _has_ph)
+        except Exception:
+            pass
     for dest in destinations:
         topic_id = await _resolve_topic_id_async(client, dest, job["title"], job)
         # Anti-General: en topo 2/3 sin topic resuelto NO se publica (ni cover).
@@ -7269,16 +7661,15 @@ async def analyze_clean_patterns(body: CleanAnalyzeReq, request: Request):
 async def _ensure_job_media(job: dict, media_data: list, client=None, episode: dict = None, source_channel_id=None) -> dict:
     """Sonda ffprobe del primer vídeo (first-only, una vez por job):
     1) fichero real en disco/datos (flujo con descarga), 2) head moov mínimo
-    (copia-Telegram con `media_probe` ON). Guarda en `job._media_info`
-    (+ `files` = vídeos en scope). Sin nada → {} (tags `_*` se omiten)."""
+    (copia-Telegram). Guarda en `job._media_info` (+ `files` = vídeos en
+    scope). Sin nada → {} (tags `_*` se omiten). Siempre se sonda: si la
+    plantilla usa tags `_*` hay que resolverlos; si no, el coste es un
+    ffprobe local sobre un fichero ya descargado."""
     try:
         if not isinstance(job, dict):
             return {}
         if job.get("_media_probed"):
             return job.get("_media_info") or {}
-        if not _load_config().get("media_probe"):
-            job["_media_probed"] = True
-            return {}
         path, _tmp = "", ""
         for md in (media_data or []):
             if not isinstance(md, dict):
@@ -7373,19 +7764,23 @@ _SIMPLE_TAG_NAMES = (
     "description", "sinopsis", "overview", "episodes", "season", "temporada",
     "season_episodes", "ext", "extension", "_resolution", "_resolutionx",
     "_resolutiony", "_vcodec", "_fps", "_acodec", "_audiotracks",
-    "_fullaudiotracks", "_subtitles", "_container", "_extension", "_duration",
+    "_fullaudiotracks", "_audiocount", "_achannels", "_subtitles", "_subcount",
+    "_container", "_extension", "_duration",
     "_durationm", "_bitrate", "_filesize", "_aspectratio", "_quality", "_files",
+    "_medialine", "medialine",
+    "resolution", "fullaudiotracks", "subtitles", "aspectratio", "bitrate",
+    "duration", "fps",
 )
 
 
-def _debug_cover_tags(text: str, title: str, total_episodes: int, details: dict = None) -> list:
+def _debug_cover_tags(text: str, title: str, total_episodes: int, details: dict = None, media: dict = None) -> list:
     """Diagnóstico por tag: nº, nombre, valor resuelto (o 'vacío') y si tiene dato.
     Sirve para ver en el editor qué tags resuelven y cuáles quedan vacíos."""
     try:
         from services.enrich_tags import get_base_tags as _gbt, load_customs as _lc
     except Exception:
         from tvcat.services.enrich_tags import get_base_tags as _gbt, load_customs as _lc
-    values = _gbt(title, total_episodes, details or {})
+    values = _gbt(title, total_episodes, details or {}, media=media)
     customs = _lc()
     has_title = ("{title}" in text) or ("{ftitle}" in text)
     tag = _sanitize_title_tag(title)
@@ -7508,6 +7903,15 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
     Además, los vídeos no-MP4 (AVI, WMV, MOV, WEBM...) se convierten SIEMPRE a MP4.
     Solo los MKV saltan la conversión si streaming_mkv está activo (se suben tal cual).
     Si streaming_mkv, sube el MKV tal cual (sin re-encode)."""
+    try:
+        from services.tg_activity import mark as _tg_mark
+        _tg_mark()
+    except Exception:
+        try:
+            from tvcat.services.tg_activity import mark as _tg_mark2
+            _tg_mark2()
+        except Exception:
+            pass
     result = []
     # Extraer chat_id del telegram_link (mismo metodo que el reproductor)
     chat_id = _extract_channel_id(episode.get("telegram_link", "")) or source_channel_id
@@ -8081,6 +8485,9 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
                 "file_name": fname or 'file',
                 "file_size": file_size,
                 "file_path": _file_path,
+                # Fichero FINAL en disco (post-normalize): el cover sondará
+                # este (lo que se sube), no el origen.
+                "final_path": (final_path if "final_path" in locals() and final_path and os.path.isfile(final_path) else None),
                 "mime_type": info.get("mime_type") or "application/octet-stream",
                 "attributes": [],
                 "thumb_data": thumb_data,
@@ -8286,6 +8693,15 @@ async def _upload_episode_to_destination(client, pyro_client, episode: dict, med
     Telethon: >10MB con upload paralelo (upload_threads) y block size (part_size_kb, máx 512KB).
     Pyrogram (>=1.9GB obligatorio): ficheros >1.9GB.
     Devuelve la lista de msg_id creados en el destino."""
+    try:
+        from services.tg_activity import mark as _tg_mark3
+        _tg_mark3()
+    except Exception:
+        try:
+            from tvcat.services.tg_activity import mark as _tg_mark4
+            _tg_mark4()
+        except Exception:
+            pass
     print(f"[TGHirayi_v2] [UPLOAD] inicio: {len(media_data or [])} fichero(s), pyro={'SI' if pyro_client else 'NO'} (build 20260909-dbg)", flush=True)
     cfg = _load_config()
     block_kb = int(cfg.get("download_chunk_size_kb", 1024) or 1024)

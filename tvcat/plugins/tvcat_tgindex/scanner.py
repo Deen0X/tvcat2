@@ -744,10 +744,123 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
     except Exception:
         pass
 
+    # MediaLine del cover -> episode_media central (bootstrap sin sonda).
+    try:
+        _save_scanned_medialine(description, files, is_collection,
+                                telegram_link)
+    except Exception:
+        pass
+    # Sonda diferida: cada título escaneado entra en la cola persistente
+    # (idempotente: salta lo ya sondado o encolado; ~ms por título).
+    if not is_collection:
+        try:
+            try:
+                from services.media_probe_queue import enqueue_title as _enq_scan
+            except Exception:
+                try:
+                    from tvcat.services.media_probe_queue import enqueue_title as _enq_scan
+                except Exception:
+                    _enq_scan = None
+            if _enq_scan is not None:
+                _enq_scan(item_id)
+        except Exception:
+            pass
+
     if should_close:
         conn.commit()
         conn.close()
     return cat_id
+
+
+def _save_scanned_medialine(description, files, is_collection, fallback_link=""):
+    """Medialine del cover -> `episode_media` central (solo si NO hay fila).
+    Bootstrap sin red: el worker es dueño de las filas existentes (así no hay
+    bucle scan-probe por formatos de fecha distintos). Clave = la del primer
+    fichero, igual que deriva el sync central desde su telegram_link."""
+    try:
+        if is_collection or not files or MARK_ML not in (description or ""):
+            return
+        try:
+            from services.media_line import parse_media_line as _pml
+        except Exception:
+            try:
+                from tvcat.services.media_line import parse_media_line as _pml
+            except Exception:
+                return
+        media = _pml(description or "")
+        if not media:
+            return
+        m0 = files[0]
+        try:
+            if hasattr(m0, "chat_id"):
+                link = (f"https://t.me/c/{str(m0.chat_id).replace('-100', '')}/{m0.id}")
+            else:
+                link = fallback_link
+            tail = link.split("/c/", 1)[1]
+            key = tail.replace("/", "_")
+            if not key or "_" not in key:
+                return
+        except Exception:
+            return
+        try:
+            fdate = getattr(m0, "date", "")
+            mdate = str(fdate) if fdate else ""
+        except Exception:
+            mdate = ""
+        import json as _js
+        import time as _t
+        try:
+            from services.catalog_service import get_conn as _gc
+        except Exception:
+            try:
+                from tvcat.services.catalog_service import get_conn as _gc
+            except Exception:
+                return
+        try:
+            conn = _gc()
+        except Exception:
+            return
+        try:
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM episode_media WHERE episode_key=?",
+                    (key,)).fetchone()
+            except Exception:
+                row = None
+            if row:
+                return
+            try:
+                try:
+                    from services.media_probe_queue import media_flags as _mf2
+                except Exception:
+                    try:
+                        from tvcat.services.media_probe_queue import media_flags as _mf2
+                    except Exception:
+                        _mf2 = lambda m: {}
+                _fl2 = _mf2(media) or {}
+            except Exception:
+                _fl2 = {}
+            conn.execute(
+                "INSERT OR IGNORE INTO episode_media"
+                " (episode_key, media_json, media_date, probed_at,"
+                " has_multi_audio, has_subs)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (key, _js.dumps(media, ensure_ascii=False),
+                 mdate, int(_t.time()),
+                 1 if _fl2.get("multi_audio") else 0,
+                 1 if _fl2.get("has_subs") else 0))
+            conn.commit()
+            add_log(f"    → medialine {key} (cover, sin sonda)")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+MARK_ML = "\U0001F39E"
 
 
 

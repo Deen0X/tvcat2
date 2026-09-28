@@ -124,6 +124,21 @@ def _foreignnameseason(api_title, api_original, det: dict) -> str:
     return _foreignname(api_title, api_original, det, suffix)
 
 
+def _medialine_of(md: dict) -> str:
+    """Línea MediaLine v1 del media dict ('' si no hay datos)."""
+    try:
+        from services.media_line import encode_line as _enc
+    except Exception:
+        try:
+            from tvcat.services.media_line import encode_line as _enc
+        except Exception:
+            return ""
+    try:
+        return _enc(md or {})
+    except Exception:
+        return ""
+
+
 def get_base_tags(title: str = "", total_episodes: int = 0, details: dict = None,
                   media: dict = None) -> dict:
     """Mapa completo de tags base (unión de los que usaban v2 y enricher).
@@ -216,7 +231,10 @@ def get_base_tags(title: str = "", total_episodes: int = 0, details: dict = None
         "_acodec": str(_md.get("acodec") or ""),
         "_audiotracks": str(_md.get("audiotracks") or ""),
         "_fullaudiotracks": str(_md.get("fullaudiotracks") or ""),
+        "_audiocount": str(_md.get("audiocount") or ""),
+        "_achannels": str(_md.get("achannels") or ""),
         "_subtitles": str(_md.get("subtitles") or ""),
+        "_subcount": str(_md.get("subcount") or ""),
         "_container": str(_md.get("container") or ""),
         "_extension": str(_md.get("extension") or ""),
         "_duration": str(_md.get("duration") or ""),
@@ -226,6 +244,17 @@ def get_base_tags(title: str = "", total_episodes: int = 0, details: dict = None
         "_aspectratio": str(_md.get("aspectratio") or ""),
         "_quality": str(_md.get("quality") or ""),
         "_files": str(_md.get("files") or ""),
+        "_medialine": _medialine_of(_md),
+        # Espejos planos: resuelven en editores (bake) igual que en la subida.
+        # (Los {_*} solo resuelven al copiar en TGHirayi.)
+        "medialine": _medialine_of(_md),
+        "resolution": str(_md.get("resolution") or ""),
+        "fullaudiotracks": str(_md.get("fullaudiotracks") or ""),
+        "subtitles": str(_md.get("subtitles") or ""),
+        "aspectratio": str(_md.get("aspectratio") or ""),
+        "bitrate": str(_md.get("bitrate") or ""),
+        "duration": str(_md.get("duration") or ""),
+        "fps": str(_md.get("fps") or ""),
     }
 
 
@@ -358,7 +387,10 @@ def _legacy_defaults() -> dict:
         "_acodec": "Audio: {value}",
         "_audiotracks": "Audio tracks: {value}",
         "_fullaudiotracks": "Full audio: {value}",
+        "_audiocount": "Audio count: {value}",
+        "_achannels": "Audio channels: {value}",
         "_subtitles": "Subtitles: {value}",
+        "_subcount": "Subtitle count: {value}",
         "_container": "Container: {value}",
         "_extension": "Ext: {value}",
         "_duration": "Duration: {value}",
@@ -368,6 +400,15 @@ def _legacy_defaults() -> dict:
         "_aspectratio": "Aspect: {value}",
         "_quality": "Quality: {value}",
         "_files": "Files: {value}",
+        "_medialine": "{value}",
+        "medialine": "{value}",
+        "resolution": "Resolution: {value}",
+        "fullaudiotracks": "Full audio: {value}",
+        "subtitles": "Subtitles: {value}",
+        "aspectratio": "Aspect: {value}",
+        "bitrate": "Bitrate: {value} Kbps",
+        "duration": "Duration: {value}",
+        "fps": "FPS: {value}",
         "ext": "Ext: {value}",
         "extension": "Ext: {value}",
         "description": "Description:\n{value}",
@@ -488,7 +529,13 @@ def resolve_cover(text: str, title: str = "", total_episodes: int = 0,
 
 # ─── Validación (editor) ─────────────────────────────────────────────
 
-_MEDIA_TOKEN_RE = re.compile(r"\{(f)?_[A-Za-z][A-Za-z0-9_]*\}")
+_MEDIA_TOKEN_RE = re.compile(
+    r"\{(?:(f)?_[A-Za-z][A-Za-z0-9_]*|"
+    r"f?(?:medialine|resolution|fullaudiotracks|subtitles|aspectratio|bitrate|duration|fps))\}")
+
+# Espejos planos de media (resuelven en editores y en subida).
+_MEDIA_PLAIN_KEYS = ("medialine", "resolution", "fullaudiotracks",
+                     "subtitles", "aspectratio", "bitrate", "duration", "fps")
 
 
 def strip_media_tags(text: str) -> str:
@@ -499,6 +546,29 @@ def strip_media_tags(text: str) -> str:
         return text
     try:
         out = _MEDIA_TOKEN_RE.sub("", text)
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        return out.strip()
+    except Exception:
+        return text
+
+
+def needs_media(text: str) -> bool:
+    """¿La plantilla usa tags `_*`? Si sí, TGHirayi debe sondar el primer
+    fichero aunque `media_probe` esté OFF (sin sonda saldrían vacíos)."""
+    try:
+        return bool(_MEDIA_TOKEN_RE.search(text or ""))
+    except Exception:
+        return False
+
+
+def strip_media_line(text: str) -> str:
+    """Quita la línea MediaLine (`🎞️ M1|...|😺`) para DISPLAY (hero, etc.).
+    Es dato máquina: viaja en el cover pero no se muestra."""
+    if not text or "\U0001F39E" not in text:
+        return text
+    try:
+        out = re.sub(r"\U0001F39E\uFE0F?\sM1\|[^\n\U0001F63A]*\|?\U0001F63A",
+                     "", text)
         out = re.sub(r"\n{3,}", "\n\n", out)
         return out.strip()
     except Exception:

@@ -638,6 +638,19 @@ async def lifespan(app_instance):
     # Iniciar servicio de Telegram
     from services.telegram_service import get_telegram_service
     asyncio.create_task(get_telegram_service().start())
+    # Worker de sonda media (plan MediaProbeQueue, F2): fondo, MKV primero.
+    try:
+        from services.media_probe_worker import run as _mpq_run
+        _spawn(_mpq_run())
+    except Exception as _e_mpq:
+        print(f" [PROBE] worker no iniciado: {_e_mpq}")
+    # Feeder en reposo: alimenta la cola si 120s sin Telegram (auto-off con
+    # actividad) + modo forzado por botón.
+    try:
+        from services.media_probe_feeder import run as _mpf_run
+        _spawn(_mpf_run())
+    except Exception as _e_mpf:
+        print(f" [PROBE-FEED] no iniciado: {_e_mpf}")
     print(f" [TVCAT2] Listo. Plugins cargados: {len(_plugin_loader.registry)}")
     yield
     print(" [TVCAT2] Apagando...")
@@ -1513,7 +1526,7 @@ async def get_catalog_tree():
         result.append({"source": src, "categories": cats})
     return {"tree": result}
 
-def _filter_items(items, search: str = "", fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = ""):
+def _filter_items(items, search: str = "", fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = "", multi_audio: str = "", subtitles: str = ""):
     """Aplica filtros de catálogo (búsqueda, año, géneros) sobre una lista ya obtenida.
     Usado para continue/completed/favorites donde el origen no es get_random_items."""
     if not items:
@@ -1647,6 +1660,15 @@ def _filter_items(items, search: str = "", fields: Optional[str] = None, year_fr
             if not hay:
                 continue
         filtered.append(it)
+    # Filtro media (flags del primer episodio, batch): AND con lo anterior.
+    try:
+        if (multi_audio in ("1", "true", True) or subtitles in ("1", "true", True)):
+            from services.catalog_service import filter_media_items as _fmi
+            filtered = _fmi(filtered,
+                            multi_audio=(multi_audio in ("1", "true", True)),
+                            subtitles=(subtitles in ("1", "true", True)))
+    except Exception:
+        pass
     return filtered
 
 def _enrich_has_comment(items):
@@ -1665,12 +1687,17 @@ def _enrich_has_comment(items):
     return items
 
 @app.get(api_url("/api/catalog/continue"))
-async def catalog_continue(request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = ""):
+async def catalog_continue(request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = "", multi_audio: str = "", subtitles: str = ""):
     from services.favorites_service import get_continue_watching
     from services.auth_service import get_session
     session = get_session(request.cookies.get("tvcat_session",""))
     if not session: raise HTTPException(401)
-    items = get_continue_watching(session.get("profile_id") or session["user_id"], limit=min(limit,200))
+    _ma = multi_audio in ("1", "true", True)
+    _ss = subtitles in ("1", "true", True)
+    # Con filtro media se pide fondo (hasta 2000) para filtrar en profundidad
+    # y luego recortar: son listas personales, no todo el catálogo.
+    _fetch = 2000 if (_ma or _ss) else min(limit, 200)
+    items = get_continue_watching(session.get("profile_id") or session["user_id"], limit=_fetch)
     try:
         from services.catalog_service import get_conn, get_hidden_sets, filter_hidden_items
         _hc = get_conn()
@@ -1681,20 +1708,28 @@ async def catalog_continue(request: Request, search: str = "", limit: int = 200,
         items = filter_hidden_items(items, _h, _b)
     except Exception:
         pass
-    items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
+    items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres, multi_audio=multi_audio, subtitles=subtitles)
     # limitar tras filtrar si se pidió search (mantener límite)
-    if search or year_from or year_to or genres:
+    if search or year_from or year_to or genres or _ma or _ss:
         items = items[:min(limit,200)]
     _enrich_has_comment(items)
+    try:
+        from services.catalog_service import enrich_grid_badges
+        enrich_grid_badges(items, session.get("profile_id") or session["user_id"])
+    except Exception:
+        pass
     return {"items": items, "count": len(items)}
 
 @app.get(api_url("/api/catalog/completed"))
-async def catalog_completed(request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = ""):
+async def catalog_completed(request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = "", multi_audio: str = "", subtitles: str = ""):
     from services.favorites_service import get_completed
     from services.auth_service import get_session
     session = get_session(request.cookies.get("tvcat_session",""))
     if not session: raise HTTPException(401)
-    items = get_completed(session.get("profile_id") or session["user_id"], limit=min(limit,200))
+    _ma2 = multi_audio in ("1", "true", True)
+    _ss2 = subtitles in ("1", "true", True)
+    _fetch2 = 2000 if (_ma2 or _ss2) else min(limit, 200)
+    items = get_completed(session.get("profile_id") or session["user_id"], limit=_fetch2)
     try:
         from services.catalog_service import get_conn, get_hidden_sets, filter_hidden_items
         _hc = get_conn()
@@ -1705,10 +1740,15 @@ async def catalog_completed(request: Request, search: str = "", limit: int = 200
         items = filter_hidden_items(items, _h, _b)
     except Exception:
         pass
-    items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
-    if search or year_from or year_to or genres:
+    items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres, multi_audio=multi_audio, subtitles=subtitles)
+    if search or year_from or year_to or genres or _ma2 or _ss2:
         items = items[:min(limit,200)]
     _enrich_has_comment(items)
+    try:
+        from services.catalog_service import enrich_grid_badges
+        enrich_grid_badges(items, session.get("profile_id") or session["user_id"])
+    except Exception:
+        pass
     return {"items": items, "count": len(items)}
 
 @app.get(api_url("/api/catalog/visibility"))
@@ -1736,7 +1776,7 @@ async def set_visibility(request: Request):
     return {"success": True}
 
 @app.get(api_url("/api/catalog/{category}"))
-async def get_catalog(category: str, request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = ""):
+async def get_catalog(category: str, request: Request, search: str = "", limit: int = 200, fields: Optional[str] = None, year_from: str = "", year_to: str = "", genres: str = "", multi_audio: str = "", subtitles: str = ""):
     from services.auth_service import get_session
     from services.catalog_service import get_random_items, get_conn
     s = get_session(request.cookies.get("tvcat_session",""))
@@ -1746,6 +1786,8 @@ async def get_catalog(category: str, request: Request, search: str = "", limit: 
     yf = int(year_from) if year_from else None
     yt = int(year_to) if year_to else None
     exclude_genres = [g.strip().lower() for g in genres.split(",") if g.strip()] if genres else []
+    _ma = multi_audio in ("1", "true", True)
+    _ss = subtitles in ("1", "true", True)
     
     # Para favoritos, consultar directamente la tabla de favoritos y aplicar filtros activos (búsqueda/año/géneros)
     if category == 'favorites' and profile_id:
@@ -1788,17 +1830,22 @@ async def get_catalog(category: str, request: Request, search: str = "", limit: 
                 pass
             conn.close()
             # aplicar filtros de catálogo (si hay búsqueda/filtros activos)
-            if search or yf is not None or yt is not None or exclude_genres:
-                items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres)
+            if search or yf is not None or yt is not None or exclude_genres or _ma or _ss:
+                items = _filter_items(items, search=search, fields=fields, year_from=year_from, year_to=year_to, genres=genres, multi_audio=multi_audio, subtitles=subtitles)
                 items = items[:min(limit,200)]
             _enrich_has_comment(items)
+            try:
+                from services.catalog_service import enrich_grid_badges
+                enrich_grid_badges(items, profile_id)
+            except Exception:
+                pass
             return {"items": items, "count": len(items)}
         except Exception as e:
             try: conn.close()
             except: pass
             return {"items": [], "count": 0}
     
-    result = get_random_items(category=category, search=search, limit=min(limit, 200), user_id=user_id, search_fields=search_fields, year_from=yf, year_to=yt, exclude_genres=exclude_genres)
+    result = get_random_items(category=category, search=search, limit=min(limit, 200), user_id=user_id, search_fields=search_fields, year_from=yf, year_to=yt, exclude_genres=exclude_genres, multi_audio=_ma, subtitles=_ss)
     # Añadir campo fav a cada item según los favoritos del usuario
     if profile_id and isinstance(result, dict) and "items" in result:
         try:
@@ -1814,6 +1861,11 @@ async def get_catalog(category: str, request: Request, search: str = "", limit: 
                 result["count"] = len(result["items"])
         except:
             pass
+    try:
+        from services.catalog_service import enrich_grid_badges
+        enrich_grid_badges(result.get("items", []), profile_id)
+    except Exception:
+        pass
     return result
 
 @app.get(api_url("/api/categories"))
@@ -4292,6 +4344,11 @@ async def _hls_worker_loop():
                 print(f" [TGHirayi-DOWNLOAD] ep={episode_key} lote bloques {block}..{block+lot} ({lot*512//1024}MB) playback={pb}")
                 n = await _hls_download_priority_range(ubot, msg, state, start_off, end_off, threads, secondary=secondary)
                 if n > 0:
+                    try:
+                        from services.tg_activity import mark as _tg_mark_hls
+                        _tg_mark_hls()
+                    except Exception:
+                        pass
                     # avanzar cursor contiguo
                     while state["cursor_block"] in state["bitmap"] and state["cursor_block"] < state["total_blocks"]:
                         state["cursor_block"] += 1
@@ -6520,6 +6577,13 @@ async def get_item_details(item_id: str, request: Request = None):
     if not row:
         conn.close()
         raise HTTPException(404)
+    # Hero-open: la sonda de este título se encola (si falta) y salta al
+    # frente de la cola (para que los tags `_*` y badges estén listos).
+    try:
+        from services.media_probe_queue import ensure_probed as _mpq_ens
+        _mpq_ens(item_id)
+    except Exception:
+        pass
     result = dict(row)
     # Overlay de cover enriquecido (plugin tvcat_enricher, server-level para todos los usuarios)
     try:
@@ -6572,6 +6636,43 @@ async def get_item_details(item_id: str, request: Request = None):
     variants, rep_id = _get_variants_and_rep(conn, item_id)
     result["variants"] = variants
     result["representative_id"] = rep_id
+    # Flags media para badges hero (multi_audio / subtitles): del primer
+    # episodio sondado (best-effort).
+    try:
+        from services.media_probe_queue import get_title_media as _gtm, media_flags as _mfl
+        _gtm_media = _gtm(item_id) or {}
+        _mf = _mfl(_gtm_media)
+        result["has_multi_audio"] = 1 if _mf.get("multi_audio") else 0
+        result["has_subtitles"] = 1 if _mf.get("has_subs") else 0
+        # Ficha técnica hero (recuadro): 5 campos desde la sonda.
+        try:
+            _ts = {}
+            if _gtm_media.get("resolution"):
+                _ts["resolution"] = str(_gtm_media["resolution"])
+            _vv = str(_gtm_media.get("vcodec") or "")
+            if _gtm_media.get("_vprofile"):
+                _vv = (_vv + " " + str(_gtm_media["_vprofile"])) if _vv else str(_gtm_media["_vprofile"])
+            if _vv:
+                _ts["video"] = _vv
+            if _gtm_media.get("fullaudiotracks"):
+                _ts["audios"] = str(_gtm_media["fullaudiotracks"])
+            if _gtm_media.get("subtitles"):
+                _ts["subtitles"] = str(_gtm_media["subtitles"])
+            if _gtm_media.get("duration"):
+                _ts["duration"] = str(_gtm_media["duration"])
+            if _ts:
+                result["tech_specs"] = _ts
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # La línea MediaLine es dato máquina: no se muestra en la ficha.
+    try:
+        if result.get("description"):
+            from services.enrich_tags import strip_media_line as _sml
+            result["description"] = _sml(result["description"])
+    except Exception:
+        pass
     conn.close()
     return result
 
@@ -6891,6 +6992,13 @@ async def get_cover(item_id: str, request: Request = None):
         asset_channel = ""
     if not data:
         raise HTTPException(404)
+    # Sonda media (plan MediaProbeQueue): encolar primer episodio (~1ms,
+    # sin red). El worker de fondo la procesa MKV-primero.
+    try:
+        from services.media_probe_queue import enqueue_title as _mpq_enq
+        _mpq_enq(item_id)
+    except Exception:
+        pass
     source = data["source"]
     if source == "demo":
         color = abs(hash(item_id)) % 0xFFFFFF
@@ -7961,7 +8069,7 @@ async def favorites_toggle(request: Request):
     return {"success": True, "is_favorite": is_fav, "representative_id": rep_id}
 
 @app.get(api_url("/api/favorites/list"))
-async def favorites_list(request: Request):
+async def favorites_list(request: Request, multi_audio: str = "", subtitles: str = ""):
     from services.favorites_service import get_favorites
     from services.auth_service import get_session
     session = get_session(request.cookies.get("tvcat_session",""))
@@ -7975,6 +8083,18 @@ async def favorites_list(request: Request):
                                  role=session.get("role", "user"))
         _hc.close()
         items = filter_hidden_items(items, _h, _b)
+    except Exception:
+        pass
+    try:
+        if multi_audio in ("1", "true", True) or subtitles in ("1", "true", True):
+            from services.catalog_service import filter_media_items as _fmi
+            items = _fmi(items, multi_audio=(multi_audio in ("1", "true", True)),
+                         subtitles=(subtitles in ("1", "true", True)))
+    except Exception:
+        pass
+    try:
+        from services.catalog_service import enrich_grid_badges
+        enrich_grid_badges(items, session.get("profile_id") or session["user_id"])
     except Exception:
         pass
     return {"items": items, "count": len(items)}
@@ -7993,16 +8113,25 @@ def _hidden_profile(session):
 
 
 @app.get(api_url("/api/hidden"))
-async def hidden_list(request: Request):
+async def hidden_list(request: Request, multi_audio: str = "", subtitles: str = ""):
     s = _hidden_session(request)
     if not s: raise HTTPException(401)
     from services.catalog_service import get_conn
     conn = get_conn()
     try:
+        _ma = multi_audio in ("1", "true", True)
+        _ss = subtitles in ("1", "true", True)
+        _mc = ""
+        try:
+            from services.catalog_service import media_exists_clause as _mec
+            _mc = _mec("uc", multi_audio=_ma, subtitles=_ss)
+        except Exception:
+            _mc = ""
         rows = conn.execute(
             "SELECT uc.* FROM unified_catalog uc JOIN tvcat_hidden h ON h.item_id = uc.item_id"
             " WHERE h.profile_id = ? AND uc.item_id NOT IN"
             " (SELECT item_id FROM tvcat_blocked WHERE profile_id = ?)"
+            + (" AND " + _mc if _mc else "") +
             " ORDER BY uc.title ASC",
             (_hidden_profile(s), _hidden_profile(s))).fetchall()
         items = [dict(r) for r in rows]
@@ -8010,6 +8139,11 @@ async def hidden_list(request: Request):
         items = []
     try: conn.close()
     except: pass
+    try:
+        from services.catalog_service import enrich_grid_badges
+        enrich_grid_badges(items, _hidden_profile(s))
+    except Exception:
+        pass
     return {"items": items, "count": len(items)}
 
 
@@ -8221,27 +8355,42 @@ async def hidden_unblock(request: Request):
 
 
 @app.get(api_url("/api/hidden/blocked"))
-async def hidden_blocked(request: Request, profile: int = 0):
+async def hidden_blocked(request: Request, profile: int = 0, multi_audio: str = "", subtitles: str = ""):
     s = _hidden_session(request)
     if not s or s.get("role") != "admin": raise HTTPException(403)
     from services.catalog_service import get_conn
     conn = get_conn()
     try:
+        _ma = multi_audio in ("1", "true", True)
+        _ss = subtitles in ("1", "true", True)
+        _mc = ""
+        try:
+            from services.catalog_service import media_exists_clause as _mec
+            _mc = _mec("uc", multi_audio=_ma, subtitles=_ss)
+        except Exception:
+            _mc = ""
         if int(profile):
             rows = conn.execute(
                 "SELECT uc.*, b.profile_id AS blocked_profile FROM unified_catalog uc"
                 " JOIN tvcat_blocked b ON b.item_id = uc.item_id"
-                " WHERE b.profile_id = ? ORDER BY uc.title ASC", (int(profile),)).fetchall()
+                " WHERE b.profile_id = ?" + (" AND " + _mc if _mc else "") +
+                " ORDER BY uc.title ASC", (int(profile),)).fetchall()
         else:
             rows = conn.execute(
                 "SELECT uc.*, b.profile_id AS blocked_profile FROM unified_catalog uc"
                 " JOIN tvcat_blocked b ON b.item_id = uc.item_id"
+                + (" WHERE " + _mc if _mc else "") +
                 " ORDER BY uc.title ASC").fetchall()
         items = [dict(r) for r in rows]
     except Exception:
         items = []
     try: conn.close()
     except: pass
+    try:
+        from services.catalog_service import enrich_grid_badges
+        enrich_grid_badges(items, s.get("profile_id") or s.get("user_id"))
+    except Exception:
+        pass
     return {"items": items, "count": len(items)}
 
 # --- API: Comentarios globales por título (2026-09-08) ---
@@ -8899,6 +9048,125 @@ async def playback_stop(request: Request):
     except Exception:
         pass
     return {"ok": True}
+
+@app.get(api_url("/api/media/probe-status"))
+async def media_probe_status(request: Request):
+    """Cola y resultados de la sonda media (diagnóstico/Mantenimiento).
+    Incluye avance de sesión + recientes para la barra verde y el refresco
+    en vivo del grid."""
+    try:
+        from services.catalog_service import get_conn
+        conn = get_conn()
+        try:
+            q = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(priority),0) FROM media_probe_queue"
+            ).fetchone()
+            d = conn.execute("SELECT COUNT(*) FROM episode_media").fetchone()
+            mkv = conn.execute(
+                "SELECT COUNT(*) FROM media_probe_queue WHERE ext='.mkv'"
+            ).fetchone()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        try:
+            from services.media_probe_worker import _STATS as _ps
+            _done = int(_ps.get("done") or 0)
+            _recent = [dict(x) for x in list(_ps.get("recent") or [])]
+        except Exception:
+            _done, _recent = 0, []
+        try:
+            from services.playback_demand import active_players as _ap
+            _paused = bool(_ap())
+        except Exception:
+            _paused = False
+        return {"queued": int(q[0] or 0), "boosted": int(q[1] or 0),
+                "mkv_queued": int(mkv[0] or 0),
+                "probed": int(d[0] or 0),
+                "done_session": _done, "recent": _recent,
+                "paused_by_playback": _paused}
+    except Exception as e:
+        return {"queued": 0, "boosted": 0, "mkv_queued": 0,
+                "probed": 0, "error": str(e)[:120]}
+
+@app.get(api_url("/api/media/probe-missing/status"))
+async def probe_missing_status(request: Request):
+    """Estado del feeder en reposo: forzado, reposo actual, cola, faltantes."""
+    try:
+        from services.media_probe_feeder import FORCED as _FC, missing_count as _mc
+        from services.tg_activity import idle_seconds as _idle
+        try:
+            _missing = _mc()
+        except Exception:
+            _missing = -1
+        try:
+            _idle_s = round(_idle(), 1)
+        except Exception:
+            _idle_s = -1
+        try:
+            from services.playback_demand import active_players as _ap2
+            _paused2 = bool(_ap2())
+        except Exception:
+            _paused2 = False
+        return {"forced": bool(_FC.get("on")), "idle_seconds": _idle_s,
+                "missing": _missing, "paused_by_playback": _paused2}
+    except Exception as e:
+        return {"forced": False, "idle_seconds": -1, "missing": -1,
+                "error": str(e)[:120]}
+
+
+@app.post(api_url("/api/media/probe-missing/start"))
+async def probe_missing_start(request: Request):
+    """Fuerza el sondeo de faltantes (botón Config/Enriquecedor). Alimenta
+    sin esperar reposo hasta quedar sin faltantes (auto-off)."""
+    try:
+        from services.media_probe_feeder import FORCED as _FC, feed_once as _fo
+        _FC["on"] = True
+        try:
+            import asyncio as _aio
+            _n = await _aio.to_thread(_fo, 10)
+        except Exception:
+            _n = 0
+        print(f" [PROBE-FEED] forzado manual ({_n} encolados)", flush=True)
+        return {"ok": True, "forced": True, "fed": int(_n)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+@app.post(api_url("/api/media/probe-missing/stop"))
+async def probe_missing_stop(request: Request):
+    try:
+        from services.media_probe_feeder import FORCED as _FC
+        _FC["on"] = False
+        return {"ok": True, "forced": False}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+@app.get(api_url("/api/media/flags/{item_id}"))
+async def media_item_flags(item_id: str, request: Request):
+    """Flags media de UN título para refrescar badges sin recargar el grid.
+    Si está pendiente, le da boost a la sonda."""
+    try:
+        from services.media_probe_queue import (
+            probe_status as _st, ensure_probed as _ens,
+            get_title_media as _gtm, media_flags as _mfl)
+        st = _st(item_id)
+        if st == "pending":
+            try:
+                _ens(item_id)
+            except Exception:
+                pass
+            return {"has_multi_audio": 0, "has_subtitles": 0, "ready": False}
+        if st == "na":
+            return {"has_multi_audio": 0, "has_subtitles": 0, "ready": True}
+        fl = _mfl(_gtm(item_id))
+        return {"has_multi_audio": 1 if fl.get("multi_audio") else 0,
+                "has_subtitles": 1 if fl.get("has_subs") else 0,
+                "ready": True}
+    except Exception:
+        return {"has_multi_audio": 0, "has_subtitles": 0, "ready": False}
 
 @app.get(api_url("/api/admin/users"))
 async def admin_users(request: Request):

@@ -1487,7 +1487,7 @@ html += '</div>';
 
             // Plantilla (editable, con tags)
             html += '<label style="font-size:0.75rem;color:#a1a1aa;margin-top:10px;display:block;">Plantilla</label>';
-            html += '<div style="font-size:0.7rem;color:#71717a;margin:2px 0 4px;">Tags: {title} {tagtitle} {episodes} {season} · f-tags: {ftitle} {ftagtitle} {fyear} {frating} {fgenres} {fsinopsis} {fepisodes} {fseason} (solo si hay dato) · Media (solo en copia): {_resolution} → {_fresolution}, {_fullaudiotracks} → {_ffullaudiotracks} · Enter para saltos de l&iacute;nea</div>';
+            html += '<div style="font-size:0.7rem;color:#71717a;margin:2px 0 4px;">Tags: {title} {tagtitle} {episodes} {season} · f-tags: {ftitle} {ftagtitle} {fyear} {frating} {fgenres} {fsinopsis} {fepisodes} {fseason} (solo si hay dato) · Media (solo en copia): {_resolution} → {_fresolution}, {_ffullaudiotracks} → {_ffullaudiotracks} · Medialine: {_fmedialine} o {medialine} (línea sonda 🎞️ M1…😺) · Enter para saltos de l&iacute;nea</div>';
             html += '<textarea id="cover-template" style="width:100%;height:120px;background:#09090b;border:1px solid #3f3f46;border-radius:6px;padding:8px;color:#f4f4f5;font-size:0.8rem;box-sizing:border-box;resize:vertical;">' + template + '</textarea>';
 
             // Resultado (resuelto en vivo, solo lectura)

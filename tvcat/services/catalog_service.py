@@ -111,6 +111,61 @@ def init_db():
         )
     """)
 
+    # --- Sonda media por título (plan MediaProbeQueue) ---
+    # episode_media: resultado ffprobe del primer episodio (tags de cover).
+    # media_probe_queue: cola persistente del worker de fondo.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS episode_media (
+            episode_key TEXT PRIMARY KEY,
+            media_json TEXT DEFAULT '{}',
+            media_date TEXT DEFAULT '',
+            probed_at INTEGER DEFAULT 0
+        )
+    """)
+    # Flags media para filtrado SQL (evitan parsear JSON por fila).
+    try:
+        _em_cols = [r[1] for r in c.execute("PRAGMA table_info(episode_media)").fetchall()]
+        for _col in ("has_multi_audio", "has_subs"):
+            if _col not in _em_cols:
+                c.execute(f"ALTER TABLE episode_media ADD COLUMN {_col} INTEGER DEFAULT 0")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_episode_media_flags ON episode_media(has_multi_audio, has_subs)")
+    except Exception:
+        pass
+    # Backfill una vez (filas sondadas antes de los flags).
+    try:
+        _flag = c.execute("SELECT value FROM tvcat_settings WHERE key='schema_media_flags_v1'").fetchone()
+    except Exception:
+        _flag = True
+    if not _flag:
+        try:
+            from services.media_probe_queue import media_flags as _mfl
+            import json as _js
+            _rows = c.execute("SELECT episode_key, media_json FROM episode_media").fetchall()
+            for _r in _rows:
+                try:
+                    _fl = _mfl(_js.loads(_r["media_json"] or "{}"))
+                    c.execute("UPDATE episode_media SET has_multi_audio=?, has_subs=? WHERE episode_key=?",
+                              (1 if _fl.get("multi_audio") else 0,
+                               1 if _fl.get("has_subs") else 0, _r["episode_key"]))
+                except Exception:
+                    pass
+            c.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES ('schema_media_flags_v1', '1')")
+        except Exception:
+            pass
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS media_probe_queue (
+            episode_key TEXT PRIMARY KEY,
+            item_id TEXT,
+            chat_id TEXT,
+            msg_id INTEGER,
+            ext TEXT DEFAULT '',
+            msg_date TEXT DEFAULT '',
+            priority INTEGER DEFAULT 0,
+            attempts INTEGER DEFAULT 0,
+            enqueued_at INTEGER DEFAULT (unixepoch())
+        )
+    """)
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS tvcat_users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1839,6 +1894,209 @@ def filter_hidden_items(items, hidden=None, blocked=None):
             and str((it or {}).get("item_id", "")) not in blocked]
 
 
+def media_exists_clause(alias="unified_catalog", multi_audio=False, subtitles=False) -> str:
+    """Fragmento EXISTS para filtrar items por flags media del PRIMER
+    episodio (misma regla que badges/tags: episode_number, id). '' si no
+    hay filtro. `alias` = nombre usado para unified_catalog en la query."""
+    try:
+        parts = []
+        if multi_audio:
+            parts.append(
+                "EXISTS (SELECT 1 FROM episode_media em WHERE em.episode_key = "
+                "(SELECT e2.episode_key FROM item_episodes e2 WHERE "
+                "(e2.item_id = %s.item_id OR e2.item_id = CAST(%s.id AS TEXT)) "
+                "ORDER BY COALESCE(e2.episode_number, 999999), e2.id LIMIT 1) "
+                "AND em.has_multi_audio = 1)" % (alias, alias))
+        if subtitles:
+            parts.append(
+                "EXISTS (SELECT 1 FROM episode_media em WHERE em.episode_key = "
+                "(SELECT e2.episode_key FROM item_episodes e2 WHERE "
+                "(e2.item_id = %s.item_id OR e2.item_id = CAST(%s.id AS TEXT)) "
+                "ORDER BY COALESCE(e2.episode_number, 999999), e2.id LIMIT 1) "
+                "AND em.has_subs = 1)" % (alias, alias))
+        return " AND ".join(parts)
+    except Exception:
+        return ""
+
+
+def filter_media_items(items, multi_audio=False, subtitles=False):
+    """Filtra una lista de items por flags media (primer episodio) con 2
+    consultas batch. Para endpoints de listas Python (seguir/vistos/favs).
+    Sin filtro activo devuelve la lista intacta."""
+    if not items or (not multi_audio and not subtitles):
+        return items
+    try:
+        ids = [str((it or {}).get("item_id") or "") for it in items]
+        ids = [i for i in ids if i]
+        if not ids:
+            return items
+        conn = get_conn()
+        try:
+            umap = {}
+            ph = ",".join("?" * len(ids))
+            for r in conn.execute(
+                    "SELECT id, item_id FROM unified_catalog WHERE item_id IN (%s)" % ph, ids):
+                umap[str(r["id"])] = r["item_id"]
+                umap[r["item_id"]] = r["item_id"]
+            keys = list(set(ids) | set(umap.keys()))
+            first_key = {}
+            if keys:
+                ph3 = ",".join("?" * len(keys))
+                for r in conn.execute(
+                        "SELECT item_id, episode_key FROM item_episodes "
+                        "WHERE item_id IN (%s) ORDER BY "
+                        "COALESCE(episode_number, 999999), id" % ph3, keys):
+                    _k = str(r["item_id"])
+                    if _k not in first_key and r["episode_key"]:
+                        first_key[_k] = str(r["episode_key"])
+            ok = set()
+            if first_key:
+                inv = {}
+                for _k, _ek in first_key.items():
+                    inv.setdefault(_ek, umap.get(_k, _k))
+                ph4 = ",".join("?" * len(inv))
+                conds, args = [], list(inv.keys())
+                if multi_audio:
+                    conds.append("has_multi_audio = 1")
+                if subtitles:
+                    conds.append("has_subs = 1")
+                for r in conn.execute(
+                        "SELECT episode_key FROM episode_media WHERE episode_key IN (%s)"
+                        " AND %s" % (ph4, " AND ".join(conds)), args):
+                    _iid = inv.get(str(r["episode_key"]))
+                    if _iid:
+                        ok.add(_iid)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return [it for it in items
+                if str((it or {}).get("item_id") or "") in ok
+                or (it or {}).get("is_collection")]
+    except Exception:
+        return items
+
+
+def enrich_grid_badges(items, profile_id=None):
+    """Añade in_queue / is_hidden / episode_count / has_multi_audio /
+    has_subtitles a una lista de items del grid (best-effort, consultas
+    batch). Los flags media salen de episode_media (primer episodio)."""
+    if not items:
+        return items
+    ids = [str((it or {}).get("item_id") or "") for it in items]
+    ids = [i for i in ids if i]
+    if not ids:
+        return items
+    counts, queued, hidden = {}, set(), set()
+    media_flags_map, umap = {}, {}
+    # 1. Nº de episodios (central; mismo OR item_id/entero que el resto).
+    try:
+        conn = get_conn()
+        try:
+            ph = ",".join("?" * len(ids))
+            for r in conn.execute(
+                    "SELECT id, item_id FROM unified_catalog WHERE item_id IN (%s)" % ph, ids):
+                umap[str(r["id"])] = r["item_id"]
+                umap[r["item_id"]] = r["item_id"]
+            keys = list(set(ids) | set(umap.keys()))
+            if keys:
+                ph2 = ",".join("?" * len(keys))
+                for r in conn.execute(
+                        "SELECT item_id, COUNT(*) AS n FROM item_episodes "
+                        "WHERE item_id IN (%s) GROUP BY item_id" % ph2, keys):
+                    counts[umap.get(str(r["item_id"]), str(r["item_id"]))] = int(r["n"] or 0)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # 2. En cola TGHirayi (jobs no terminales; la cola es global).
+    try:
+        import json as _js
+        qp = os.path.join(BASE_DIR, "plugins", "tvcat_TGHirayi_v2", "data", "TGHirayi_v2.json")
+        with open(qp, encoding="utf-8") as _f:
+            _q = _js.load(_f).get("queue", []) or []
+        for _j in _q:
+            try:
+                if str((_j or {}).get("status") or "") not in ("completed", "error", "skipped"):
+                    _iid = str((_j or {}).get("item_id") or "")
+                    if _iid:
+                        queued.add(_iid)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # 3. Ocultos del perfil.
+    if profile_id:
+        try:
+            conn = get_conn()
+            try:
+                hidden = {str(r[0]) for r in conn.execute(
+                    "SELECT item_id FROM tvcat_hidden WHERE profile_id=?", (profile_id,)).fetchall()}
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    # 4. Flags media (multi_audio / subtitles) del primer episodio sondado.
+    try:
+        from services.media_probe_queue import media_flags as _mflags
+        conn = get_conn()
+        try:
+            keys = list(set(ids) | set(umap.keys()))
+            first_key = {}
+            if keys:
+                ph3 = ",".join("?" * len(keys))
+                for r in conn.execute(
+                        "SELECT item_id, episode_key FROM item_episodes "
+                        "WHERE item_id IN (%s) ORDER BY "
+                        "COALESCE(episode_number, 999999), id" % ph3, keys):
+                    _k = str(r["item_id"])
+                    if _k not in first_key and r["episode_key"]:
+                        first_key[_k] = str(r["episode_key"])
+            if first_key:
+                inv = {}
+                for _k, _ek in first_key.items():
+                    _iid = umap.get(_k, _k)
+                    inv.setdefault(_ek, _iid)
+                ph4 = ",".join("?" * len(inv))
+                for r in conn.execute(
+                        "SELECT episode_key, media_json FROM episode_media "
+                        "WHERE episode_key IN (%s)" % ph4, list(inv.keys())):
+                    try:
+                        import json as _jsm
+                        _m = _jsm.loads(r["media_json"] or "{}")
+                    except Exception:
+                        _m = {}
+                    _iid = inv.get(str(r["episode_key"]))
+                    if _iid:
+                        media_flags_map[_iid] = _mflags(_m)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for it in items:
+        try:
+            _iid = str((it or {}).get("item_id") or "")
+            it["episode_count"] = int(counts.get(_iid, 0) or 0)
+            it["in_queue"] = 1 if _iid in queued else 0
+            it["is_hidden"] = 1 if _iid in hidden else 0
+            _fl = media_flags_map.get(_iid) or {}
+            it["has_multi_audio"] = 1 if _fl.get("multi_audio") else 0
+            it["has_subtitles"] = 1 if _fl.get("has_subs") else 0
+        except Exception:
+            pass
+    return items
+
+
 def _apply_content_layer(conn, where_clauses, params, key):
     """Añade cláusulas WHERE para una capa de filtro (plugins/categorías/subcategorías deshabilitadas)."""
     d = _load_content_filter(conn, key)
@@ -1915,7 +2173,7 @@ def parse_search_tags(search):
     return clean, tags
 
 
-def get_random_items(category=None, search=None, limit=200, filters=None, user_id=None, search_fields=None, year_from=None, year_to=None, exclude_genres=None):
+def get_random_items(category=None, search=None, limit=200, filters=None, user_id=None, search_fields=None, year_from=None, year_to=None, exclude_genres=None, multi_audio=False, subtitles=False):
     """Retorna items aleatorios del catálogo central."""
     conn = get_conn()
     c = conn.cursor()
@@ -2037,6 +2295,17 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
                 "(',' || COALESCE(genres,'') || ',' NOT LIKE ?)"
             )
             params.append(f"%,{g},%")
+
+    # Filtro media (primer episodio sondado): actúa en SQL sobre toda la
+    # base, antes del LIMIT — no sobre los N ya traídos.
+    try:
+        _mc = media_exists_clause("unified_catalog",
+                                  multi_audio=bool(multi_audio),
+                                  subtitles=bool(subtitles))
+        if _mc:
+            where_clauses.append("(" + _mc + ")")
+    except Exception:
+        pass
 
     where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 

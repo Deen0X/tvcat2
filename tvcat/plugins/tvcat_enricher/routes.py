@@ -443,6 +443,27 @@ async def get_enricher_item(item_id: str, request: Request):
             enriched["has_poster"] = True
         enriched.pop("poster_blob", None)
     # authorship (lazy)
+    # Tags media resueltos desde central (la sonda ya pasó al abrir el cover):
+    # el editor los usa para `{medialine}` y resto de `_*` en preview/bake.
+    _media_tags = {}
+    try:
+        try:
+            import services.enrich_tags as _et2
+            from services.media_probe_queue import get_title_media as _gtm2
+        except Exception:
+            import tvcat.services.enrich_tags as _et2
+            from tvcat.services.media_probe_queue import get_title_media as _gtm2
+        _mm = _gtm2(item_id) or {}
+        if _mm:
+            _base = _et2.get_base_tags("", 0, {}, media=_mm)
+            try:
+                _plain = set(_et2._MEDIA_PLAIN_KEYS)
+            except Exception:
+                _plain = {"medialine"}
+            _media_tags = {k: v for k, v in _base.items()
+                           if v and (k.startswith("_") or k in _plain)}
+    except Exception:
+        _media_tags = {}
     return {
         "item_id": item_id,
         "telegram_link": link,
@@ -451,6 +472,7 @@ async def get_enricher_item(item_id: str, request: Request):
         "original": original,
         "enriched": enriched,
         "has_enriched": enriched is not None,
+        "media_tags": _media_tags,
     }
 
 

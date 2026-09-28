@@ -673,6 +673,18 @@
                     'rorder': rorderVal,
                     'roder': rorderVal
                 };
+                // Tags media de central (la sonda ya pasó al abrir el cover):
+                // resuelven {medialine}/{fmedialine} en este editor (bake al
+                // escribir }) y aparecen en el picker. Los {_*} siguen
+                // literales (solo resuelven en la subida TGHirayi).
+                try {
+                    var _mt = (typeof data !== 'undefined' && data && data.media_tags) || {};
+                    for (var _mk in _mt) {
+                        if (!_mt.hasOwnProperty(_mk)) continue;
+                        if (_mt[_mk] !== undefined && _mt[_mk] !== null && String(_mt[_mk]) !== '') m[_mk] = _mt[_mk];
+                    }
+                    if (m['_medialine'] && !m['medialine']) m['medialine'] = m['_medialine'];
+                } catch (_mte) {}
                 var fm = {};
                 (function(){
                     var cc = _customTagsCache || {};
@@ -984,6 +996,16 @@
                 plainBase[nk] = map[k];
             });
             plainBase['tagtitle'] = (details.api_title || '').toString().trim().replace(/\s+/g, ' ');
+            // Tags media de central (sonda ya pasada al abrir el cover):
+            // {medialine}/{fmedialine} resuelven al aplicar plantilla.
+            try {
+                var _mt2 = (typeof data !== 'undefined' && data && data.media_tags) || {};
+                for (var _k2 in _mt2) {
+                    if (!_mt2.hasOwnProperty(_k2)) continue;
+                    if (_mt2[_k2] !== undefined && _mt2[_k2] !== null && String(_mt2[_k2]) !== '') plainBase[_k2] = _mt2[_k2];
+                }
+                if (plainBase['_medialine'] && !plainBase['medialine']) plainBase['medialine'] = plainBase['_medialine'];
+            } catch (_e2) {}
             return window.resolveCustomText(tpl, plainBase);
         }
 

@@ -107,6 +107,11 @@ async def enqueue_upload(chat, file_bytes_or_path, file_name="file.bin",
     on_progress(job) se llama en cada actualización.
     post_process(job) opcional: callback async al final (ej. pin, registro local).
     Devuelve el job (con id)."""
+    try:
+        from services.tg_activity import mark as _tg_mark
+        _tg_mark()
+    except Exception:
+        pass
     job = _make_job(type="upload", chat=str(chat), file_name=file_name,
                     phase="Preparando", persist=persist, _kind=_kind)
     job["_caption"] = caption
@@ -129,6 +134,11 @@ async def enqueue_download(chat, msg_id, dest_path=None,
     """Encola una descarga del documento msg_id del chat. dest_path: ruta destino o None (devuelve bytes).
     post_process(job) opcional: recibe el job con job['_downloaded'] = bytes (o path) al terminar.
     Devuelve el job (con id)."""
+    try:
+        from services.tg_activity import mark as _tg_mark2
+        _tg_mark2()
+    except Exception:
+        pass
     job = _make_job(type="download", chat=str(chat), file_name=f"msg_{msg_id}",
                     phase="Preparando", persist=persist, _kind=_kind)
     job["_msg_id"] = msg_id

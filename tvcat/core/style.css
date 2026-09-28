@@ -231,6 +231,13 @@ body.avatar-right .nav-right { order: 0; justify-content: flex-start; }
     accent-color: var(--accent);
 }
 
+/* Checkboxes en 2 columnas (campos + media): menos alto vertical. */
+.filter-fields-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px 12px;
+}
+
 .filter-year-input {
     width: 100px;
     padding: 8px 10px;
@@ -1111,6 +1118,103 @@ body[class*="cols-"] .catalog-grid {
     height: 32px;
     object-fit: contain;
     filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6));
+}
+
+/* Badges apilados bajo el MKV (izquierda): cola, oculto, nº episodios */
+.grid-item-badge-queue,
+.grid-item-badge-hidden,
+.grid-item-badge-eps {
+    position: absolute;
+    left: 8px;
+    width: 32px;
+    height: 32px;
+    background: transparent;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    padding: 0;
+    box-shadow: none;
+    overflow: visible;
+}
+
+.grid-item-badge-queue { top: 70px; }
+.grid-item-badge-hidden { top: 106px; }
+.grid-item-badge-eps { top: 142px; }
+
+/* Badges media a la derecha, bajo favoritos: multi-audio y subtítulos */
+.grid-item-badge-maudio,
+.grid-item-badge-subs {
+    position: absolute;
+    right: 6px;
+    width: 32px;
+    height: 32px;
+    background: transparent;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    padding: 0;
+    box-shadow: none;
+    overflow: visible;
+}
+
+.grid-item-badge-maudio { top: 44px; }
+.grid-item-badge-subs { top: 80px; }
+
+.grid-item-badge-maudio img,
+.grid-item-badge-subs img {
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6));
+}
+
+/* Badges media en hero (misma línea que favoritos) */
+.meta-media-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+
+.meta-media-icon img {
+    width: 28px;
+    height: 28px;
+    object-fit: contain;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6));
+}
+
+.grid-item-badge-queue img,
+.grid-item-badge-hidden img,
+.grid-item-badge-eps img {
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6));
+}
+
+/* Número centrado sobre el badge de episodios */
+.grid-item-badge-eps {
+    position: absolute;
+}
+
+.grid-item-badge-eps span {
+    position: absolute;
+    top: 0; right: 0; bottom: 0; left: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-shadow: 0 1px 3px #000, 0 0 4px #000;
+    pointer-events: none;
 }
 
 /* Comentario global por título (2026-09-08): badge inferior-izquierdo del cover */

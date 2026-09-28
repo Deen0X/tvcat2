@@ -127,8 +127,11 @@ def _channels(ch) -> str:
         return ""
 
 
-def probe_file(path: str, timeout: int = 30) -> dict:
-    """Sonda un fichero local. Siempre devuelve dict (vacío si falla)."""
+def probe_file(path: str, timeout: int = 30, total_size: int = 0) -> dict:
+    """Sonda un fichero local. Siempre devuelve dict (vacío si falla).
+    `total_size` = tamaño real del fichero remoto cuando `path` es solo un
+    fragmento (head/tail): filesize/bitrate se calculan con él, no con el
+    fragmento (si no saldrían "1.0 MB" / "1 Kbps")."""
     out = {}
     try:
         if not path or not os.path.isfile(path):
@@ -186,6 +189,11 @@ def probe_file(path: str, timeout: int = 30) -> dict:
             # Forzados/por defecto se marcan igual que subs si aplica
             out["audiotracks"] = ", ".join(simple)
             out["fullaudiotracks"] = ", ".join(full)
+            out["audiocount"] = str(len(audios))
+            _chl = [_channels(a.get("channels")) for a in audios]
+            _chl = [c for c in _chl if c]
+            if _chl:
+                out["achannels"] = "+".join(_chl)
         if subs:
             sl = []
             for s in subs:
@@ -197,6 +205,7 @@ def probe_file(path: str, timeout: int = 30) -> dict:
                     pass
                 sl.append(lang)
             out["subtitles"] = ", ".join(sl)
+            out["subcount"] = str(len(subs))
         _fmt = str(fmt.get("format_name") or "").split(",")[0].strip().lower()
         if _fmt:
             out["container"] = _fmt
@@ -217,9 +226,32 @@ def probe_file(path: str, timeout: int = 30) -> dict:
         except Exception:
             pass
         try:
-            _sz = int(fmt.get("size") or os.path.getsize(path) or 0)
+            # Tamaño real (remoto) manda; si no se dio, el del fichero local.
+            _sz = int(total_size or 0)
+            if _sz <= 0:
+                _sz = int(fmt.get("size") or os.path.getsize(path) or 0)
             if _sz > 0:
                 out["filesize"] = fmt_size(_sz)
+                # Bitrate real = tamaño total / duración (el del fragmento
+                # o del ffprobe parcial no vale).
+                try:
+                    _dsec = float(fmt.get("duration") or 0)
+                    if _dsec > 0:
+                        _rb = int(_sz * 8 / _dsec // 1000)
+                        if _rb > 0:
+                            out["bitrate"] = str(_rb)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Raw completo para episode_media (plan MediaProbeQueue): los tags
+        # usan las claves normalizadas, pero se conserva todo lo que dio
+        # ffprobe (streams + format) para explotarlo después sin re-sondar.
+        try:
+            if isinstance(streams, list) and streams:
+                out["_streams"] = streams
+            if isinstance(fmt, dict) and fmt:
+                out["_format"] = fmt
         except Exception:
             pass
     except Exception as e:

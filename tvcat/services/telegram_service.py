@@ -927,6 +927,11 @@ class TelegramService:
                         pass
 
     async def _execute_task(self, task: Dict):
+        try:
+            from services.tg_activity import mark as _tg_mark
+            _tg_mark()
+        except Exception:
+            pass
         action = task.get("action")
 
         action = task.get("action")
