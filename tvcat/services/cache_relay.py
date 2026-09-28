@@ -43,6 +43,29 @@ def _channel_variants(channel_id: str):
     return {str(channel_id), bare, f"-100{bare}"}
 
 
+def normalize_aux_chat(raw: str) -> str:
+    """Canónico para el canal auxiliar: enlace t.me/c/<id>/... → -100<id>;
+    t.me/<user> → @<user>; dígitos → -100...; @user tal cual. '' si vacío."""
+    try:
+        s = str(raw or "").strip()
+        if not s:
+            return ""
+        import re as _re
+        m = _re.search(r"t\.me/c/(\d+)", s)
+        if m:
+            return "-100" + m.group(1)
+        m = _re.search(r"t\.me/([A-Za-z0-9_]{5,})", s)
+        if m and m.group(1) != "c":
+            return "@" + m.group(1)
+        if s.startswith("@"):
+            return s
+        if _re.match(r"^-?\d+$", s):
+            return s if s.startswith("-") else "-100" + s
+        return s
+    except Exception:
+        return str(raw or "").strip()
+
+
 def _ensure_tables():
     conn = _plugin_conn()
     conn.execute("""
@@ -111,7 +134,7 @@ def _save_config(chat_aux, overwrite):
     from services.catalog_service import get_conn
     conn = get_conn()
     conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
-                 ("cache_relay_chat_aux", (chat_aux or "").strip()))
+                  ("cache_relay_chat_aux", normalize_aux_chat(chat_aux)))
     conn.execute("INSERT OR REPLACE INTO tvcat_settings (key, value) VALUES (?, ?)",
                  ("cache_relay_overwrite", "1" if overwrite else "0"))
     conn.commit()
@@ -152,27 +175,32 @@ def _build_db(channel_id: Optional[str] = None) -> bytes:
             msg_ids.add(r["msg_id"])
 
         if msg_ids:
-            ph = ",".join("?" for _ in msg_ids)
-            # Filtrar assets también por canal (evita arrastrar el asset de otro canal con mismo msg_id)
-            exp_chan = canon_channel(channel_id) if channel_id is not None else None
-            try:
-                _acols = [rr[1] for rr in src.execute("PRAGMA table_info(catalog_assets)").fetchall()]
-            except Exception:
-                _acols = []
-            if exp_chan is not None and "channel_id" in _acols:
-                assets = src.execute(
-                    f"SELECT channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source FROM catalog_assets WHERE telegram_msg_id IN ({ph}) AND channel_id=?",
-                    list(msg_ids) + [exp_chan]).fetchall()
-            else:
-                assets = src.execute(
-                    f"SELECT telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source FROM catalog_assets WHERE telegram_msg_id IN ({ph})",
-                    list(msg_ids)).fetchall()
-            for a in assets:
-                ad = dict(a)
-                dst.execute("INSERT INTO catalog_assets VALUES (?,?,?,?,?,?,?,?,?,?)",
-                            (canon_channel(ad.get("channel_id", exp_chan or "")),
-                             ad["telegram_msg_id"], ad["asset_type"], ad["asset_index"], ad["image_blob"],
-                             ad["mime_type"], ad["file_size"], ad["width"], ad["height"], ad["source"]))
+            # IN por lotes (SQLite limita nº de variables; cachés grandes).
+            _ids = list(msg_ids)
+            _CH = 400
+            for _o in range(0, len(_ids), _CH):
+                _batch = _ids[_o:_o + _CH]
+                ph = ",".join("?" for _ in _batch)
+                # Filtrar assets también por canal (evita arrastrar el asset de otro canal con mismo msg_id)
+                exp_chan = canon_channel(channel_id) if channel_id is not None else None
+                try:
+                    _acols = [rr[1] for rr in src.execute("PRAGMA table_info(catalog_assets)").fetchall()]
+                except Exception:
+                    _acols = []
+                if exp_chan is not None and "channel_id" in _acols:
+                    assets = src.execute(
+                        f"SELECT channel_id, telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source FROM catalog_assets WHERE telegram_msg_id IN ({ph}) AND channel_id=?",
+                        _batch + [exp_chan]).fetchall()
+                else:
+                    assets = src.execute(
+                        f"SELECT telegram_msg_id, asset_type, asset_index, image_blob, mime_type, file_size, width, height, source FROM catalog_assets WHERE telegram_msg_id IN ({ph})",
+                        _batch).fetchall()
+                for a in assets:
+                    ad = dict(a)
+                    dst.execute("INSERT INTO catalog_assets VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                (canon_channel(ad.get("channel_id", exp_chan or "")),
+                                 ad["telegram_msg_id"], ad["asset_type"], ad["asset_index"], ad["image_blob"],
+                                 ad["mime_type"], ad["file_size"], ad["width"], ad["height"], ad["source"]))
         dst.commit()
         with open(os.path.join(_TVCAT_DIR, "data", "_cache_relay_tmp.db"), "rb") as f:
             raw_db = f.read()
@@ -317,8 +345,82 @@ async def export_channel_cache(channel_id: str) -> dict:
         conn.commit()
         conn.close()
         return {"ok": True, "msg_id": result.get("msg_id"), "bk": bk, "count": count, "size": len(gz)}
+    except Exception as e:
+        import traceback as _tb
+        print(f"[CacheRelay] export_channel_cache: {e}\n{_tb.format_exc()}", flush=True)
+        return {"ok": False, "error": str(e)[:300]}
     finally:
         _reset_progress()
+
+
+AUX_TOPIC_TITLE = "TVCat Backups"
+
+
+def _preferred_types_first(preferred):
+    try:
+        order = [preferred] + (["telethon"] if preferred == "pyrogram" else ["pyrogram"])
+        return [c for c in order if c in ("telethon", "pyrogram")]
+    except Exception:
+        return ["telethon", "pyrogram"]
+
+
+async def _ensure_aux_topic(svc, creds, aux_chat, entity=None):
+    """Topic 'TVCat Backups' en el auxiliar: lo busca (título exacto) o lo
+    crea, con preferido+fallback como TGHirayi topo3. Sin foro → None
+    (General). Nunca lanza: a peor, General."""
+    try:
+        is_forum = bool((entity or {}).get("forum"))
+        if not is_forum:
+            try:
+                ent = entity or await svc.get_entity(aux_chat, **creds)
+                is_forum = bool((ent or {}).get("forum"))
+            except Exception:
+                is_forum = False
+        if not is_forum:
+            # Sin flag: probar a listar (barato); si hay topics es foro.
+            _has = False
+            try:
+                _t0 = await svc.list_forum_topics(aux_chat, **creds)
+                _has = bool(_t0)
+            except Exception:
+                _has = False
+            if not _has:
+                return None
+        try:
+            from services.userbot_service import get_preferred_client_type as _pct
+            _pref = _pct()
+        except Exception:
+            _pref = "telethon"
+        base = dict(creds or {})
+        for ctype in _preferred_types_first(_pref):
+            try:
+                _cr = dict(base)
+                _cr["client_type"] = ctype
+                items = await svc.list_forum_topics(aux_chat, **_cr) or []
+                for t in items:
+                    _ti = (t.get("title") if isinstance(t, dict) else getattr(t, "title", "")) or ""
+                    if _ti.strip() == AUX_TOPIC_TITLE:
+                        _id = (t.get("id") if isinstance(t, dict) else getattr(t, "id", None))
+                        if _id:
+                            print(f"[CacheRelay] topic auxiliar existente: {AUX_TOPIC_TITLE} -> {_id}", flush=True)
+                            return int(_id)
+                break
+            except Exception as e:
+                print(f"[CacheRelay] listando topics ({ctype}): {e}", flush=True)
+        for ctype in _preferred_types_first(_pref):
+            try:
+                _cr = dict(base)
+                _cr["client_type"] = ctype
+                tid = await svc.create_forum_topic(aux_chat, AUX_TOPIC_TITLE, **_cr)
+                if tid:
+                    print(f"[CacheRelay] topic auxiliar creado ({ctype}): {AUX_TOPIC_TITLE} -> {tid}", flush=True)
+                    return int(tid)
+            except Exception as e:
+                print(f"[CacheRelay] creando topic ({ctype}): {e}", flush=True)
+        return None
+    except Exception as e:
+        print(f"[CacheRelay] topic auxiliar: {e} (General)", flush=True)
+        return None
 
 
 async def export_full_backup(aux_chat: str) -> dict:
@@ -327,6 +429,7 @@ async def export_full_backup(aux_chat: str) -> dict:
     _progress_state.update({"running": True, "operation": "upload", "step": "Preparando", "current": 0, "total": 0, "channel_id": "*"})
     try:
         _ensure_tables()
+        aux_chat = normalize_aux_chat(aux_chat)
         svc = await _service()
         creds = _cred_kwargs()
         if not creds:
@@ -338,6 +441,9 @@ async def export_full_backup(aux_chat: str) -> dict:
         if not entity.get("can_post"):
             return {"ok": False, "error": "No se puede publicar en el canal auxiliar (can_post=false)"}
 
+        # Foro con topics: buscar/crear "TVCat Backups"; sin topics → General.
+        topic_id = await _ensure_aux_topic(svc, creds, aux_chat, entity)
+
         conn = _central_conn()
         row = conn.execute("SELECT COUNT(*) c, MAX(msg_id) m FROM telegram_message_cache").fetchone()
         conn.close()
@@ -348,7 +454,26 @@ async def export_full_backup(aux_chat: str) -> dict:
 
         _progress_state["step"] = "Generando backup"
         raw_db, gz = await asyncio.to_thread(_build_and_gzip, None)
-        h = _sha256(gz)
+        del raw_db
+        # A disco (el .db.gz completo en RAM + subida duplicaba el pico).
+        import tempfile as _tf
+        _gz_path = os.path.join(_TVCAT_DIR, "data", "_cache_relay_up.db.gz")
+        try:
+            with open(_gz_path, "wb") as _f:
+                _f.write(gz)
+            del gz
+        except Exception:
+            _gz_path = None
+        if _gz_path:
+            _h = hashlib.sha256()
+            with open(_gz_path, "rb") as _f:
+                for _chunk in iter(lambda: _f.read(8 * 1024 * 1024), b""):
+                    _h.update(_chunk)
+            h = _h.hexdigest()
+            _gz_len = os.path.getsize(_gz_path)
+        else:
+            h = _sha256(gz)
+            _gz_len = len(gz)
         bk = uuid.uuid4().hex[:12]
 
         _progress_state["step"] = "Subiendo"
@@ -357,44 +482,59 @@ async def export_full_backup(aux_chat: str) -> dict:
             _progress_state["current"] = job.get("current", 0)
             _progress_state["total"] = job.get("total", 0)
 
-        result = await _upload_and_pin(svc, creds, aux_chat, bk, "*", full=True,
-                                       max_msg_id=max_msg_id, count=count, gz=gz, hash_val=h,
-                                       progress_callback=_p)
+        try:
+            result = await _upload_and_pin(svc, creds, aux_chat, bk, "*", full=True,
+                                           max_msg_id=max_msg_id, count=count, gz=(_gz_path or gz), hash_val=h,
+                                           progress_callback=_p, topic_id=topic_id)
+        finally:
+            try:
+                if _gz_path and os.path.isfile(_gz_path):
+                    os.remove(_gz_path)
+            except Exception:
+                pass
         if not result.get("ok"):
             return result
 
         conn = _plugin_conn()
         conn.execute("INSERT INTO cache_relay_backups (channel_id, chat_origen, msg_id_backup, bk, max_msg_id, count, ts, parts, size_bytes, hash, status) VALUES (?,?,?,?,?,?,?,?,?,?,'local')",
-                     ("*", str(aux_chat), result.get("msg_id"), bk, max_msg_id, count, int(time.time()), result.get("parts", 1), len(gz), h))
+                     ("*", str(aux_chat), result.get("msg_id"), bk, max_msg_id, count, int(time.time()), result.get("parts", 1), _gz_len, h))
         conn.commit()
         conn.close()
-        return {"ok": True, "msg_id": result.get("msg_id"), "bk": bk, "count": count, "size": len(gz)}
+        return {"ok": True, "msg_id": result.get("msg_id"), "bk": bk, "count": count, "size": _gz_len, "topic_id": topic_id}
+    except Exception as e:
+        import traceback as _tb
+        print(f"[CacheRelay] export_full_backup: {e}\n{_tb.format_exc()}", flush=True)
+        return {"ok": False, "error": str(e)[:300]}
     finally:
         _reset_progress()
 
 
 async def _upload_and_pin(svc, creds, chat, bk, channel_id, full, max_msg_id, count, gz, hash_val,
-                          progress_callback=None):
-    """Sube el .db.gz (fragmentado si >2GB) y fija la cabecera, usando TransferService."""
+                          progress_callback=None, topic_id=None):
+    """Sube el .db.gz (fragmentado si >2GB) y fija la cabecera, usando TransferService.
+    topic_id: publica dentro de ese topic de foro (None = General).
+    `gz` puede ser bytes o ruta a fichero (recomendado si es grande: sin pico RAM)."""
     from services import transfer_service
+    import os as _os
     LIMIT = 2 * 1024 * 1024 * 1024  # 2GB
-    parts = []
-    if len(gz) <= LIMIT:
-        parts = [gz]
-    else:
-        for i in range(0, len(gz), LIMIT):
-            parts.append(gz[i:i+LIMIT])
-
-    N = len(parts)
-    total_bytes = len(gz)
+    _gz_path = gz if (isinstance(gz, str) and _os.path.isfile(gz)) else None
+    _gz_len = _os.path.getsize(_gz_path) if _gz_path else len(gz)
+    N = max(1, (_gz_len + LIMIT - 1) // LIMIT)
+    total_bytes = _gz_len
     sent_bytes = 0
     last_msg_id = None
-    for i, part in enumerate(parts, 1):
+    for i in range(1, N + 1):
+        if _gz_path:
+            with open(_gz_path, "rb") as _f:
+                _f.seek((i - 1) * LIMIT)
+                part = _f.read(LIMIT)
+        else:
+            part = gz if N == 1 else gz[(i - 1) * LIMIT:i * LIMIT]
         if N == 1:
-            caption = _manifest(bk, channel_id, full, max_msg_id, count, 1, len(gz), hash_val)
+            caption = _manifest(bk, channel_id, full, max_msg_id, count, 1, _gz_len, hash_val)
             fname = "TVCacheRelay.db.gz"
         else:
-            caption = f"#cacheRelay bk={bk} part={i}/{N}" if i < N else _manifest(bk, channel_id, full, max_msg_id, count, N, len(gz), hash_val)
+            caption = f"#cacheRelay bk={bk} part={i}/{N}" if i < N else _manifest(bk, channel_id, full, max_msg_id, count, N, _gz_len, hash_val)
             fname = f"TVCacheRelay_Part{i}.db.gz"
 
         part_len = len(part)
@@ -404,9 +544,13 @@ async def _upload_and_pin(svc, creds, chat, bk, channel_id, full, max_msg_id, co
                 progress_callback({"current": sent_bytes + job.get("current", 0),
                                    "total": total_bytes})
 
+        # Parte única desde fichero: pasar la RUTA (subida directa desde
+        # disco, sin cargarla en RAM).
+        _payload = _gz_path if (_gz_path and N == 1) else part
         job = await transfer_service.enqueue_upload(
-            chat, part, file_name=fname, caption=caption,
-            creds=_transfer_creds(creds), on_progress=_p, persist=False, _kind="cache_relay")
+            chat, _payload, file_name=fname, caption=caption,
+            creds=_transfer_creds(creds), on_progress=_p, persist=False, _kind="cache_relay",
+            topic_id=topic_id)
         done = await transfer_service.wait_job(job["id"])
         if done.get("state") != "done" or not done.get("result"):
             raise RuntimeError(f"Fallo subiendo {fname}: {done.get('error')}")
@@ -436,6 +580,7 @@ async def discover_backups(chat: str, channel_id: str = None) -> Optional[dict]:
     """Busca el manifest del backup más reciente en el chat (opcionalmente filtrado por canal).
     Primero en pinned; si no hay, por búsqueda de texto '#cacheRelay' (no depende del pin).
     Devuelve el manifest enriquecido con 'msg_id' (mensaje cabecera) o None."""
+    chat = normalize_aux_chat(chat)
     svc = await _service()
     creds = _cred_kwargs()
     if not creds:
@@ -481,6 +626,39 @@ async def discover_backups(chat: str, channel_id: str = None) -> Optional[dict]:
     result = dict(best["manifest"])
     result["msg_id"] = best["msg_id"]
     return result
+
+
+def latest_local_backup(aux_chat: str) -> Optional[dict]:
+    """Último backup subido por ESTE equipo al auxiliar (registro local):
+    manifest listo para download_backup sin depender de pinned/search."""
+    try:
+        conn = _plugin_conn()
+        try:
+            row = conn.execute(
+                "SELECT msg_id_backup, bk, max_msg_id, count, parts, size_bytes, hash"
+                " FROM cache_relay_backups WHERE chat_origen=? AND status='local'"
+                " ORDER BY id DESC LIMIT 1", (str(aux_chat),)).fetchone()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if not row or not row[0] or not row[1]:
+            return None
+        keys = ["msg_id", "bk", "max", "n", "parts", "size", "hash"]
+        d = dict(zip(keys, [row[0], row[1], row[2] or 0, row[3] or 0,
+                            row[4] or 1, row[5] or 0, row[6] or ""]))
+        try:
+            d["parts"] = int(d["parts"] or 1)
+            d["max"] = int(d["max"] or 0)
+            d["n"] = int(d["n"] or 0)
+            d["size"] = int(d["size"] or 0)
+            d["msg_id"] = int(d["msg_id"])
+        except Exception:
+            return None
+        return d
+    except Exception:
+        return None
 
 
 async def download_backup(manifest: dict, chat: str, progress_callback=None) -> Optional[bytes]:

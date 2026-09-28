@@ -1648,9 +1648,8 @@ class TelegramService:
         _uid = self._user_key(task)
         try:
             if self._is_pyro(client, task.get("client_type")):
-                # Pyrogram no tiene get_entity: get_chat (título/username).
-                # can_post queda None (desconocido) salvo error: barato para
-                # resolución masiva de nombres; el envío dirá la verdad.
+                # Pyrogram no tiene get_entity: get_chat (título/username) +
+                # get_chat_member (permisos reales, sin hardcodear telethon).
                 await self._throttle(_uid)
                 try:
                     ch = await client.get_chat(self._pyro_chat_id(chat))
@@ -1658,15 +1657,51 @@ class TelegramService:
                     print(f" [TELEGRAM SERVICE] Error en tarea get_entity : {e}", flush=True)
                     raise
                 _ct = str(getattr(ch, "type", "") or "")
+                _is_mega = "SUPERGROUP" in _ct.upper()
+                _is_bc = "CHANNEL" in _ct.upper() and not _is_mega
                 result = {
                     "id": getattr(ch, "id", None),
                     "title": getattr(ch, "title", None) or getattr(ch, "first_name", "") or "",
                     "username": getattr(ch, "username", None),
-                    "megagroup": ("SUPERGROUP" in _ct.upper()),
-                    "broadcast": ("CHANNEL" in _ct.upper() and "SUPERGROUP" not in _ct.upper()),
+                    "megagroup": _is_mega,
+                    "broadcast": _is_bc,
+                    "forum": bool(getattr(ch, "is_forum", False)),
                     "creator": False,
-                    "can_post": None,
+                    "can_post": False,
                 }
+                # can_post por pertenencia propia (owner/admin con post).
+                try:
+                    await self._throttle(_uid)
+                    _me = await client.get_me()
+                    _mid = getattr(_me, "id", None)
+                    _can = False
+                    if _mid:
+                        await self._throttle(_uid)
+                        _mb = await client.get_chat_member(
+                            getattr(ch, "id", self._pyro_chat_id(chat)), _mid)
+                        # status es enum (ChatMemberStatus.OWNER): normalizar.
+                        _st = str(getattr(_mb, "status", "") or "").split(".")[-1].lower()
+                        _priv = getattr(_mb, "privileges", None)
+                        if _st in ("owner", "creator"):
+                            result["creator"] = True
+                            _can = True
+                        elif _st in ("administrator", "admin"):
+                            if _priv is None:
+                                _can = True
+                            else:
+                                _can = bool(getattr(_priv, "can_post_messages", True))
+                        elif _st == "member":
+                            _can = not _is_bc
+                        elif _st == "restricted":
+                            if _priv is None:
+                                _can = not _is_bc
+                            else:
+                                _can = bool(getattr(_priv, "can_send_messages", False))
+                        else:
+                            print(f" [TELEGRAM SERVICE] can_post pyro: estado '{_st}' sin permiso", flush=True)
+                    result["can_post"] = _can
+                except Exception as e:
+                    print(f" [TELEGRAM SERVICE] can_post pyro no resoluble: {e}", flush=True)
                 if callback:
                     await callback(result)
                 return
@@ -1678,6 +1713,7 @@ class TelegramService:
                 "username": getattr(entity, 'username', None),
                 "megagroup": bool(getattr(entity, 'megagroup', False)),
                 "broadcast": bool(getattr(entity, 'broadcast', False)),
+                "forum": bool(getattr(entity, 'forum', False)),
                 "creator": bool(getattr(entity, 'creator', False)),
                 "can_post": False,
             }
@@ -1717,15 +1753,32 @@ class TelegramService:
         client, need_disc = await self._get_temp_or_pool_client(task)
         _uid = self._user_key(task)
         try:
-            from telethon.tl.types import InputMessagesFilterPinned
             await self._throttle(_uid)
             result = []
-            async for m in client.iter_messages(self._to_entity_id(chat), filter=InputMessagesFilterPinned(), limit=100):
-                result.append({
-                    "msg_id": int(getattr(m, 'id', 0)),
-                    "caption": getattr(m, 'message', '') or getattr(m, 'text', '') or '',
-                    "date": str(getattr(m, 'date', '')),
-                })
+            if self._is_pyro(client, task.get("client_type")):
+                from pyrogram.enums import MessagesFilter as _MF
+                _cid = self._pyro_chat_id(chat)
+                if isinstance(_cid, str) and not _cid.startswith("@"):
+                    try:
+                        _cid = int(_cid)
+                    except Exception:
+                        pass
+                async for m in client.search_messages(_cid, filter=_MF.PINNED):
+                    result.append({
+                        "msg_id": int(getattr(m, 'id', 0)),
+                        "caption": getattr(m, 'caption', '') or getattr(m, 'text', '') or '',
+                        "date": str(getattr(m, 'date', '')),
+                    })
+                    if len(result) >= 100:
+                        break
+            else:
+                from telethon.tl.types import InputMessagesFilterPinned
+                async for m in client.iter_messages(self._to_entity_id(chat), filter=InputMessagesFilterPinned(), limit=100):
+                    result.append({
+                        "msg_id": int(getattr(m, 'id', 0)),
+                        "caption": getattr(m, 'message', '') or getattr(m, 'text', '') or '',
+                        "date": str(getattr(m, 'date', '')),
+                    })
             if callback:
                 await callback(result)
         finally:
@@ -1744,12 +1797,26 @@ class TelegramService:
         try:
             await self._throttle(_uid)
             result = []
-            async for m in client.iter_messages(self._to_entity_id(chat), search=query, limit=50):
-                result.append({
-                    "msg_id": int(getattr(m, 'id', 0)),
-                    "caption": getattr(m, 'message', '') or getattr(m, 'text', '') or '',
-                    "date": str(getattr(m, 'date', '')),
-                })
+            if self._is_pyro(client, task.get("client_type")):
+                _cid = self._pyro_chat_id(chat)
+                if isinstance(_cid, str) and not _cid.startswith("@"):
+                    try:
+                        _cid = int(_cid)
+                    except Exception:
+                        pass
+                async for m in client.search_messages(_cid, query, limit=50):
+                    result.append({
+                        "msg_id": int(getattr(m, 'id', 0)),
+                        "caption": getattr(m, 'caption', '') or getattr(m, 'text', '') or '',
+                        "date": str(getattr(m, 'date', '')),
+                    })
+            else:
+                async for m in client.iter_messages(self._to_entity_id(chat), search=query, limit=50):
+                    result.append({
+                        "msg_id": int(getattr(m, 'id', 0)),
+                        "caption": getattr(m, 'message', '') or getattr(m, 'text', '') or '',
+                        "date": str(getattr(m, 'date', '')),
+                    })
             if callback:
                 await callback(result)
         finally:
@@ -1795,7 +1862,12 @@ class TelegramService:
         _uid = self._user_key(task)
         try:
             await self._throttle(_uid)
-            await client.pin_message(self._to_entity_id(chat), msg_id, notify=False)
+            if self._is_pyro(client, task.get("client_type")):
+                await client.pin_chat_message(
+                    self._pyro_chat_id(chat), int(msg_id),
+                    disable_notification=True)
+            else:
+                await client.pin_message(self._to_entity_id(chat), msg_id, notify=False)
             if callback:
                 await callback(True)
         finally:

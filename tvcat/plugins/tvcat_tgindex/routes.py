@@ -1396,9 +1396,24 @@ async def cache_relay_config_get(request: Request):
 
 @router.post("/api/cache-relay/config")
 async def cache_relay_config_set(body: CacheRelayConfigRequest, request: Request):
-    from services.cache_relay import _save_config
-    _save_config(body.chat_aux, body.overwrite)
-    return {"ok": True}
+    from services.cache_relay import _save_config, normalize_aux_chat
+    canon = normalize_aux_chat(body.chat_aux)
+    _save_config(canon, body.overwrite)
+    # Verificación en vivo con el cliente preferido: id resuelto + can_post.
+    can_post = None
+    title = ""
+    try:
+        if canon:
+            from services.cache_relay import _service, _cred_kwargs
+            svc = await _service()
+            creds = _cred_kwargs()
+            if creds:
+                ent = await svc.get_entity(canon, **creds)
+                can_post = bool((ent or {}).get("can_post"))
+                title = str((ent or {}).get("title") or "")
+    except Exception as e:
+        print(f" [TGIndex] cache-relay config check: {e}", flush=True)
+    return {"ok": True, "chat_aux": canon, "can_post": can_post, "title": title}
 
 
 @router.post("/api/cache-relay/{channel_id}/upload")
@@ -1429,17 +1444,34 @@ async def cache_relay_upload_full(request: Request):
 @router.post("/api/cache-relay/download-full")
 async def cache_relay_download_full(request: Request):
     from services.cache_relay import discover_backups, download_backup, import_channel_cache, _get_config
-    cfg = _get_config()
-    if not cfg.get("chat_aux"):
-        return {"ok": False, "error": "Canal auxiliar no configurado"}
-    manifest = await discover_backups(cfg["chat_aux"], channel_id=None)
-    if not manifest:
-        return {"ok": False, "error": "No se encontró backup completo en los anclados"}
-    gz = await download_backup(manifest, cfg["chat_aux"])
-    if gz is None:
-        return {"ok": False, "error": "No se pudo descargar el backup"}
-    result = import_channel_cache(gz, "*", cfg.get("overwrite", False), manifest, cfg["chat_aux"])
-    return result
+    try:
+        cfg = _get_config()
+        if not cfg.get("chat_aux"):
+            return {"ok": False, "error": "Canal auxiliar no configurado"}
+        manifest = await discover_backups(cfg["chat_aux"], channel_id=None)
+        print(f" [TGIndex] download-full manifest: {bool(manifest)}", flush=True)
+        if not manifest:
+            # Mismo equipo: el registro local ya guarda el msg_id (sin
+            # depender de pinned/search de Telegram).
+            try:
+                from services.cache_relay import latest_local_backup as _llb
+                manifest = _llb(cfg["chat_aux"])
+                print(f" [TGIndex] download-full local: {bool(manifest)}", flush=True)
+            except Exception:
+                manifest = None
+        if not manifest:
+            return {"ok": False, "error": "No se encontró backup completo en los anclados"}
+        gz = await download_backup(manifest, cfg["chat_aux"])
+        print(f" [TGIndex] download-full bytes: {len(gz) if gz else 0}", flush=True)
+        if gz is None:
+            return {"ok": False, "error": "No se pudo descargar el backup"}
+        result = import_channel_cache(gz, "*", cfg.get("overwrite", False), manifest, cfg["chat_aux"])
+        print(f" [TGIndex] download-full result: {str(result)[:200]}", flush=True)
+        return result
+    except Exception as e:
+        import traceback as _tb
+        print(f" [TGIndex] download-full: {e}\n{_tb.format_exc()}", flush=True)
+        return {"ok": False, "error": str(e)[:300]}
 
 
 

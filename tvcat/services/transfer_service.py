@@ -101,11 +101,12 @@ def _load_persisted_jobs() -> dict:
 
 async def enqueue_upload(chat, file_bytes_or_path, file_name="file.bin",
                          caption="", creds=None, on_progress=None,
-                         post_process=None, persist=False, _kind="") -> dict:
+                         post_process=None, persist=False, _kind="", topic_id=None) -> dict:
     """Encola una subida. file_bytes_or_path: bytes o ruta a fichero.
     creds: {session_string, api_id, api_hash} o None (cuenta activa por defecto).
     on_progress(job) se llama en cada actualización.
     post_process(job) opcional: callback async al final (ej. pin, registro local).
+    topic_id: opcional, publica dentro de ese topic de foro (None = General).
     Devuelve el job (con id)."""
     try:
         from services.tg_activity import mark as _tg_mark
@@ -115,6 +116,12 @@ async def enqueue_upload(chat, file_bytes_or_path, file_name="file.bin",
     job = _make_job(type="upload", chat=str(chat), file_name=file_name,
                     phase="Preparando", persist=persist, _kind=_kind)
     job["_caption"] = caption
+    try:
+        _tid = int(topic_id) if topic_id else 0
+    except Exception:
+        _tid = 0
+    if _tid:
+        job["_topic_id"] = _tid
     job["_creds"] = creds
     job["_on_progress"] = on_progress
     job["_post_process"] = post_process
@@ -340,29 +347,45 @@ async def _upload_data(client, ctype, job, data: bytes, file_name: str, caption:
     Elige estrategia según tamaño (igual que TGHirayi). F2 FastDownload: con
     Pyrofork y ruta en disco se envía directo (`send_document(path)`), sin
     pasar por RAM ni tmp intermedio. Con Telethon la ruta se usa como tmp
-    directa (solo lectura). `get_entity` solo se pide en ramas Telethon
+    directa (solo lectura).     `get_entity` solo se pide en ramas Telethon
     (el cliente Pyrogram no tiene ese método)."""
     chat_id = int(job["chat"])
+    try:
+        _topic = int(job.get("_topic_id") or 0) or None
+    except Exception:
+        _topic = None
 
     if size < BIG_UPLOAD_THRESHOLD:
         # <10MB: envío directo (ruta o bytes según lo recibido)
         if src_path is not None:
             if ctype == "pyrogram":
+                _kw = {}
+                if _topic:
+                    _kw["message_thread_id"] = _topic
                 m = await client.send_document(chat_id, src_path, caption=caption or None,
-                                               file_name=file_name)
+                                               file_name=file_name, **_kw)
             else:
                 entity = await client.get_entity(chat_id)
-                m = await client.send_file(entity, src_path, caption=caption or None)
+                _kw = {}
+                if _topic:
+                    _kw["reply_to"] = _topic
+                m = await client.send_file(entity, src_path, caption=caption or None, **_kw)
             progress_callback(size, size)
             return int(m.id)
         import io
         buf = io.BytesIO(data)
         buf.name = file_name
         if ctype == "pyrogram":
-            m = await client.send_document(chat_id, buf, caption=caption or None, file_name=file_name)
+            _kw = {}
+            if _topic:
+                _kw["message_thread_id"] = _topic
+            m = await client.send_document(chat_id, buf, caption=caption or None, file_name=file_name, **_kw)
         else:
             entity = await client.get_entity(chat_id)
-            m = await client.send_file(entity, buf, caption=caption or None)
+            _kw = {}
+            if _topic:
+                _kw["reply_to"] = _topic
+            m = await client.send_file(entity, buf, caption=caption or None, **_kw)
         progress_callback(size, size)
         return int(m.id)
 
@@ -371,7 +394,8 @@ async def _upload_data(client, ctype, job, data: bytes, file_name: str, caption:
         if ctype != "pyrogram":
             raise RuntimeError("Fichero >1.9GB requiere sesión Pyrofork")
         return await _upload_pyrofork(client, chat_id, data, file_name, caption, size,
-                                      progress_callback, creds, src_path=src_path)
+                                      progress_callback, creds, src_path=src_path,
+                                      reply_to_msg_id=_topic)
 
     if ctype == "pyrogram" and src_path is not None:
         # F3: 10MB..1.9GB con ruta en disco → subida rápida (workers del ajuste
@@ -385,7 +409,8 @@ async def _upload_data(client, ctype, job, data: bytes, file_name: str, caption:
 
         return await _fd.fast_send_media(client, chat_id, src_path, False,
                                          file_name=file_name, caption=caption or None,
-                                         workers=_uw, progress=_p)
+                                         workers=_uw, progress=_p,
+                                         reply_to_msg_id=_topic)
 
     # 10MB..1.9GB sin ruta directa (bytes, o Telethon): parallel upload Telethon.
     # Si src_path existe se usa como tmp de solo-lectura (sin copiar ni borrar).
@@ -404,7 +429,10 @@ async def _upload_data(client, ctype, job, data: bytes, file_name: str, caption:
         input_file = await _parallel_upload(client, tmp_path, size, threads, part_size_kb,
                                             file_name=file_name, progress_callback=progress_callback)
         entity = await client.get_entity(chat_id)
-        m = await client.send_file(entity, input_file, caption=caption or None)
+        _kw = {}
+        if _topic:
+            _kw["reply_to"] = _topic
+        m = await client.send_file(entity, input_file, caption=caption or None, **_kw)
         return int(m.id)
     finally:
         if _is_temp:
@@ -415,7 +443,8 @@ async def _upload_data(client, ctype, job, data: bytes, file_name: str, caption:
 
 
 async def _upload_pyrofork(client, chat_id, data: bytes, file_name: str, caption: str,
-                           size: int, progress_callback, creds: dict, src_path: str = None) -> int:
+                           size: int, progress_callback, creds: dict, src_path: str = None,
+                           reply_to_msg_id: int = None) -> int:
     """Sube >1.9GB con Pyrofork. Si `src_path` existe, subida rápida directa
     desde disco (F3); si no, send_document clásico sobre tmp."""
     if src_path is not None:
@@ -428,7 +457,8 @@ async def _upload_pyrofork(client, chat_id, data: bytes, file_name: str, caption
 
         return await _fd.fast_send_media(client, chat_id, src_path, False,
                                          file_name=file_name, caption=caption or None,
-                                         workers=_uw, progress=_p)
+                                         workers=_uw, progress=_p,
+                                         reply_to_msg_id=reply_to_msg_id)
     tmp_path = os.path.join(_DATA_DIR, f"_transfer_up_{uuid.uuid4().hex}.tmp")
     try:
         if _is_temp:
@@ -439,8 +469,11 @@ async def _upload_pyrofork(client, chat_id, data: bytes, file_name: str, caption
         def _p(cur, tot):
             progress_callback(cur, tot)
 
+        _kw = {}
+        if reply_to_msg_id:
+            _kw["message_thread_id"] = reply_to_msg_id
         m = await client.send_document(chat_id, tmp_path, caption=caption or None,
-                                       progress=_p, file_name=file_name)
+                                       progress=_p, file_name=file_name, **_kw)
         return int(m.id)
     finally:
         if _is_temp:

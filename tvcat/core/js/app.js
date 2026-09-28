@@ -3323,11 +3323,10 @@ window.showTgindexConfig = function() {
         '<div class="settings-section" style="margin-bottom:12px;padding:10px;background:var(--bg-surface);border-radius:8px;border:1px solid var(--border-color);">' +
         '<h4 style="margin:0 0 8px;font-size:0.9rem;">\uD83D\uDCE6 CacheRelay (backup completo)</h4>' +
         '<label style="font-size:0.8rem;">Chat auxiliar (@username o id):</label>' +
-        '<input type="text" id="cache-relay-chat-aux" placeholder="@mi_canal_auxiliar" style="width:100%;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:0.8rem;margin-top:4px;box-sizing:border-box;">' +
+        '<input type="text" id="cache-relay-chat-aux" placeholder="@mi_canal_auxiliar o enlace a un mensaje" oninput="cacheRelayAuxChanged()" style="width:100%;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:0.8rem;margin-top:4px;box-sizing:border-box;">' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:0.8rem;margin-top:8px;cursor:pointer;">' +
         '<input type="checkbox" id="cache-relay-overwrite" style="accent-color:var(--accent);"> Sobrescribir registros existentes</label>' +
         '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">' +
-        '<button class="btn-secondary" onclick="saveCacheRelayConfig()" style="padding:5px 12px;font-size:0.8rem;">Guardar config</button>' +
         '<button class="btn-secondary" onclick="cacheRelayUploadFull()" style="padding:5px 12px;font-size:0.8rem;">\u2B06 Backup completo</button>' +
         '<button class="btn-secondary" onclick="cacheRelayDownloadFull()" style="padding:5px 12px;font-size:0.8rem;">\u2B07 Obtener backup completo</button></div>' +
         '<span id="cache-relay-status" style="font-size:0.8rem;color:var(--text-secondary);"></span></div>' +
@@ -3623,21 +3622,46 @@ function loadCacheRelayConfig() {
 }
 
 function saveCacheRelayConfig() {
-    var aux = document.getElementById('cache-relay-chat-aux');
-    var ow = document.getElementById('cache-relay-overwrite');
-    var st = document.getElementById('cache-relay-status');
-    var raw = aux ? aux.value.trim() : '';
-    var chatAux = cacheRelayParseChat(raw);
-    window.API.ajax({
-        method: 'POST',
-        url: '/api/cache-relay/config',
-        data: { chat_aux: chatAux, overwrite: ow ? ow.checked : false },
-        success: function() {
-            if (st) st.textContent = 'Config guardada.' + (chatAux !== raw ? ' (chat: ' + chatAux + ')' : '');
-            if (aux && chatAux !== raw) aux.value = chatAux;
-        },
-        error: function() { if (st) st.textContent = 'Error guardando config.'; }
-    });
+    // Obsoleto: el chat auxiliar se autogarda al pegarlo (cacheRelayAuxChanged).
+    // Se mantiene por compatibilidad si algo lo llama.
+    cacheRelayAuxChanged(true);
+}
+
+var _cacheRelayAuxTimer = null;
+function cacheRelayAuxChanged(now) {
+    // Al pegar/escribir un enlace o id: resuelve a chat id, valida en vivo
+    // (título + puede publicar) y lo guarda. Sin botón.
+    if (_cacheRelayAuxTimer) { clearTimeout(_cacheRelayAuxTimer); _cacheRelayAuxTimer = null; }
+    var run = function() {
+        var aux = document.getElementById('cache-relay-chat-aux');
+        var ow = document.getElementById('cache-relay-overwrite');
+        var st = document.getElementById('cache-relay-status');
+        var raw = aux ? aux.value.trim() : '';
+        if (!raw) return;
+        var chatAux = cacheRelayParseChat(raw);
+        if (!chatAux) return;
+        if (st) st.textContent = 'Resolviendo chat...';
+        window.API.ajax({
+            method: 'POST',
+            url: '/api/cache-relay/config',
+            data: { chat_aux: chatAux, overwrite: ow ? ow.checked : false },
+            success: function(r) {
+                var extra = '';
+                if (r) {
+                    if (r.chat_aux) extra += ' (chat: ' + r.chat_aux + ')';
+                    if (r.title) extra += ' "' + r.title + '"';
+                    if (r.can_post === true) extra += ' · puede publicar ✓';
+                    else if (r.can_post === false) extra += ' · NO puede publicar ✗';
+                }
+                if (st) st.textContent = 'Chat auxiliar guardado.' + extra;
+                if (aux && r && r.chat_aux && r.chat_aux !== raw) aux.value = r.chat_aux;
+                else if (aux && chatAux !== raw) aux.value = chatAux;
+            },
+            error: function() { if (st) st.textContent = 'Error guardando chat auxiliar.'; }
+        });
+    };
+    if (now) { run(); return; }
+    _cacheRelayAuxTimer = setTimeout(run, 700);
 }
 
 function cacheRelayParseChat(raw) {
@@ -3792,13 +3816,27 @@ function cacheRelayDownload(channelId, btn) {
 function cacheRelayUploadFull() {
     var st = document.getElementById('cache-relay-status');
     if (st) st.textContent = 'Subiendo backup completo...';
+    var pollTimer = setInterval(function() {
+        window.API.ajax({
+            url: '/api/cache-relay/status',
+            success: function(p) {
+                if (p && p.running) {
+                    var txt = p.step || 'Procesando...';
+                    if (p.total > 0) txt += ' ' + Math.round((p.current / p.total) * 100) + '%';
+                    else if (p.current > 0) txt += ' (' + Math.round(p.current / 1048576) + ' MB)';
+                    if (st) st.textContent = txt;
+                }
+            }
+        });
+    }, 800);
     window.API.ajax({
         method: 'POST',
         url: '/api/cache-relay/upload-full',
         success: function(r) {
+            clearInterval(pollTimer);
             if (st) st.textContent = (r && r.ok) ? 'Backup completo subido.' : ('Error: ' + (r && r.error ? r.error : 'desconocido'));
         },
-        error: function() { if (st) st.textContent = 'Error de red al subir.'; }
+        error: function() { clearInterval(pollTimer); if (st) st.textContent = 'Error de red al subir.'; }
     });
 }
 
@@ -3812,7 +3850,7 @@ function cacheRelayDownloadFull() {
             if (st) st.textContent = (r && r.ok)
                 ? ((r.skipped ? 'Ya actualizado.' : 'Importado ' + (r.imported || 0) + ' msgs.'))
                 : ('Error: ' + (r && r.error ? r.error : 'desconocido'));
-            loadCacheRelayChannels();
+            try { if (typeof loadCacheRelayChannels === 'function') loadCacheRelayChannels(); } catch (e) {}
         },
         error: function() { if (st) st.textContent = 'Error de red al obtener backup.'; }
     });
