@@ -5238,7 +5238,8 @@ async def _ensure_medialine(text, job, client, has_photo: bool):
         if line:
             # Fresca disponible (describe lo que se sube): manda sobre
             # cualquier línea manual previa (puede ser del origen sin
-            # normalizar). Se quitan todas y se pone la fresca.
+            # normalizar). Solo se sustituye si cabe: si no, se devuelve el
+            # texto ORIGINAL intacto (con su línea bakeada si la tenía).
             try:
                 from services.enrich_tags import strip_media_line as _sml
             except Exception:
@@ -5247,15 +5248,15 @@ async def _ensure_medialine(text, job, client, has_photo: bool):
                 except Exception:
                     _sml = lambda t: t
             try:
-                text = _sml(text)
+                _stripped = _sml(text)
             except Exception:
-                pass
+                _stripped = text
             premium = await _sender_is_premium(client)
             limit = 4096 if (not has_photo or premium) else 1024
-            cand = text.rstrip() + "\n" + line
+            cand = _stripped.rstrip() + "\n" + line
             if len(cand) <= limit:
                 return cand
-            print(f"[TGHirayi_v2] medialine omitida: no cabe ({len(cand)}/{limit})",
+            print(f"[TGHirayi_v2] medialine fresca omitida: no cabe ({len(cand)}/{limit}), se conserva la existente",
                   flush=True)
             return text
         # Sin sonda: se respeta la manual válida si la hay (mejor que nada);

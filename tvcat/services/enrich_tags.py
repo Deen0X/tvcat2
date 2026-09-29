@@ -553,12 +553,28 @@ def strip_media_tags(text: str) -> str:
 
 
 def needs_media(text: str) -> bool:
-    """¿La plantilla usa tags `_*`? Si sí, TGHirayi debe sondar el primer
-    fichero aunque `media_probe` esté OFF (sin sonda saldrían vacíos)."""
+    """¿La plantilla usa tags `_*` (o formas planas media)? ¿O trae ya una
+    línea MediaLine bakeada? Si sí, TGHirayi debe sondar el primer fichero
+    aunque `media_probe` esté OFF (sin sonda saldrían vacíos / la línea
+    bakeada quedaría rancia)."""
     try:
-        return bool(_MEDIA_TOKEN_RE.search(text or ""))
+        if _MEDIA_TOKEN_RE.search(text or ""):
+            return True
     except Exception:
-        return False
+        pass
+    try:
+        if text and "\U0001F39E" in text:
+            from services.media_line import parse_media_line as _pml
+            return _pml(text) is not None
+    except Exception:
+        pass
+    try:
+        if text and "\U0001F39E" in text:
+            from tvcat.services.media_line import parse_media_line as _pml2
+            return _pml2(text) is not None
+    except Exception:
+        pass
+    return False
 
 
 def strip_media_line(text: str) -> str:

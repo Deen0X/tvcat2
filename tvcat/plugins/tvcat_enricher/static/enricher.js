@@ -16,7 +16,10 @@
 
     function getHeroButtons(itemData) {
         if (!itemData || !itemData.item_id) return [];
-        // Color del botón según autoría (verde si es mío -> edita Telegram, azul si ajeno -> solo local)
+        // Botón único: color según autoría + icono/acción según estado.
+        // Toggle ON (auto): sin enriquecer → auto-enriquecer; enriquecido →
+        // plugin_button.png + abre el modal (el revert vive allí).
+        // Toggle OFF: clásico (plugin.png + abre el modal).
         setTimeout(function(){
             try {
                 fetch('/api/enricher/item/' + encodeURIComponent(itemData.item_id) + '/authorship').then(function(r){ return r.ok ? r.json() : null; }).then(function(auth){
@@ -34,8 +37,7 @@
                 }).catch(function(){});
             } catch(e){}
         }, 400);
-        // Botón auto-enriquecer (toggle en config; estado según tenga cover local).
-        setTimeout(function(){ try { refreshAutoEnrichBtn(itemData); } catch(e){} }, 400);
+        setTimeout(function(){ try { refreshEnrichBtn(itemData); } catch(e){} }, 400);
         return [{
             id: 'btn-enricher',
             icon: '<img src="/plugin-static/tvcat_enricher/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'✨\',20)">',
@@ -43,63 +45,68 @@
             label: '',
             action: function () {
                 try { console.log('[Enricher] click', itemData); } catch(e) {}
-                openEnricher(itemData);
-            }
-        }, {
-            id: 'btn-autoenrich',
-            icon: '<img src="/plugin-static/tvcat_enricher/auto_enrich.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'✨\',20)">',
-            tooltip: 'Auto-enriquecer',
-            label: '',
-            action: function () {
-                try { autoEnrichRun(itemData); } catch(e) {}
+                enrichBtnClick(itemData);
             }
         }];
     }
 
     var _autoBusy = {};
-    function refreshAutoEnrichBtn(itemData) {
+    var _enrichAutoOn = false;
+    function refreshEnrichBtn(itemData) {
         try {
-            var btn = document.getElementById('btn-autoenrich');
+            var btn = document.getElementById('btn-enricher');
             if (!btn || !itemData || !itemData.item_id) return;
             var iid = String(itemData.item_id);
-            if (iid.indexOf('COL-') === 0) { btn.style.display = 'none'; return; }
             fetch('/api/enrich/config').then(function(r){ return r.ok ? r.json() : null; }).then(function(cfg){
-                var on = !!(cfg && cfg.behavior && cfg.behavior.auto_enrich_button);
-                if (!on) { btn.style.display = 'none'; return; }
-                btn.style.display = '';
+                _enrichAutoOn = !!(cfg && cfg.behavior && cfg.behavior.auto_enrich_button);
+                if (!_enrichAutoOn) {
+                    setEnrichBtnMode(btn, itemData, 'classic');
+                    return;
+                }
                 fetch('/api/enricher/item/' + encodeURIComponent(iid)).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
-                    var hasLocal = !!(d && d.has_enriched);
-                    setAutoBtnState(btn, itemData, hasLocal);
-                }).catch(function(){});
-            }).catch(function(){});
+                    setEnrichBtnMode(btn, itemData, (d && d.has_enriched) ? 'edit' : 'auto');
+                }).catch(function(){ setEnrichBtnMode(btn, itemData, 'auto'); });
+            }).catch(function(){ setEnrichBtnMode(btn, itemData, 'classic'); });
         } catch(e){}
     }
-    function setAutoBtnState(btn, itemData, hasLocal) {
-        if (hasLocal) {
-            btn.innerHTML = '<img src="/plugin-static/tvcat_enricher/back_to_original.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'↩️\',20)">';
-            btn.title = 'Volver a cover original';
-            btn.setAttribute('aria-label', 'Volver a cover original');
-            btn.onclick = function() { autoEnrichRevert(itemData); };
-        } else {
+    function setEnrichBtnMode(btn, itemData, mode) {
+        try { btn.setAttribute('data-enrich-mode', mode); } catch(e) {}
+        if (mode === 'auto') {
             btn.innerHTML = '<img src="/plugin-static/tvcat_enricher/auto_enrich.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'✨\',20)">';
             btn.title = 'Auto-enriquecer';
             btn.setAttribute('aria-label', 'Auto-enriquecer');
-            btn.onclick = function() { autoEnrichRun(itemData); };
+        } else if (mode === 'edit') {
+            btn.innerHTML = '<img src="/plugin-static/tvcat_enricher/plugin_button.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'✨\',20)">';
+            btn.title = 'Editar enriquecimiento';
+            btn.setAttribute('aria-label', 'Editar enriquecimiento');
+        } else {
+            btn.innerHTML = '<img src="/plugin-static/tvcat_enricher/plugin.png" style="width:100%;height:100%;object-fit:contain;" onerror="pluginIconFallback(this,\'✨\',20)">';
+            btn.title = 'Enriquecer';
+            btn.setAttribute('aria-label', 'Enriquecer');
         }
+    }
+    function enrichBtnClick(itemData) {
+        try {
+            var btn = document.getElementById('btn-enricher');
+            var mode = btn ? btn.getAttribute('data-enrich-mode') : 'classic';
+            if (mode === 'auto') { autoEnrichRun(itemData); return; }
+            openEnricher(itemData);
+        } catch(e) { try { openEnricher(itemData); } catch(_e) {} }
     }
     function autoEnrichRun(itemData) {
         try {
             var iid = String(itemData.item_id || '');
             if (!iid || _autoBusy[iid]) return;
+            if (iid.indexOf('COL-') === 0) { openEnricher(itemData); return; }
             _autoBusy[iid] = true;
-            var btn = document.getElementById('btn-autoenrich');
+            var btn = document.getElementById('btn-enricher');
             var origHtml = btn ? btn.innerHTML : '';
             var origTitle = btn ? btn.title : '';
             if (btn) { btn.innerHTML = '⏳'; btn.title = 'Auto-enriqueciendo…'; }
             var done = function() {
                 _autoBusy[iid] = false;
                 try {
-                    var b2 = document.getElementById('btn-autoenrich');
+                    var b2 = document.getElementById('btn-enricher');
                     if (b2) { b2.innerHTML = origHtml; b2.title = origTitle; }
                 } catch(e){}
             };
@@ -114,29 +121,15 @@
                     } catch(e) {}
                     // Recarga completa de la hero con los datos nuevos.
                     try { if (window.openDetails) window.openDetails(iid); } catch(e) {}
-                    refreshAutoEnrichBtn(itemData);
+                    refreshEnrichBtn(itemData);
                 } else if (res && (res.ambiguous || res.none)) {
                     openEnricher(itemData, { presetQuery: res.query || '' });
                 } else {
                     try { console.log('[Enricher] auto error:', res); } catch(e) {}
-                    refreshAutoEnrichBtn(itemData);
+                    refreshEnrichBtn(itemData);
                 }
             })
             .catch(function(e){ done(); try { console.log('[Enricher] auto err', e); } catch(_e){} });
-        } catch(e){}
-    }
-    function autoEnrichRevert(itemData) {
-        try {
-            var iid = String(itemData.item_id || '');
-            if (!iid) return;
-            fetch('/api/enricher/item/' + encodeURIComponent(iid), { method: 'DELETE' })
-            .then(function(r){ return r.json(); })
-            .then(function(){
-                try { if (window.Catalog && window.Catalog.refreshHeroCover) window.Catalog.refreshHeroCover(iid); } catch(e) {}
-                try { if (window.Catalog && window.Catalog.refreshGridCover) window.Catalog.refreshGridCover(iid); } catch(e) {}
-                refreshAutoEnrichBtn(itemData);
-            })
-            .catch(function(){});
         } catch(e){}
     }
 
