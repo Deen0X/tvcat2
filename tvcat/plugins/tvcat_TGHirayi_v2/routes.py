@@ -6656,6 +6656,47 @@ def _wanted_audio_missing(file_path: str, audio_lang: str) -> bool:
         return False
 
 
+def _track_pos_by_lang(file_path: str, stream_type: str, lang_code: str) -> Optional[int]:
+    """Posición 0-based dentro de su tipo (audio o subs) que coincide con el
+    idioma (misma prioridad language→title que _find_stream_by_lang).
+    Se usa para `-disposition:a:N default` / `-disposition:s:N default`
+    conservando TODAS las pistas (la preferencia solo marca default)."""
+    if not (lang_code or "").strip():
+        return None
+    try:
+        candidates = _lang_code_to_candidates(lang_code)
+        tracks = (_ffprobe_tracks(file_path) or {}).get(
+            "audio" if stream_type == "audio" else "subs", []) or []
+        for pos, t in enumerate(tracks):
+            if _normalize_lang_text(t.get("language") or "") in candidates:
+                return pos
+        for pos, t in enumerate(tracks):
+            if _normalize_lang_text(t.get("title") or "") in candidates:
+                return pos
+    except Exception:
+        return None
+    return None
+
+
+def _disposition_args(input_path: str, audio_lang: str = "", sub_lang: str = "") -> list:
+    """Args ffmpeg para marcar la pista preferida como default SIN eliminar
+    ninguna pista. Limpia defaults previos del tipo y marca la elegida.
+    Vacío si no hay preferencia o no se encuentra la pista."""
+    args: list = []
+    try:
+        if (audio_lang or "").strip():
+            _apos = _track_pos_by_lang(input_path, "audio", audio_lang)
+            if _apos is not None:
+                args += ["-disposition:a", "0", f"-disposition:a:{_apos}", "default"]
+        if (sub_lang or "").strip():
+            _spos = _track_pos_by_lang(input_path, "subtitle", sub_lang)
+            if _spos is not None:
+                args += ["-disposition:s", "0", f"-disposition:s:{_spos}", "default"]
+    except Exception:
+        pass
+    return args
+
+
 def _pid_alive(pid):
     """True si el proceso `pid` sigue vivo (sin señal)."""
     if not pid:
@@ -7067,7 +7108,10 @@ def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_
         # AAC). Remux rapido con cues_to_front para que el indice de seek este
         # al inicio (requerido para HLS y seek en SmartTV antigua).
         out_path = input_path + ".faststart.mkv"
-        cmd_cues = [ffmpeg, "-y", "-i", input_path, "-c", "copy", "-cues_to_front", "true", out_path]
+        # -map 0: conservar TODAS las pistas (el default de ffmpeg sin -map
+        # solo elige una por tipo y recortaba audios/subs).
+        cmd_cues = [ffmpeg, "-y", "-i", input_path, "-map", "0",
+                    "-c", "copy"] + _disposition_args(input_path, audio_lang) + ["-cues_to_front", "true", out_path]
         log("MKV streaming: remux con cues_to_front...")
         try:
             proc = subprocess.run(cmd_cues, capture_output=True, timeout=3600)
@@ -7085,27 +7129,19 @@ def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_
         return input_path
 
     if not need_encode:
-        # Remux: vídeo en copia (sin re-encode), audio re-mapeado (solo pista si se pide),
-        # faststart en el caso MP4. Ahora SÍ se ejecuta (antes se construía y descartaba).
+        # Remux: copia total (-map 0) + marcar default por idioma.
+        # La preferencia SOLO indica default, NUNCA recorta pistas.
+        # faststart en MP4 / cues_to_front en MKV.
         out_path = input_path + (".mkv" if mkv_directo else ".normalized.mp4")
         duration = _ffprobe_duration(input_path)
-        cmd = [ffmpeg, "-y", "-i", input_path]
-        if audio_lang:
-            _aidx = _find_stream_by_lang(input_path, "audio", audio_lang)
-            if _aidx is not None:
-                cmd += ["-map", "0:v:0", "-map", f"0:{_aidx}"]
-            else:
-                cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
-        else:
-            cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+        cmd = [ffmpeg, "-y", "-i", input_path, "-map", "0", "-c", "copy"]
+        cmd += _disposition_args(input_path, audio_lang)
         if mkv_directo:
-            cmd += ["-c:v", "copy"]
-            cmd += (["-c:a", "aac", "-b:a", "128k"] if audio_lang else ["-c:a", "copy"])
-            cmd += [out_path]
-            log("Remux MKV directo (vídeo copia, solo pista)...")
+            cmd += ["-cues_to_front", "true", out_path]
+            log("Remux MKV directo (copia total + default)...")
         else:
             # MP4 ya compatible: remux total en copia (+faststart), sin re-encode de nada.
-            cmd += ["-c", "copy", "-movflags", "+faststart", out_path]
+            cmd += ["-movflags", "+faststart", out_path]
             log("Remux MP4 faststart...")
         rc = _run_ffmpeg_progress(cmd, duration or 0.0, 0.0, 100.0, on_progress_pct, None, None,
                                   proc_registry=proc_registry, on_detail=on_detail,
@@ -7136,16 +7172,12 @@ def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_
                        if v_bitrate_k else
                        ["-c:v", "libx265", "-preset", _X265_PRESET, "-crf", "23", "-b:v", "4M", "-bufsize", "8M"])
 
-        # Mapeo de audio: pista preferida (resuelta por idioma language→title) o la primera
-        audio_map = ["-map", "0:v:0"]
-        if audio_lang:
-            _aidx = _find_stream_by_lang(input_path, "audio", audio_lang)
-            if _aidx is not None:
-                audio_map += ["-map", f"0:{_aidx}"]
-            else:
-                audio_map += ["-map", "0:a:0?"]
-        else:
-            audio_map += ["-map", "0:a:0?"]
+        # Mapeo total: se conservan TODAS las pistas (la preferencia de
+        # idioma solo marca default vía _disposition_args, nunca recorta).
+        full_map = ["-map", "0"]
+        disp_args = _disposition_args(input_path, audio_lang, sub_lang)
+        # MP4 solo admite mov_text como subtítulo: el resto se copia tal cual.
+        sub_codec = ["-c:s", "mov_text"]
         # Extraer subtítulos para quemar (resueltos por idioma language→title)
         sub_map = []
         if sub_lang:
@@ -7173,7 +7205,7 @@ def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_
             # 2-pass real: pase 1 analiza y escribe las estadísticas (passlogfile),
             # pase 2 codifica usando esas estadísticas para ajustarse al tamaño objetivo.
             log(f"2-pass encode (bitrate {v_bitrate_k}k, preset {_X265_PRESET}) para caber en ~3.8GB...")
-            pass1 = ([ffmpeg, "-y", "-i", input_path] + audio_map + vcodec_args + sub_map
+            pass1 = ([ffmpeg, "-y", "-i", input_path, "-map", "0:v:0"] + vcodec_args + sub_map
                      + ["-pass", "1", "-passlogfile", pass_log,
                         "-an", "-f", "null", "NUL" if os.name == "nt" else "/dev/null"])
             rc1 = _run_ffmpeg_progress(pass1, duration, 0.0, 50.0, on_progress_pct,
@@ -7184,9 +7216,10 @@ def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_
                 log("ffmpeg pase 1 no se pudo lanzar")
             elif rc1 != 0:
                 log(f"ffmpeg pase 1 terminó con código {rc1}")
-            pass2 = ([ffmpeg, "-y", "-i", input_path] + audio_map + vcodec_args + sub_map
+            pass2 = ([ffmpeg, "-y", "-i", input_path] + full_map + vcodec_args + sub_map
+                     + ["-c:a", "aac", "-b:a", f"{audio_bitrate_k}k"]
+                     + sub_codec + disp_args
                      + ["-pass", "2", "-passlogfile", pass_log,
-                        "-c:a", "aac", "-b:a", f"{audio_bitrate_k}k",
                         "-movflags", "+faststart", output_path])
             if resume_state is not None:
                 resume_state["cmd_pass2"] = pass2
@@ -7196,7 +7229,9 @@ def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_
                                       resume_state=resume_state, pass_no=2)
         else:
             log("Conversión a MP4 (libx265)...")
-            pass2 = [ffmpeg, "-y", "-i", input_path] + audio_map + vcodec_args + sub_map + ["-c:a", "aac", "-b:a", f"{audio_bitrate_k}k", "-movflags", "+faststart", output_path]
+            pass2 = ([ffmpeg, "-y", "-i", input_path] + full_map + vcodec_args + sub_map
+                     + ["-c:a", "aac", "-b:a", f"{audio_bitrate_k}k"] + sub_codec + disp_args
+                     + ["-movflags", "+faststart", output_path])
             rc = _run_ffmpeg_progress(pass2, duration, 0.0, 100.0, on_progress_pct, err_log, progress_log_f,
                                       proc_registry=proc_registry, on_detail=on_detail,
                                       resume_state=resume_state, pass_no=0)
