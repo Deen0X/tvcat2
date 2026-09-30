@@ -761,6 +761,11 @@
                     'episodes': (function(){ try { if (itemData && itemData.episodes && itemData.episodes.length) return String(itemData.episodes.length); } catch (e) { } return ''; })(),
                     'season': (d.api_season_number !== undefined && d.api_season_number !== null && String(d.api_season_number) !== '') ? String(d.api_season_number) : ((d.api_seasons !== undefined && d.api_seasons !== null && String(d.api_seasons) !== '') ? String(d.api_seasons) : ''),
                     'temporada': (d.api_season_number !== undefined && d.api_season_number !== null && String(d.api_season_number) !== '') ? String(d.api_season_number) : ((d.api_seasons !== undefined && d.api_seasons !== null && String(d.api_seasons) !== '') ? String(d.api_seasons) : ''),
+                    'seasonalt': (function(){
+                        var _sb = (d.api_season_number !== undefined && d.api_season_number !== null && String(d.api_season_number) !== '') ? String(d.api_season_number) : ((d.api_seasons !== undefined && d.api_seasons !== null && String(d.api_seasons) !== '') ? String(d.api_seasons) : '');
+                        if (_sb !== '' && parseInt(_sb, 10) === 1) return '';
+                        return _sb;
+                    })(),
                     'season_episodes': (d.api_season_episodes !== undefined && d.api_season_episodes !== null && String(d.api_season_episodes) !== '') ? String(d.api_season_episodes) : '',
                     'ext': '',
                     'extension': '',
@@ -799,6 +804,13 @@
                     if (n === undefined || n === null || String(n) === '') n = d.api_seasons;
                     n = String(n === undefined || n === null ? '' : n).trim();
                     return foreignNameValue(d.api_title, d.api_original_title, d, n ? (' - Season ' + n) : '');
+                })();
+                m['foreignnameseasonalt'] = (function(){
+                    var na = d.api_season_number;
+                    if (na === undefined || na === null || String(na) === '') na = d.api_seasons;
+                    na = String(na === undefined || na === null ? '' : na).trim();
+                    if (na !== '' && parseInt(na, 10) === 1) na = '';
+                    return foreignNameValue(d.api_title, d.api_original_title, d, na ? (' - Season ' + na) : '');
                 })();
                 return m;
             }
@@ -1047,6 +1059,13 @@
                     n = String(n === undefined || n === null ? '' : n).trim();
                     return foreignNameValue(details.api_title, details.api_original_title, details, n ? (' - Season ' + n) : '');
                 })(),
+                '{foreignnameseasonalt}': (function(){
+                    var _na = details.api_season_number;
+                    if (_na === undefined || _na === null || String(_na) === '') _na = details.api_seasons;
+                    _na = String(_na === undefined || _na === null ? '' : _na).trim();
+                    if (_na !== '' && parseInt(_na, 10) === 1) _na = '';
+                    return foreignNameValue(details.api_title, details.api_original_title, details, _na ? (' - Season ' + _na) : '');
+                })(),
                 '{original_title}': details.api_original_title || '',
                 '{titulo_original}': details.api_original_title || '',
                 '{title_es}': details.api_title_es || '',
@@ -1084,6 +1103,11 @@
                 '{episodes}': epCount,
                 '{season}': (details.api_season_number !== undefined && details.api_season_number !== null && String(details.api_season_number) !== '') ? String(details.api_season_number) : ((details.api_seasons !== undefined && details.api_seasons !== null && String(details.api_seasons) !== '') ? String(details.api_seasons) : ''),
                 '{temporada}': (details.api_season_number !== undefined && details.api_season_number !== null && String(details.api_season_number) !== '') ? String(details.api_season_number) : ((details.api_seasons !== undefined && details.api_seasons !== null && String(details.api_seasons) !== '') ? String(details.api_seasons) : ''),
+                '{seasonalt}': (function(){
+                    var _sa = (details.api_season_number !== undefined && details.api_season_number !== null && String(details.api_season_number) !== '') ? String(details.api_season_number) : ((details.api_seasons !== undefined && details.api_seasons !== null && String(details.api_seasons) !== '') ? String(details.api_seasons) : '');
+                    if (_sa !== '' && parseInt(_sa, 10) === 1) return '';
+                    return _sa;
+                })(),
                 '{season_episodes}': (details.api_season_episodes !== undefined && details.api_season_episodes !== null && String(details.api_season_episodes) !== '') ? String(details.api_season_episodes) : '',
                 '{originalmsg}': originalMsg || '',
             };

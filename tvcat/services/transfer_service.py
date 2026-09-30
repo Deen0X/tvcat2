@@ -564,7 +564,10 @@ async def _run_download(job: dict):
         # Descarga multi-conexión (>=20MB, solo Telethon)
         tmp_path = os.path.join(_DATA_DIR, f"_transfer_dl_{uuid.uuid4().hex}.tmp")
         try:
-            got = await _parallel_download(client, msg, tmp_path, threads=8, progress_callback=_cb)
+            from services import fast_download as _fd2
+            _dthreads = _fd2.resolve_workers((creds or {}).get("download_threads"),
+                                             "tg_fastdl_workers", _fd2.DEFAULT_WORKERS)
+            got = await _parallel_download(client, msg, tmp_path, threads=_dthreads, progress_callback=_cb)
             if got:
                 with open(tmp_path, "rb") as f:
                     data = f.read()

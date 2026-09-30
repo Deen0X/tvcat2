@@ -343,7 +343,8 @@
                 '<div class="grid-item-cover">' +
                 coverImg +
                 (item.is_collection ? '' : '<div class="grid-item-badge">' + cat.charAt(0).toUpperCase() + cat.slice(1) + '</div>') +
-                (item.has_mkv ? '<div class="grid-item-badge-mkv"><img src="/static/mkv.png" onerror="this.parentNode.textContent=\'📦\'"></div>' : '') +
+                (item.has_mkv ? '<div class="grid-item-badge-mkv"' + (item.has_archive ? ' style="left:44px;"' : '') + '><img src="/static/mkv.png" onerror="this.parentNode.textContent=\'📦\'"></div>' : '') +
+                (item.has_archive ? '<div class="grid-item-badge-mkv grid-item-badge-archive"><img src="/static/archives.png" title="Archivo comprimido" onerror="this.parentNode.textContent=\'\uD83D\uDDC4\'"></div>' : '') +
                 (item.in_queue ? '<div class="grid-item-badge-queue"><img src="/static/tghirayi.png" onerror="this.outerHTML=\'📥\'"></div>' : '') +
                 (item.is_hidden ? '<div class="grid-item-badge-hidden"><img src="/static/hide_item.png" onerror="this.outerHTML=\'🙈\'"></div>' : '') +
                 ((item.episode_count || 0) > 0 ? '<div class="grid-item-badge-eps"><img src="/static/episode_count.png" onerror="this.style.display=\'none\'"><span>' + item.episode_count + '</span></div>' : '') +
@@ -370,6 +371,9 @@
             window.pluginSystem.applyGridDecorators(el, itemData);
         }
         _pumpCovers(grid);
+        // GridCardSize F1: recalcular columnas según el tamaño guardado (resize,
+        // media pantalla, móvil). Sin esto el cols-N se quedaría fijo tras pintar.
+        try { if (window.UI && window.UI.refreshCardSizeCols) window.UI.refreshCardSizeCols(); } catch (eGCS) {}
 
         grid.onclick = function(e) {
             var t = e.target || e.srcElement;
@@ -1540,8 +1544,15 @@
                     var metaMkvIcon = document.createElement('span');
                     metaMkvIcon.className = 'meta-mkv-icon';
                     metaMkvIcon.title = 'Fichero MKV';
-                    metaMkvIcon.innerHTML = '<img src="/static/mkv.png" onerror="this.parentNode.textContent=\'\uD83D\uDCE6\'">';
+                    metaMkvIcon.innerHTML = '<img src="/static/mkv.png" onerror="this.parentNode.textContent=\'📦\'">';
                     metaFavBtn.parentNode.insertBefore(metaMkvIcon, metaFavBtn.nextSibling);
+                }
+                if (item.has_archive) {
+                    var metaArchIcon = document.createElement('span');
+                    metaArchIcon.className = 'meta-archive-icon';
+                    metaArchIcon.title = 'Archivo comprimido';
+                    metaArchIcon.innerHTML = '<img src="/static/archives.png" onerror="this.parentNode.textContent=\'\uD83D\uDDC4\'">';
+                    metaFavBtn.parentNode.insertBefore(metaArchIcon, metaFavBtn.nextSibling);
                 }
                 // Badges media (misma línea que favoritos): multi-audio y subtítulos.
                 try {
@@ -1578,7 +1589,8 @@
                 modal.classList.remove('hidden');
             }
             // Vigilar la sonda priorizada: al llegar, refrescar hero en vivo.
-            try { _heroItem = item; _watchHeroProbe(itemId); } catch (e) {}
+            // (itemId es local de updateMetadataDOM: usar item directamente.)
+            try { _heroItem = item; _watchHeroProbe(item.item_id || item.id); } catch (e) {}
         };
 
         // If variant switch, just update metadata and backdrop
@@ -2404,6 +2416,32 @@
         } catch (e) {}
     }
 
+    // LED de sonda en la ficha técnica: verde pulsante mientras resuelve.
+    function _setProbeLed(state, detail) {
+        try {
+            var specsEl = document.getElementById('detail-extra-specs');
+            if (!specsEl) return;
+            var old = specsEl.querySelectorAll('.probe-led');
+            for (var i = 0; i < old.length; i++) old[i].parentNode.removeChild(old[i]);
+            if (state !== 'pending' && state !== 'probing') return;
+            var led = document.createElement('span');
+            led.className = 'probe-led';
+            var tip = (state === 'probing') ? 'Sondando ahora…' : 'Sondando audio/vídeo…';
+            try {
+                var d = detail || {};
+                var bits = [];
+                if (d.ext) bits.push(d.ext);
+                if (d.queued) bits.push('en cola');
+                if (d.probed) bits.push('sondado');
+                if (!d.has_chat) bits.push('sin chat');
+                if (!d.has_msg) bits.push('sin mensaje');
+                if (bits.length) tip += ' (' + bits.join(', ') + ')';
+            } catch (e) {}
+            led.title = tip;
+            specsEl.appendChild(led);
+        } catch (e) {}
+    }
+
     // Vigila la sonda del título abierto: al resolverse, actualiza hero + grid.
     function _watchHeroProbe(itemId) {
         _stopHeroProbe();
@@ -2415,13 +2453,29 @@
                 if (!modal || modal.classList.contains('hidden') ||
                     String(currentVariantId) !== String(itemId) || tries > 45) {
                     _stopHeroProbe();
+                    try {
+                        var _sp = document.getElementById('detail-extra-specs');
+                        if (_sp) {
+                            var _ol = _sp.querySelectorAll('.probe-led');
+                            for (var _oi = 0; _oi < _ol.length; _oi++) _ol[_oi].parentNode.removeChild(_ol[_oi]);
+                        }
+                    } catch (e) {}
                     return;
                 }
                 window.API.ajax({
                     url: '/api/media/flags/' + encodeURIComponent(itemId),
                     success: function(r) {
-                        if (!r || !r.ready) return;
+                        if (!r) return;
+                        try { _setProbeLed(r.state, r.detail); } catch (e) {}
+                        if (!r.ready) return;
                         _stopHeroProbe();
+                        try {
+                            var _sp2 = document.getElementById('detail-extra-specs');
+                            if (_sp2) {
+                                var _ol2 = _sp2.querySelectorAll('.probe-led');
+                                for (var _oi2 = 0; _oi2 < _ol2.length; _oi2++) _ol2[_oi2].parentNode.removeChild(_ol2[_oi2]);
+                            }
+                        } catch (e) {}
                         try {
                             if (_heroItem && String(_heroItem.item_id || _heroItem.id || '') === String(itemId)) {
                                 _heroItem.has_multi_audio = r.has_multi_audio ? 1 : 0;

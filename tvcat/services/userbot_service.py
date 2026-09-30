@@ -619,14 +619,19 @@ async def get_active_client(client_type: str = None) -> 'UserbotClient':
                         return c  # cooldown: no machacar con reconnects
                     _reconnect_ts[key] = _now
                     try:
-                        await c.connect()
+                        # Con timeout: un connect colgado aquí dejaba el lock
+                        # del pool cogido y congelaba TODO pyro en silencio
+                        # (jobs "Iniciando..." eternos, sonda sin resolver).
+                        await _asyncio.wait_for(c.connect(), timeout=30)
+                    except (_asyncio.TimeoutError, TimeoutError) as e:
+                        print(f" [USERBOT] Reconnect {client_type} colgado (30s), se devuelve stale: {e}")
                     except Exception as e:
                         print(f" [USERBOT] Reconnect fallido {client_type}: {e}")
                 return c
         sess = get_active_session()
         if sess and sess.get("client_type") == client_type:
             client = UserbotClient(sess)
-            await client.connect()
+            await _asyncio.wait_for(client.connect(), timeout=45)
             _client_pool[key] = client
             print(f" [USERBOT] Cliente {client_type} creado para {sess.get('name','?')}")
             return client
@@ -650,7 +655,7 @@ async def get_active_client(client_type: str = None) -> 'UserbotClient':
         if row:
             sess = dict(row)
             client = UserbotClient(sess)
-            await client.connect()
+            await _asyncio.wait_for(client.connect(), timeout=45)
             _client_pool[key] = client
             print(f" [USERBOT] Cliente {client_type} creado (fallback) para {sess.get('name','?')}")
             return client

@@ -20,6 +20,25 @@ def get_conn():
     return conn
 
 
+_ARCHIVE_EXTS = (".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2",
+                 ".tbz", ".tbz2", ".xz", ".txz", ".cab", ".ace", ".arj",
+                 ".lzh", ".lha", ".001")
+_ARCHIVE_PART_RE = re.compile(r"\.(r\d\d|z\d\d|part\d+\.rar)$", re.IGNORECASE)
+
+
+def is_archive_name(file_name: str) -> bool:
+    """¿Fichero comprimido/dividido (zip, rar, 7z, ... o parte r00/z01)?"""
+    try:
+        fn = str(file_name or "").lower()
+        if not fn:
+            return False
+        if fn.endswith(_ARCHIVE_EXTS):
+            return True
+        return bool(_ARCHIVE_PART_RE.search(fn))
+    except Exception:
+        return False
+
+
 def _ensure_central_db_copy():
     """Copia-en-arranque genérica (arquitectura §2): si falta la DB central
     pero existe tvcat_default.db, copiarla ANTES del primer connect (que
@@ -165,6 +184,24 @@ def init_db():
             enqueued_at INTEGER DEFAULT (unixepoch())
         )
     """)
+    # Aparcados de sonda: evitan el bucle encolar->aparcar (la hero re-encola).
+    # Reintentan tras 7 días o si sube PROBE_CODE (mejora del sondador).
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS probe_parked (
+            episode_key TEXT PRIMARY KEY,
+            parked_at INTEGER DEFAULT (unixepoch()),
+            attempts INTEGER DEFAULT 0,
+            reason TEXT DEFAULT '',
+            code INTEGER DEFAULT 0
+        )
+    """)
+    # Procedencia de la sonda (confianza del dato): worker<N>/scanline/...
+    try:
+        _em_cols = [r[1] for r in c.execute("PRAGMA table_info(episode_media)").fetchall()]
+        if "src" not in _em_cols:
+            c.execute("ALTER TABLE episode_media ADD COLUMN src TEXT DEFAULT ''")
+    except Exception:
+        pass
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS tvcat_users (
@@ -392,13 +429,18 @@ def init_db():
         except sqlite3.OperationalError:
             pass
     for col, typ in [("prepared_by_tghirayi", "INTEGER DEFAULT 0"), ("tghirayi_version", "TEXT DEFAULT ''"),
-                     ("video_codec", "TEXT DEFAULT ''"), ("is_mkv", "INTEGER DEFAULT 0")]:
+                     ("video_codec", "TEXT DEFAULT ''"), ("is_mkv", "INTEGER DEFAULT 0"),
+                     ("is_archive", "INTEGER DEFAULT 0")]:
         try:
             c.execute(f"ALTER TABLE item_episodes ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
     try:
         c.execute("ALTER TABLE unified_catalog ADD COLUMN has_mkv INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE unified_catalog ADD COLUMN has_archive INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
     try:
@@ -509,6 +551,24 @@ def init_db():
             UPDATE unified_catalog SET has_mkv = 1
             WHERE item_id IN (
                 SELECT DISTINCT item_id FROM item_episodes WHERE is_mkv = 1
+            )
+        """)
+    except sqlite3.OperationalError:
+        pass
+
+    # Poblar is_archive/has_archive para datos existentes (idempotente).
+    try:
+        _arch_likes = " OR ".join(
+            "LOWER(file_name) LIKE '%%%s'" % ext for ext in _ARCHIVE_EXTS)
+        c.execute(
+            "UPDATE item_episodes SET is_archive = 1 WHERE (%s"
+            " OR LOWER(file_name) GLOB '*.r[0-9][0-9]'"
+            " OR LOWER(file_name) GLOB '*.z[0-9][0-9]'"
+            " OR LOWER(file_name) GLOB '*.part*.rar') AND is_archive = 0" % _arch_likes)
+        c.execute("""
+            UPDATE unified_catalog SET has_archive = 1
+            WHERE item_id IN (
+                SELECT DISTINCT item_id FROM item_episodes WHERE is_archive = 1
             )
         """)
     except sqlite3.OperationalError:
@@ -1450,8 +1510,8 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
             c.execute("""
                 INSERT OR REPLACE INTO item_episodes
                 (item_id, episode_key, episode_number, season_number, title, duration,
-                 telegram_msg_id, telegram_link, file_size, file_name, is_mkv, sync_gen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 telegram_msg_id, telegram_link, file_size, file_name, is_mkv, is_archive, sync_gen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 resolved_item,
                 ep_key,
@@ -1464,6 +1524,7 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 ed.get("file_size"),
                 ed.get("file_name"),
                 1 if (ed.get("file_name") or "").lower().endswith(".mkv") else 0,
+                1 if is_archive_name(ed.get("file_name")) else 0,
                 _gen
             ))
             eps_inserted += 1
@@ -1492,6 +1553,20 @@ def sync_plugin_cache(plugin_loader, plugin_name: str):
                 WHERE item_id IN ({placeholders})
                   AND item_id NOT IN (
                     SELECT DISTINCT item_id FROM item_episodes WHERE is_mkv = 1
+                )
+            """, list(active_item_ids))
+            c.execute(f"""
+                UPDATE unified_catalog SET has_archive = 1
+                WHERE item_id IN (
+                    SELECT DISTINCT item_id FROM item_episodes
+                    WHERE is_archive = 1 AND item_id IN ({placeholders})
+                )
+            """, list(active_item_ids))
+            c.execute(f"""
+                UPDATE unified_catalog SET has_archive = 0
+                WHERE item_id IN ({placeholders})
+                  AND item_id NOT IN (
+                    SELECT DISTINCT item_id FROM item_episodes WHERE is_archive = 1
                 )
             """, list(active_item_ids))
 
@@ -1707,13 +1782,14 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
             c.execute("""
                 INSERT OR REPLACE INTO item_episodes
                 (item_id, episode_key, episode_number, season_number, title, duration,
-                 telegram_msg_id, telegram_link, file_size, file_name, is_mkv, sync_gen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 telegram_msg_id, telegram_link, file_size, file_name, is_mkv, is_archive, sync_gen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 resolved_item, ep_key, ed.get("episode_number"), ed.get("season_number", 1),
                 ed.get("title"), ed.get("duration"), ed.get("telegram_msg_id"), ed.get("telegram_link"),
                 ed.get("file_size"), ed.get("file_name"),
                 1 if (ed.get("file_name") or "").lower().endswith(".mkv") else 0,
+                1 if is_archive_name(ed.get("file_name")) else 0,
                 gen
             ))
             eps_inserted += 1
@@ -1732,6 +1808,20 @@ def sync_plugin_db_copy(plugin_db: str, plugin_name: str, item_ids, active: bool
                 WHERE item_id IN ({placeholders})
                   AND item_id NOT IN (
                     SELECT DISTINCT item_id FROM item_episodes WHERE is_mkv = 1
+                )
+            """, list(active_set))
+            c.execute(f"""
+                UPDATE unified_catalog SET has_archive = 1
+                WHERE item_id IN (
+                    SELECT DISTINCT item_id FROM item_episodes
+                    WHERE is_archive = 1 AND item_id IN ({placeholders})
+                )
+            """, list(active_set))
+            c.execute(f"""
+                UPDATE unified_catalog SET has_archive = 0
+                WHERE item_id IN ({placeholders})
+                  AND item_id NOT IN (
+                    SELECT DISTINCT item_id FROM item_episodes WHERE is_archive = 1
                 )
             """, list(active_set))
 
@@ -2340,6 +2430,7 @@ def get_random_items(category=None, search=None, limit=200, filters=None, user_i
             "rating": d.get("rating", 0),
             "cover_url": d.get("cover_url", ""),
             "has_mkv": d.get("has_mkv", 0),
+            "has_archive": d.get("has_archive", 0),
             "has_comment": 1 if d.get("has_comment") else 0,
             "is_collection": int(d.get("is_collection", 0) or 0),
             "collection_name": d.get("collection_name", "") or "",

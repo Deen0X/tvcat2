@@ -87,8 +87,12 @@ def build_providers(credentials: dict):
 
 
 def resolve_media_type(category, subcategory):
-    """Resuelve 'movie' o 'tv' para TMDB según subcategoría."""
-    sub = (subcategory or "").strip().lower()
-    if sub in ('anime', 'series', 'tv'):
-        return 'tv'
-    return 'movie'
+    """Resuelve 'movie' o 'tv' para TMDB según subcategoría.
+
+    Acepta variantes ('TV Show', 'tv-show', 'tv_show'...): TGIndex genera
+    'Movie'/'TV show' automáticamente y la comparación exacta dejaba todas
+    las series como 'movie' (detalle cruzado movie/tv con el mismo id)."""
+    sub = (subcategory or "").strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+    if sub in ("anime", "series", "tv", "tvshow", "tvseries", "serie", "serietv"):
+        return "tv"
+    return "movie"

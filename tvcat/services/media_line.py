@@ -1,16 +1,20 @@
-"""Línea MediaLine v1: sonda compacta embebida en el cover.
+"""Línea MediaLine v1/v2: sonda compacta embebida en el cover.
 
-Gramática (10 tokens / 9 pipes; token 0 marcador, token 9 sello):
-  🎞️ M1|res|codec.Perfil.pix|fps|lang:codec:ch:ratekHz+...|lang[!]+...|dur_s|cont|br|😺
-Vacíos donde no hay dato. Sin `😺` de cierre la línea se descarta.
+Gramática v2 (11 tokens / 10 pipes; token 0 marcador, token 10 sello):
+  MARK|res|codec.Perfil.pix|fps|lang:codec:ch:ratekHz+...|lang[!]+...|dur_s|cont|br|moov|SEAL
+moov = "pos:size" (offset y tamaño del box moov en el fichero) o vacío.
+v1 (sin token moov) sigue parseando.
+Vacíos donde no hay dato. Sin sello de cierre la línea se descarta.
 """
 import re
 
-MARK = "\U0001F39E\uFE0F M1"
+MARK = "\U0001F39E\uFE0F M2"
+MARK_V1 = "\U0001F39E\uFE0F M1"
 SEAL = "\U0001F63A"
+VERSION = "M2"
 
 _LINE_RE = re.compile(
-    "\U0001F39E\uFE0F?\\sM1\\|([^\n" + SEAL + "]{1,400})\\|" + SEAL)
+    "\U0001F39E\uFE0F?\\sM[12]\\|([^\n" + SEAL + "]{1,400})\\|" + SEAL)
 _RES_RE = re.compile(r"^(\d{1,5})x(\d{1,5})$")
 _AUD_RE = re.compile(r"^([a-z]{2,4}):([a-z0-9?]+):(\d{1,2}ch|\?):([\d.?]+)$")
 _SUB_RE = re.compile(r"^([a-z]{2,4})(!)?$")
@@ -199,26 +203,37 @@ def encode_line(media: dict) -> str:
 
         if not res and not atoks:
             return ""  # sin datos mínimos
+        try:
+            _mpos = int(m.get("moovpos") or 0)
+            _msiz = int(m.get("moovsize") or 0)
+            moov = f"{_mpos}:{_msiz}" if _mpos > 0 and _msiz > 0 else ""
+        except Exception:
+            moov = ""
         toks = [MARK, res, vid, fps, "+".join(atoks), "+".join(stoks),
-                dur, cont, brs, SEAL]
+                dur, cont, brs, moov, SEAL]
         return "|".join(toks)
     except Exception:
         return ""
 
 
 def parse_media_line(text: str):
-    """Dict normalizado (listo para episode_media) o None si ausente/inválida."""
+    """Dict normalizado (listo para episode_media) o None si ausente/inválida.
+    Acepta v1 (8 campos) y v2 (9 campos, con moov `pos:size`)."""
     try:
-        if not text or MARK not in text:
+        if not text or ("\U0001F39E" not in text):
             return None
         m = _LINE_RE.search(text)
         if not m:
             return None
         inner = m.group(1)
         toks = inner.split("|")
-        if len(toks) != 8:
+        if len(toks) == 8:
+            res, vid, fps, aud, sub, dur, cont, br = toks
+            mov = ""
+        elif len(toks) == 9:
+            res, vid, fps, aud, sub, dur, cont, br, mov = toks
+        else:
             return None
-        res, vid, fps, aud, sub, dur, cont, br = toks
         if res and not _RES_RE.match(res):
             return None
         out = {}
@@ -330,6 +345,15 @@ def parse_media_line(text: str):
             if not _NUM_RE.match(br):
                 return None
             out["bitrate"] = br
+        if mov:
+            try:
+                _mp, _ms = (mov.split(":") + ["", ""])[:2]
+                _mp, _ms = int(_mp or 0), int(_ms or 0)
+                if _mp > 0 and _ms > 0:
+                    out["moovpos"] = _mp
+                    out["moovsize"] = _ms
+            except Exception:
+                pass
         out["_streams"] = []
         out["_format"] = {}
         return out

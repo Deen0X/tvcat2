@@ -177,6 +177,502 @@ _archive_slot_lock = asyncio.Lock()
 _archive_slot_owner: Optional[str] = None   # job_id del archive en processing
 _archive_tasks: Dict[str, asyncio.Task] = {}  # job_id -> task en background
 
+# ─── Cola central de RECODIFICACIÓN (2º plano, 1 slot global) ───────
+# Todo lo que necesite ffmpeg lento (2-pass por tamaño, conversión de formato)
+# entra aquí UNA VEZ descargado el fichero; el worker principal sigue con
+# descargas/subidas de otros jobs. 1 slot = 1 ffmpeg global (el registry
+# _encode_proc_registry lo comparte con archives: nunca 2 simultáneos).
+# - Jobs normales: descargan el episodio, lo encolan y quedan en
+#   `recode_waiting` (el picker los salta); al terminar, el worker los
+#   retoma y sube desde la caché (mp4_cache/mkv_cache).
+# - Archives: la task de fondo encola cada vídeo y espera su turno
+#   (mantiene el slot de archive como hoy con el recode inline).
+_recode_queue: Optional[asyncio.Queue] = None
+_recode_worker_task: Optional[asyncio.Task] = None
+_recode_items: Dict[str, dict] = {}   # key -> item (encolados + en curso)
+_recode_active_key: Optional[str] = None  # key en ffmpeg ahora mismo
+
+
+def _recode_key(job_id, msg_id) -> str:
+    try:
+        return f"{job_id}:{msg_id}"
+    except Exception:
+        return f"{job_id}:?"
+
+
+async def _ensure_recode_worker():
+    """Arranca el worker de recode (lazy; sobrevive mientras viva el loop)."""
+    global _recode_queue, _recode_worker_task
+    try:
+        if _recode_queue is None:
+            _recode_queue = asyncio.Queue()
+        if _recode_worker_task is None or _recode_worker_task.done():
+            _recode_worker_task = asyncio.ensure_future(_recode_worker_loop())
+            print("[TGHirayi_v2] Worker de recodificación iniciado (1 slot)", flush=True)
+    except Exception as e:
+        print(f"[TGHirayi_v2] No se pudo arrancar worker de recode: {e}", flush=True)
+
+
+def _recode_submit(job: dict, spec: dict):
+    """Encola un trabajo de recode. spec: kind/input_path/fname/audio_lang/
+    sub_lang/streaming + (kind==episode: chat_id/msg_id; kind==archive:
+    resume_state/on_progress/on_log). Devuelve key (idempotente)."""
+    global _recode_queue
+    try:
+        job_id = str(job.get("id"))
+        msg_id = spec.get("msg_id")
+        key = _recode_key(job_id, msg_id if msg_id is not None else spec.get("archive_index", "?"))
+        if key in _recode_items:
+            return key
+        item = {"key": key, "job_id": job_id, "kind": spec.get("kind", "episode"),
+                "input_path": spec.get("input_path"), "fname": spec.get("fname") or "video.mp4",
+                "audio_lang": spec.get("audio_lang") or "", "sub_lang": spec.get("sub_lang") or "",
+                "streaming": bool(spec.get("streaming")),
+                "chat_id": spec.get("chat_id"), "msg_id": msg_id,
+                "archive_index": spec.get("archive_index"),
+                "resume_state": spec.get("resume_state"),
+                "on_progress": spec.get("on_progress"), "on_log": spec.get("on_log"),
+                "done": False, "ok": False, "output": None,
+                "event": asyncio.Event(), "enqueued_at": time.time()}
+        _recode_items[key] = item
+        try:
+            if _recode_queue is not None:
+                _recode_queue.put_nowait(item)
+        except Exception:
+            pass
+        print(f"[TGHirayi_v2] Recode encolado {key} ({item['fname']})", flush=True)
+        return key
+    except Exception as e:
+        print(f"[TGHirayi_v2] Error encolando recode: {e}", flush=True)
+        return ""
+
+
+def _recode_protected_paths():
+    """Paths de entrada de items encolados/en curso: _cleanup_cache_except
+    no debe borrarlos aunque sean de otro episodio del canal."""
+    try:
+        return {os.path.abspath(str(v.get("input_path")))
+                for v in (_recode_items or {}).values()
+                if v.get("input_path")}
+    except Exception:
+        return set()
+
+
+def _recode_purge_job(job_id: str):
+    """Elimina los items de un job (al borrarlo de la cola). El item en curso
+    se mata vía registry (el worker lo detecta como cancelado)."""
+    try:
+        for key in [k for k, v in list((_recode_items or {}).items())
+                    if str((v or {}).get("job_id")) == str(job_id)]:
+            # Marcar el evento por si una task archive lo espera: saldrá con None.
+            try:
+                ev = (_recode_items.get(key) or {}).get("event")
+                if ev is not None and not ev.is_set():
+                    ev.set()
+            except Exception:
+                pass
+            try:
+                _recode_items.pop(key, None)
+            except Exception:
+                pass
+        print(f"[TGHirayi_v2] Recode purgado del job {job_id}", flush=True)
+    except Exception:
+        pass
+
+
+def _recode_queue_depth() -> int:
+    try:
+        n = len(_recode_items or {})
+        if _recode_queue is not None:
+            try:
+                n = max(n, _recode_queue.qsize() + (1 if _recode_active_key else 0))
+            except Exception:
+                pass
+        return n
+    except Exception:
+        return 0
+
+
+async def _maybe_defer_recode(job, media_data, ep_num) -> bool:
+    """Si media_data trae marcadores de recode, los encola en la cola central,
+    marca el job en espera y devuelve True (el llamador debe salir de
+    _process_job para que la cola siga con otros jobs). Sin marcadores,
+    devuelve False. Si el submit falla (improbable), quita los marcadores y
+    devuelve False para que el flujo siga por la vía de reintento normal."""
+    try:
+        _rp = [m for m in (media_data or [])
+               if isinstance(m, dict) and m.get("recode_pending")]
+    except Exception:
+        return False
+    if not _rp:
+        return False
+    _rk = []
+    for _m in _rp:
+        try:
+            _k = _recode_submit(job, _m)
+            if _k:
+                _rk.append(_k)
+        except Exception as _e_rs:
+            print(f"[TGHirayi_v2] Error encolando recode: {_e_rs}", flush=True)
+    if not _rk:
+        try:
+            media_data[:] = [m for m in (media_data or [])
+                             if not (isinstance(m, dict) and m.get("recode_pending"))]
+        except Exception:
+            pass
+        return False
+    try:
+        _prev_w = [str(k) for k in (job.get("recode_waiting") or [])]
+    except Exception:
+        _prev_w = []
+    job["recode_waiting"] = sorted(set(_prev_w) | set(_rk))
+    job["status"] = "queued"
+    job["status_text"] = "En cola de recodificación…"
+    _persist_job(job)
+    print(f"[TGHirayi_v2] Job {job.get('id')} ep.{ep_num} a recode, la cola sigue", flush=True)
+    return True
+
+
+async def _resubmit_recode_from_cache(job: dict) -> bool:
+    """Re-encola en la cola central los episodios de un job 'reanudando
+    recode' cuyo .raw ya está en caché (reinicio con la cola en memoria
+    perdida). Así el recode arranca en paralelo sin esperar a que el worker
+    principal procese el job. Solo episodios pendientes (>= current_episode)
+    que aún pidan encode lento y sin MP4 fresco. Devuelve True si encoló algo."""
+    try:
+        cfg = _load_config()
+    except Exception:
+        cfg = {}
+    try:
+        streaming = bool(cfg.get("streaming_mkv", False))
+        audio_lang = ((job or {}).get("audio_lang") or "").strip()
+        sub_lang = ((job or {}).get("sub_lang") or "").strip()
+        item_id = (job or {}).get("item_id") or ""
+        try:
+            resume_from = int((job or {}).get("current_episode") or 0)
+        except Exception:
+            resume_from = 0
+        episodes = _fetch_episodes_sync(item_id) if item_id else []
+    except Exception:
+        return False
+    try:
+        await _ensure_recode_worker()
+    except Exception:
+        pass
+    try:
+        _rw_alive = (_recode_worker_task is not None
+                     and not _recode_worker_task.done())
+    except Exception:
+        _rw_alive = False
+    if not _rw_alive:
+        return False
+    keys = []
+    for ep in (episodes or []):
+        try:
+            try:
+                ep_num = int(ep.get("episode_number") or 0)
+            except Exception:
+                ep_num = 0
+            if ep_num and resume_from and ep_num < resume_from:
+                continue  # ya subido en una sesión anterior
+            chat_id = _extract_channel_id(ep.get("telegram_link", ""))
+            msg_id = int(ep.get("telegram_msg_id") or ep.get("msg_id") or 0)
+            if not chat_id or not msg_id:
+                continue
+            raw_cache = _cache_path(chat_id, msg_id, ".raw")
+            if not (os.path.isfile(raw_cache) and os.path.getsize(raw_cache) > 1024):
+                continue
+            try:
+                mp4_cache = _cache_path(chat_id, msg_id, ".mp4")
+                _fresh = bool(os.path.isfile(mp4_cache) and os.path.getsize(mp4_cache) > 1024
+                              and os.path.getmtime(mp4_cache) >= os.path.getmtime(raw_cache))
+            except Exception:
+                _fresh = False
+            if _fresh:
+                continue  # ya normalizado: el flujo normal lo sube, sin recode
+            fname = ep.get("file_name") or ep.get("title") or f"ep{msg_id}.mp4"
+            if not _recode_should_defer(job, msg_id, raw_cache, fname,
+                                        audio_lang, sub_lang, streaming):
+                continue
+            marker = _recode_marker(job, msg_id, chat_id, raw_cache, fname,
+                                    audio_lang, sub_lang, streaming)
+            key = _recode_submit(job, marker)
+            if key:
+                keys.append(key)
+                print(f"[TGHirayi_v2] Recode re-encolado tras reinicio {key} ({fname})", flush=True)
+        except Exception:
+            pass
+    if not keys:
+        return False
+    try:
+        _prev = [str(k) for k in (job.get("recode_waiting") or [])]
+    except Exception:
+        _prev = []
+    job["recode_waiting"] = sorted(set(_prev) | set(keys))
+    job["status"] = "queued"
+    job["status_text"] = "En cola de recodificación…"
+    try:
+        _persist_job(job)
+    except Exception:
+        pass
+    return True
+
+
+def _load_job_by_id(job_id: str):
+    """Job fresco desde disco (el worker central no usa copias en memoria)."""
+    try:
+        db = _load_db()
+        for j in db.get("queue", []):
+            if str(j.get("id")) == str(job_id):
+                return db, j
+    except Exception:
+        pass
+    return None, None
+
+
+async def _recode_worker_loop():
+    """Consume la cola FIFO (1 slot). Aislado por item: un fallo no tumba
+    la cola; el item fallido vuelve al flujo inline en la reanudación."""
+    global _recode_active_key
+    print("[TGHirayi_v2] Worker de recodificación en marcha (1 slot)", flush=True)
+    try:
+        while True:
+            try:
+                item = await _recode_queue.get()
+            except Exception:
+                await asyncio.sleep(1)
+                continue
+            key = (item or {}).get("key")
+            if not key or key not in (_recode_items or {}):
+                try:
+                    _recode_queue.task_done()
+                except Exception:
+                    pass
+                continue  # purgado (job eliminado) mientras esperaba
+            _recode_active_key = key
+            try:
+                await _run_recode_item(item)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[TGHirayi_v2] [RECODE] Error en {key}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                try:
+                    _recode_finish_item(item, None, failed=True)
+                except Exception:
+                    pass
+            finally:
+                # Episodios: liberar índice al terminar. Archives: los lee su
+                # propia task tras el evento (y los libera ella); si muere,
+                # la purga por job/reinicio los limpia.
+                try:
+                    if (item or {}).get("kind", "episode") == "episode":
+                        _recode_items.pop(key, None)
+                except Exception:
+                    pass
+                _recode_active_key = None
+                try:
+                    _recode_queue.task_done()
+                except Exception:
+                    pass
+    except asyncio.CancelledError:
+        print("[TGHirayi_v2] Worker de recodificación detenido", flush=True)
+        raise
+
+
+async def _run_recode_item(item: dict):
+    """Ejecuta UN item con _normalize_video (mismos args que el inline) y
+    completa: episodio → deja el output en la caché + libera el job;
+    archive → avisa a su task con el output."""
+    key = str(item.get("key") or "")
+    job_id = str(item.get("job_id") or "")
+    db, job = _load_job_by_id(job_id)
+    if job is None:
+        print(f"[TGHirayi_v2] [RECODE] {key}: job eliminado, se descarta", flush=True)
+        _recode_finish_item(item, None)
+        return
+    in_path = item.get("input_path")
+    if not in_path or not os.path.isfile(in_path):
+        print(f"[TGHirayi_v2] [RECODE] {key}: entrada perdida, fallback inline", flush=True)
+        _recode_finish_item(item, None, failed=True)
+        return
+    # Marcar activo: registry compartido = kill/estado unificados + 1 ffmpeg.
+    try:
+        _encode_proc_registry["job_id"] = job_id
+    except Exception:
+        pass
+    try:
+        job["recode_active"] = True
+        job["encode_progress"] = 0.0
+        job["status_text"] = f"Recodificando {os.path.basename(str(in_path))}..."
+        _persist_job(job)
+    except Exception:
+        pass
+    _last = [0.0]
+    _on_log = item.get("on_log")
+    def _log(m):
+        try:
+            if callable(_on_log):
+                _on_log(m)
+            else:
+                print(f"[TGHirayi_v2] [RECODE] {m}", flush=True)
+        except Exception:
+            pass
+    _on_pct = item.get("on_progress")
+    def _pct(pct):
+        try:
+            if callable(_on_pct):
+                _on_pct(pct)
+                return
+        except Exception:
+            pass
+        try:
+            db2, job2 = _load_job_by_id(job_id)
+            if job2 is None:
+                return
+            job2["encode_progress"] = round(float(pct or 0.0), 1)
+            now = time.time()
+            if now - _last[0] >= 2.0:
+                _last[0] = now
+                _persist_job(job2)
+        except Exception:
+            pass
+    _on_detail = item.get("on_detail")
+    def _detail(d):
+        try:
+            if callable(_on_detail):
+                _on_detail(d)
+                return
+        except Exception:
+            pass
+        try:
+            db2, job2 = _load_job_by_id(job_id)
+            if job2 is None:
+                return
+            job2["encode_size"] = (d or {}).get("total_size", 0)
+            job2["encode_speed"] = (d or {}).get("speed", 0.0)
+            job2["encode_fps"] = (d or {}).get("fps", 0.0)
+            job2["encode_frame"] = (d or {}).get("frame", 0)
+        except Exception:
+            pass
+    try:
+        out = await asyncio.to_thread(
+            _normalize_video, str(in_path), item.get("fname") or os.path.basename(str(in_path)),
+            item.get("audio_lang") or "", item.get("sub_lang") or "",
+            progress_log=_log, on_progress_pct=_pct,
+            proc_registry=_encode_proc_registry, on_detail=_detail,
+            streaming=bool(item.get("streaming")),
+            resume_state=(item.get("resume_state") or None))
+    except Exception as e:
+        print(f"[TGHirayi_v2] [RECODE] {key} excepción: {e}", flush=True)
+        _recode_finish_item(item, None, failed=True)
+        return
+    try:
+        ok_out = bool(out) and os.path.isfile(str(out)) and os.path.getsize(str(out)) > 1024
+    except Exception:
+        ok_out = False
+    if not ok_out:
+        print(f"[TGHirayi_v2] [RECODE] {key}: sin output válido, fallback inline", flush=True)
+        _recode_finish_item(item, None, failed=True)
+        return
+    if (item.get("kind") or "episode") == "archive":
+        # El archive hace su propia contabilidad (videos[idx], extract_state).
+        _recode_finish_item(item, str(out))
+        return
+    # Episodio: colocar el output donde el resume lo espera (igual que inline)
+    # + sidecar con el nombre corregido para que el hit de caché sea exacto.
+    try:
+        chat_id = item.get("chat_id")
+        msg_id = int(item.get("msg_id") or 0)
+        fname = item.get("fname") or os.path.basename(str(out))
+        final_cache = None
+        if bool(item.get("streaming")) and str(out).lower().endswith(".mkv"):
+            final_cache = _cache_path(chat_id, msg_id, ".mkv")
+            os.replace(str(out), final_cache)
+            if os.path.splitext(fname)[1].lower() not in ('.mkv',):
+                fname = os.path.splitext(fname)[0] + '.mkv'
+            mime = "video/x-matroska"
+        else:
+            final_cache = _cache_path(chat_id, msg_id, ".mp4")
+            os.replace(str(out), final_cache)
+            if os.path.splitext(fname)[1].lower() not in ('.mp4', '.m4v'):
+                fname = os.path.splitext(fname)[0] + '.mp4'
+            mime = "video/mp4"
+        try:
+            _dw, _dh = _ffprobe_dimensions(final_cache)
+            _dr = _ffprobe_duration(final_cache) or 0
+        except Exception:
+            _dw, _dh, _dr = 0, 0, 0
+        try:
+            import json as _json
+            with open(_cache_path(chat_id, msg_id, ".meta.json"), 'w', encoding='utf-8') as f:
+                _json.dump({"file_name": fname, "mime_type": mime,
+                            "duration": int(_dr or 0),
+                            "width": int(_dw or 0), "height": int(_dh or 0),
+                            "size": int(os.path.getsize(final_cache) or 0),
+                            "thumb_b64": "", "attributes": []}, f)
+        except Exception as e:
+            print(f"[TGHirayi_v2] [RECODE] {key} sidecar: {e}", flush=True)
+        print(f"[TGHirayi_v2] [RECODE] {key} OK → {os.path.basename(final_cache)} "
+              f"({os.path.getsize(final_cache) / (1024**2):.1f} MB)", flush=True)
+        _recode_finish_item(item, final_cache)
+    except Exception as e:
+        print(f"[TGHirayi_v2] [RECODE] {key} colocando output: {e}", flush=True)
+        _recode_finish_item(item, None, failed=True)
+
+
+def _recode_finish_item(item: dict, output, failed: bool = False):
+    """Completa un item: avisa a su waiter (archive) y libera el job
+    (episodio). En fallo marca _recode_failed para que la reanudación
+    tire en línea (comportamiento anterior)."""
+    try:
+        item["done"] = True
+        item["ok"] = bool(output) and not failed
+        item["output"] = output
+        try:
+            ev = item.get("event")
+            if ev is not None and not ev.is_set():
+                ev.set()
+        except Exception:
+            pass
+        if (item.get("kind") or "episode") != "episode":
+            return
+        db, job = _load_job_by_id(str(item.get("job_id") or ""))
+        if job is None:
+            return
+        key = str(item.get("key") or "")
+        try:
+            wl = [k for k in (job.get("recode_waiting") or []) if str(k) != key]
+            if wl:
+                job["recode_waiting"] = wl
+            else:
+                job.pop("recode_waiting", None)
+        except Exception:
+            job.pop("recode_waiting", None)
+        try:
+            job.pop("recode_active", None)
+        except Exception:
+            pass
+        if failed:
+            try:
+                _rf = job.get("_recode_failed") or {}
+                if not isinstance(_rf, dict):
+                    _rf = {}
+                _rf[key] = True
+                job["_recode_failed"] = _rf
+            except Exception:
+                pass
+            job["status"] = "queued"
+            job["status_text"] = "Recode falló, reintentará directo"
+        else:
+            job["status"] = "queued"
+            job["status_text"] = "Recodificado, listo para subir"
+            job["encode_progress"] = 100.0
+        _persist_job(job)
+    except Exception as e:
+        print(f"[TGHirayi_v2] [RECODE] finish {item.get('key')}: {e}", flush=True)
+
 # Lock del refresh pyro: prefetch y subida van en paralelo compartiendo el
 # MISMO wrapper. Sin esto, dos tareas veían el cliente caído y lo
 # desconectaban/reconectaban a la vez: una se quedaba con el raw viejo
@@ -279,8 +775,10 @@ _PYRO_FAST_OK = None
 # ─── Suavizado de velocidad (media móvil) ─────────────────────────
 _SMOOTH_WINDOW = 5  # nº de muestras para la media móvil de velocidad
 
-# Límite de subida de Telegram (4000 MiB por fichero). Por encima hay que recodificar.
-_MAX_UPLOAD_MIB = int(4000 * 1024 * 1024)
+# Límite de subida de Telegram (4 GiB por fichero menos 10 MiB de margen
+# para thumbnail/metadata; el thumb viaja aparte y pesa KB). Por encima hay
+# que recodificar.
+_MAX_UPLOAD_MIB = int(4 * 1024 ** 3 - 10 * 1024 ** 2)
 
 # Preset de libx265 para la recodificación. Los presets se adaptan a cualquier CPU
 # (escalan el nº de hebras y la velocidad): "faster" equilibra calidad/tiempo tanto
@@ -539,6 +1037,18 @@ def _svc():
     return get_telegram_service()
 
 
+def _svc_qhigh() -> int:
+    """Prioridad HIGH de la cola del servicio para las ops de la cola de
+    copia (get_file_info, cover, copy): saltan por delante de las ráfagas
+    del scanner (NORMAL) sin pausar a nadie. La descarga gorda no pasa por
+    la cola (va directa al bulk); esto acelera su ARRANQUE."""
+    try:
+        from tvcat.services.telegram_service import PRIORITY_HIGH as _ph
+        return int(_ph)
+    except Exception:
+        return 0
+
+
 def _svc_creds(job: dict = None) -> dict:
     """Credenciales de la sesión elegida en la config (o defecto del servicio).
     client_type = ajuste global (Comportamiento Telegram), NO telethon fijo:
@@ -654,6 +1164,31 @@ def _job_pyro_check(job: dict):
     return (mx > _PYRO_REQUIRED_BYTES), mx
 
 
+def _job_recode_check(job: dict):
+    """Devuelve (needs_recode, max_bytes) según el mayor file_size EN SCOPE
+    de los episodios del item vs _MAX_UPLOAD_MIB (4GB−10MB). Solo el caso
+    caro (2-pass por tamaño); la conversión por formato no cuenta.
+    Best-effort: ante cualquier fallo devuelve (False, 0)."""
+    try:
+        eps = _fetch_episodes_sync(job.get("item_id", "")) or []
+    except Exception:
+        return False, 0
+    mx = 0
+    for ep in eps:
+        try:
+            if not _ep_in_scope(job, ep):
+                continue
+        except Exception:
+            pass
+        try:
+            sz = int((ep or {}).get("file_size") or 0)
+        except Exception:
+            continue
+        if sz > mx:
+            mx = sz
+    return (mx > _MAX_UPLOAD_MIB), mx
+
+
 async def _pyro_available(timeout: float = 15.0) -> bool:
     """True si hay sesión Pyrogram válida obtenible (sin lanzar). Solo valida
     obtención, no uso: un pyro muerto-en-uso cae en la red de subida y el job
@@ -756,7 +1291,9 @@ async def _refresh_pyrogram_client():
                 wrapper.session_data["workers"] = int((_load_config().get("pyro_workers", 16) or 16))
             except Exception:
                 pass
-            await wrapper.connect()
+            # Con timeout: un connect colgado aquí congelaba todo pyro en
+            # silencio (los borrowers del pool esperaban eternamente).
+            await asyncio.wait_for(wrapper.connect(), timeout=30)
             raw = getattr(wrapper, '_client', wrapper)
             # Verificar de verdad (un connect que falla en silencio dejaba el
             # raw viejo y el retry repetía el mismo error en bucle).
@@ -781,7 +1318,12 @@ async def _file_info_resilient(chat, mid, job, what=""):
     transport_ok=False => falló el CLIENTE (NO dictaminar borrado: reintentará
     al reanudar). Solo info None con transport_ok=True = sin media real."""
     try:
-        info = await _svc().get_file_info(chat, int(mid), **_svc_creds(job))
+        # Con timeout: si la cola del servicio se atasca, fallar con ruido
+        # (reintento al reanudar) en vez de colgar el job en "Iniciando...".
+        # HIGH: las ops de la cola de copia saltan las ráfagas del scanner.
+        info = await asyncio.wait_for(
+            _svc().get_file_info(chat, int(mid), queue_priority=_svc_qhigh(),
+                                 **_svc_creds(job)), timeout=90)
     except Exception as e:
         info = {"_transport_error": f"{type(e).__name__}: {str(e)[:150]}"}
     if isinstance(info, dict) and info.get("_transport_error"):
@@ -797,7 +1339,9 @@ async def _file_info_resilient(chat, mid, job, what=""):
                 print(f"[TGHirayi_v2] {what} refresh fallo: {e}", flush=True)
         await asyncio.sleep(3)
         try:
-            info = await _svc().get_file_info(chat, int(mid), **_svc_creds(job))
+            info = await asyncio.wait_for(
+                _svc().get_file_info(chat, int(mid), queue_priority=_svc_qhigh(),
+                                     **_svc_creds(job)), timeout=90)
         except Exception as e:
             return None, False, f"{type(e).__name__}: {str(e)[:150]}"
         if isinstance(info, dict) and info.get("_transport_error"):
@@ -1753,6 +2297,14 @@ async def list_queue(request: Request):
             if "skip_if_exists_topo3" not in _j:
                 _j["skip_if_exists_topo3"] = _skip_def
                 _skip_changed = True
+            # Backfill: flags de recodificación (jobs anteriores al badge 🗜️).
+            if "needs_recode" not in _j and _j.get("status") not in _TERMINAL_STATUSES:
+                try:
+                    _brc, _ = _job_recode_check(_j)
+                    _j["needs_recode"] = bool(_brc)
+                except Exception:
+                    _j["needs_recode"] = False
+                _skip_changed = True
         if _skip_changed:
             _save_db(db)
     except Exception:
@@ -1831,6 +2383,7 @@ async def list_queue(request: Request):
     return {
         "queue": [_public_job(_j) for _j in db.get("queue", [])],
         "current_job": _public_job(current) if current else current,
+        "downloading_job_id": _live_downloading_job_id(db),
         "worker_paused": _worker_paused,
         "worker_running": _worker_running,
         "worker_state": _worker_state,
@@ -1840,6 +2393,8 @@ async def list_queue(request: Request):
         "encode_job_id": _encode_proc_registry.get("job_id"),
         "encode_active": (_encode_proc_registry.get("proc") is not None
                           and _encode_proc_registry["proc"].poll() is None),
+        "recode_pending": _recode_queue_depth(),
+        "recode_active": _recode_active_key,
     }
 
 
@@ -1927,6 +2482,16 @@ async def add_to_queue(body: QueueAdd, request: Request):
                   f"({_mx / (1024 ** 3):.2f}GB)", flush=True)
     except Exception:
         job["needs_pyro"] = False
+    # Badge "requiere recodificación": algún episodio en scope supera el
+    # límite de subida (4GB−10MB) y pedirá 2-pass. Desconocido => sin marca.
+    try:
+        _rc, _rmx = _job_recode_check(job)
+        job["needs_recode"] = bool(_rc)
+        if _rc:
+            print(f"[TGHirayi_v2] Job {job['id']} marcado needs_recode "
+                  f"({_rmx / (1024 ** 3):.2f}GB)", flush=True)
+    except Exception:
+        job["needs_recode"] = False
     _save_db(db)
     # Sonda media con prioridad: al encolar se verifica tener los datos y si
     # no, se lanza la sonda al frente (el gate de _process_job espera a
@@ -1992,6 +2557,10 @@ def _drop_job(db: dict, job_id: str):
         pass
     if job:
         _cleanup_archive_workdir(job_id)
+    try:
+        _recode_purge_job(job_id)
+    except Exception:
+        pass
     db["queue"] = [j for j in db.get("queue", []) if j["id"] != job_id]
 
 
@@ -2783,6 +3352,30 @@ def _get_current_job():
     return _current_job
 
 
+def _live_downloading_job_id(db: dict):
+    """Job con descarga en curso AHORA (tick de progreso <90s). El worker
+    principal puede estar en un job mientras el que descarga es otro
+    (prefetch/archives); la UI lo usa para el tinte verde y la línea
+    'Descargando: …' en vez de suponer el primero en proceso."""
+    try:
+        best_id = None
+        best_t = 0.0
+        now = time.time()
+        for _j in (db or {}).get("queue", []):
+            try:
+                if _j.get("status") in _TERMINAL_STATUSES:
+                    continue
+                _t = float(_j.get("_dl_tick") or 0)
+            except Exception:
+                continue
+            if _t > best_t and (now - _t) < 90:
+                best_t = _t
+                best_id = _j.get("id")
+        return best_id
+    except Exception:
+        return None
+
+
 def _count_pending_archives(all_q):
     """Nº de archives en procesado o pendientes de subir (miden el disco reservado).
     Excluye jobs finalizados o con error. Los que están solo 'download' no cuentan
@@ -2812,6 +3405,8 @@ def _pick_next_worker_job(all_q) -> Optional[dict]:
       (la cola sigue con el siguiente job normal; el archive espera su turno en la misma posición).
     - phase processing/uploading → los gestiona su task de fondo / subida → skip.
     - phase ready_upload → se elige para SUBIR (la extracción+recodificación ya terminó).
+    - recode_waiting → el episodio está en la cola central de recodificación → skip
+      hasta que termine (la cola sigue con otros jobs).
     """
     cfg = _load_config()
     parallel = bool(cfg.get("archive_parallel", True))
@@ -2819,6 +3414,8 @@ def _pick_next_worker_job(all_q) -> Optional[dict]:
     pending = len(_count_pending_archives(all_q))
     for j in all_q:
         if j.get("paused") or j.get("status") in _TERMINAL_STATUSES:
+            continue
+        if j.get("recode_waiting"):
             continue
         if not j.get("is_archive"):
             return j
@@ -2867,6 +3464,34 @@ async def _start_worker(gen: int = 0):
     global _archive_slot_owner
     _archive_slot_owner = None
     _archive_tasks.clear()
+
+    # La cola de recode es en memoria: al arrancar está vacía. Los jobs que
+    # esperaban recode vuelven al flujo normal (re-descarga desde caché +
+    # re-encolado); se limpian marcas para no dejarlos atascados.
+    try:
+        _rc_db = _load_db()
+        _rc_n = 0
+        for _rj in _rc_db.get("queue", []):
+            if _rj.get("status") in _TERMINAL_STATUSES:
+                continue
+            if _rj.get("recode_waiting") or _rj.get("_recode_failed") or _rj.get("recode_active"):
+                _rj.pop("recode_waiting", None)
+                _rj.pop("_recode_failed", None)
+                _rj.pop("recode_active", None)
+                _rj["status"] = "queued"
+                _rj["status_text"] = "En cola (reanudando recode)"
+                _rc_n += 1
+                # Re-encolar directo si el .raw sigue en caché: el recode
+                # arranca en paralelo sin esperar al worker principal.
+                try:
+                    await _resubmit_recode_from_cache(_rj)
+                except Exception as _e_rs:
+                    print(f"[TGHirayi_v2] Re-submit recode {_rj.get('id')}: {_e_rs}", flush=True)
+        if _rc_n:
+            _save_db(_rc_db)
+            print(f" [TGHirayi_v2] {_rc_n} jobs liberados de espera de recode", flush=True)
+    except Exception as _e_rc:
+        print(f"[TGHirayi_v2] Error en reset de recode: {_e_rc}", flush=True)
 
     # Resetear jobs atascados al arrancar
     try:
@@ -3570,6 +4195,10 @@ async def _process_job(job: dict, db: dict):
             if kind == "download":
                 job["download_progress"] = pct
                 job["download_episode"] = dl_ep["n"]
+                try:
+                    job["_dl_tick"] = time.time()
+                except Exception:
+                    pass
                 txt = f"Descargando ep.{_disp_ep(dl_ep['n'])} {pct}%"
                 if ul_ep["n"] and ul_ep["n"] != dl_ep["n"]:
                     txt += f" · Subiendo ep.{_disp_ep(ul_ep['n'])}"
@@ -3659,12 +4288,19 @@ async def _process_job(job: dict, db: dict):
                     _persist_job(job)
                     print(f"[TGHirayi_v2] Descargando episodio {ep_num}/{total}", flush=True)
                     media_data = await _download_episode_media(client, episode, source_channel_id, _progress,
-                                                                normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
-                                                                streaming_mkv=streaming_mkv, job=job)
+                                                                 normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
+                                                                 streaming_mkv=streaming_mkv, job=job,
+                                                                 defer_recode=True)
                     job["download_progress"] = 100.0
                     if not job.get("download_finished"):
                         job["download_finished"] = time.time()
                     _persist_job(job)
+
+                # Recode diferida: el episodio quedó pendiente de la cola
+                # central → encolarlo, soltar el job (la cola sigue con otros)
+                # y retomarlo cuando termine (sube desde la caché).
+                if await _maybe_defer_recode(job, media_data, ep_num):
+                    return
 
                 # Sonda del FICHERO FINAL (post-normalize) del primer episodio:
                 # el cover debe describir lo que se sube, no el origen
@@ -3707,7 +4343,8 @@ async def _process_job(job: dict, db: dict):
                     next_dl_task = asyncio.create_task(
                         _download_episode_media(client, n_ep, source_channel_id, _progress,
                                                 normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
-                                                streaming_mkv=streaming_mkv, job=job)
+                                                streaming_mkv=streaming_mkv, job=job,
+                                                defer_recode=True)
                     )
                     print(f"[TGHirayi_v2] Prefetch descarga ep.{n_idx+1}/{total} (paralelo)", flush=True)
 
@@ -3787,10 +4424,14 @@ async def _process_job(job: dict, db: dict):
                 try:
                     media_data = await _download_episode_media(client, episode, source_channel_id, _progress,
                                                                normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
-                                                               streaming_mkv=streaming_mkv, job=job)
+                                                               streaming_mkv=streaming_mkv, job=job,
+                                                               defer_recode=True)
                 except Exception as _e_rd:
                     print(f"[TGHirayi_v2] ep.{ep_num} reintento falló: {_e_rd}", flush=True)
                     media_data = []
+                # El reintento también puede dejar el episodio en recode.
+                if await _maybe_defer_recode(job, media_data, ep_num):
+                    return
             # Si sigue sin media: NO intentar subidas ni copias (generaba errores
             # confusos y mensajes sueltos). Tras 3 pasadas sin media el origen no
             # tiene documento (¿borrado?) → error claro en vez de loop infinito.
@@ -3911,7 +4552,10 @@ async def _process_job(job: dict, db: dict):
                                     dl_ep["n"] = ep_num
                                     media_data = await _download_episode_media(client, episode, source_channel_id, _progress,
                                                                                 normalize_mp4=normalize_mp4, audio_lang=norm_audio, sub_lang=norm_sub,
-                                                                                streaming_mkv=streaming_mkv, job=job)
+                                                                                streaming_mkv=streaming_mkv, job=job,
+                                                                                defer_recode=True)
+                                    if await _maybe_defer_recode(job, media_data, ep_num):
+                                        return
                                 sent_ids = await _upload_episode_to_destination(client, pyro_client, episode, media_data, dest, topic_id, delay, _progress, job=job, ep_num=ep_num, season_num=(episode.get("season_number") if isinstance(episode, dict) else None))
                             else:
                                 job["status_text"] = f"Copiando (telegram) ep.{_disp_ep(ep_num)} a {dest.get('name','?')}..."
@@ -4980,7 +5624,9 @@ async def _download_archive_files(client, episodes, source_channel_id, workdir, 
             job["status_text"] = f"Descargando parte {i}/{total} ({pct:.0f}%)..."
             _persist_job(job)
 
-        info = await _svc().get_file_info(chat_id, int(msg_id), **_svc_creds(job))
+        info = await _svc().get_file_info(chat_id, int(msg_id),
+                                            queue_priority=_svc_qhigh(),
+                                            **_svc_creds(job))
         if not info or not info.get("size"):
             continue
         doc_size = int(info.get("size") or 0)
@@ -5204,9 +5850,14 @@ async def _sender_is_premium(client) -> bool:
 
 
 async def _ensure_medialine(text, job, client, has_photo: bool):
-    """Apendea la línea MediaLine al cover si la plantilla no traía
-    `{_fmedialine}` (ya resuelto inline) y cabe en el límite Telegram
-    (caption foto 1024 estándar / 4096 premium o texto). Silencioso."""
+    """Garantiza la línea MediaLine fresca en el cover:
+    1) si ya hay línea expandida (bakeada del origen o resuelta inline del
+       tag) se REEMPLAZA en su sitio (no se mueve al final);
+    2) si queda un tag literal `{medialine}/{fmedialine}/{_medialine}/
+       {_fmedialine}` sin resolver, se sustituye en su sitio;
+    3) si no hay ni línea ni tag, se apendea al final.
+    Todo solo si cabe en el límite Telegram (caption foto 1024 estándar /
+    4096 premium o texto); si no, texto ORIGINAL intacto. Silencioso."""
     try:
         if not text:
             return text
@@ -5240,6 +5891,48 @@ async def _ensure_medialine(text, job, client, has_photo: bool):
             # cualquier línea manual previa (puede ser del origen sin
             # normalizar). Solo se sustituye si cabe: si no, se devuelve el
             # texto ORIGINAL intacto (con su línea bakeada si la tenía).
+            import re as _re2
+            _ML_PAT = r"\U0001F39E\uFE0F?\sM[12]\|[^\n\U0001F63A]*\|?\U0001F63A"
+            _TAG_PAT = r"\{_?f?medialine\}"
+            _PH = "\x00MEDIALINE\x00"
+            premium = await _sender_is_premium(client)
+            limit = 4096 if (not has_photo or premium) else 1024
+            try:
+                _has_line = bool(_re2.search(_ML_PAT, text))
+            except Exception:
+                _has_line = ("\U0001F39E" in text)
+            if _has_line:
+                # 1) Reemplazo in-situ: la primera línea se sustituye por la
+                # fresca (conserva su posición); duplicadas viejas se quitan.
+                try:
+                    _tmp = _re2.sub(_PH, text, count=1)
+                    _tmp = _re2.sub("", _tmp)
+                    cand = _tmp.replace(_PH, line)
+                except Exception:
+                    cand = text
+                if len(cand) <= limit:
+                    return cand
+                print(f"[TGHirayi_v2] medialine fresca omitida: no cabe ({len(cand)}/{limit}), se conserva la existente",
+                      flush=True)
+                return text
+            try:
+                _has_tag = bool(_re2.search(_TAG_PAT, text))
+            except Exception:
+                _has_tag = False
+            if _has_tag:
+                # 2) Tag literal sin resolver: se sustituye en su sitio.
+                try:
+                    _tmp = _re2.sub(_PH, text, count=1)
+                    _tmp = _re2.sub("", _tmp)
+                    cand = _tmp.replace(_PH, line)
+                except Exception:
+                    cand = text
+                if len(cand) <= limit:
+                    return cand
+                print(f"[TGHirayi_v2] medialine fresca omitida: no cabe ({len(cand)}/{limit}), se conserva la existente",
+                      flush=True)
+                return text
+            # 3) Sin línea ni tag: append al final.
             try:
                 from services.enrich_tags import strip_media_line as _sml
             except Exception:
@@ -5251,8 +5944,6 @@ async def _ensure_medialine(text, job, client, has_photo: bool):
                 _stripped = _sml(text)
             except Exception:
                 _stripped = text
-            premium = await _sender_is_premium(client)
-            limit = 4096 if (not has_photo or premium) else 1024
             cand = _stripped.rstrip() + "\n" + line
             if len(cand) <= limit:
                 return cand
@@ -5271,7 +5962,7 @@ async def _ensure_medialine(text, job, client, has_photo: bool):
         try:
             import re as _re
             text = _re.sub(
-                r"\U0001F39E\uFE0F?\sM1\|[^\n]*", "", text).rstrip()
+                r"\U0001F39E\uFE0F?\sM[12]\|[^\n]*", "", text).rstrip()
         except Exception:
             pass
         return text
@@ -6106,10 +6797,39 @@ async def _archive_process_background(job_id: str, client, source_channel_id, so
                         _job_log(job_id, f"[TGHirayi_v2] [ARCHIVE] #{v_idx} adoptado sin output -> re-normalizando desde cero")
                     resume_state = {"video_index": v_idx}
                     job["encode_state"] = resume_state
-                    norm = await asyncio.to_thread(_normalize_video, vpath, os.path.basename(vpath),
-                                                   progress_log=_rec_log, on_progress_pct=_rec_pct,
-                                                   proc_registry=_encode_proc_registry, on_detail=_rec_detail,
-                                                   streaming=_streaming, resume_state=resume_state)
+                    # Cola central de recode (1 slot global): el archive mantiene
+                    # su slot de procesado mientras espera, como con el inline.
+                    _arch_key = _recode_submit(job, {
+                        "kind": "archive", "input_path": vpath,
+                        "fname": os.path.basename(vpath),
+                        "audio_lang": "", "sub_lang": "",
+                        "streaming": _streaming, "archive_index": v_idx,
+                        "resume_state": resume_state,
+                        "on_progress": _rec_pct, "on_log": _rec_log,
+                        "on_detail": _rec_detail})
+                    norm = None
+                    if _arch_key:
+                        try:
+                            _arch_ev = (_recode_items.get(_arch_key) or {}).get("event")
+                            if _arch_ev is not None:
+                                await _arch_ev.wait()
+                            norm = (_recode_items.get(_arch_key) or {}).get("output")
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as _e_aw:
+                            _job_log(job_id, f"[TGHirayi_v2] [ARCHIVE] espera de recode: {_e_aw}")
+                            norm = None
+                        finally:
+                            try:
+                                _recode_items.pop(_arch_key, None)
+                            except Exception:
+                                pass
+                    else:
+                        # Submit imposible: inline (comportamiento anterior).
+                        norm = await asyncio.to_thread(_normalize_video, vpath, os.path.basename(vpath),
+                                                       progress_log=_rec_log, on_progress_pct=_rec_pct,
+                                                       proc_registry=_encode_proc_registry, on_detail=_rec_detail,
+                                                       streaming=_streaming, resume_state=resume_state)
                     if norm and os.path.isfile(norm) and os.path.getsize(norm) > 1024:
                         videos[v_idx - 1] = norm
                         job["encode_progress"] = 100.0
@@ -6503,12 +7223,22 @@ def _cleanup_cache_except(channel_id: str, msg_id: Optional[int], suffix: str = 
         safe = str(channel_id).replace("-", "m").replace(":", "_")
         prefix = f"{safe}_"
         keep_prefix = f"{safe}_{msg_id}" if msg_id is not None else None
+        try:
+            _prot = _recode_protected_paths()
+        except Exception:
+            _prot = set()
         for fn in os.listdir(_CACHE_DIR):
             if not fn.startswith(prefix):
                 continue
             # Conservar el episodio en curso (cualquier sufijo del mismo msg_id)
             if keep_prefix is not None and fn.startswith(keep_prefix):
                 continue
+            # Conservar entradas de la cola de recode (raw en espera de turno)
+            try:
+                if os.path.abspath(os.path.join(_CACHE_DIR, fn)) in _prot:
+                    continue
+            except Exception:
+                pass
             try:
                 os.remove(os.path.join(_CACHE_DIR, fn))
             except Exception:
@@ -7060,7 +7790,7 @@ def _run_ffmpeg_progress(cmd: list, duration: float, base: float = 0.0, span: fl
 
 
 def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_lang: str = "",
-                     max_bytes: int = int(3.9 * 1024 ** 3), progress_log=None,
+                     max_bytes: int = _MAX_UPLOAD_MIB, progress_log=None,
                      on_progress_pct=None, proc_registry: Optional[dict] = None,
                      on_detail=None, streaming: bool = False,
                      resume_state: Optional[dict] = None) -> Optional[str]:
@@ -7070,7 +7800,8 @@ def _normalize_video(input_path: str, file_name: str, audio_lang: str = "", sub_
     - MKV con streaming=True → se sube tal cual: remux -c:v copy a MKV, solo cambiando
       pista de audio (audio_lang) si se indica. Es la ÚNICA excepción a la conversión.
     - CUALQUIER otro formato (AVI, WMV, MOV, FLV, WEBM, TS...) → conversión MP4 (libx265).
-    - > 3.9GB o subs quemados → 2-pass con bitrate calculado para caber en ~3.8GB
+    - > límite (4GB−10MB) o subs quemados → 2-pass con bitrate calculado para
+      caber en ~3.8GB (margen de seguridad ante overshoot del CBR)
       (1er paso analiza el vídeo → 2º paso codifica con bitrate CBR fijo y menor tamaño).
     Devuelve el path del MP4/MKV final o None si no se pudo (y se sube el original)."""
     ffmpeg = _find_ffmpeg()
@@ -7297,6 +8028,7 @@ async def _fetch_cover_messages(client, channel_id, msg_id, topic_id=None, job: 
         items = await _svc().fetch_cover_messages(
             channel_id, int(msg_id),
             topic_id=int(topic_id) if topic_id else None,
+            queue_priority=_svc_qhigh(),
             **_svc_creds(job))
         if not items:
             print(f"[TGHirayi_v2] Cover msg {msg_id} sin cover válido en canal {channel_id} → sin cover", flush=True)
@@ -7959,9 +8691,100 @@ async def _copy_messages_to_destination(client, messages, dest: dict, topic_id, 
     return sent_ids
 
 
+def _sniff_container(path):
+    """Contenedor real por magia (la extensión puede mentir: MKV llamado
+    .mp4). Devuelve 'mp4' / 'mkv' / 'avi' / '' (desconocido). Barato (12B)."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(12)
+        if len(head) >= 8 and head[4:8] == b'ftyp':
+            return "mp4"
+        if len(head) >= 4 and head[:4] == bytes.fromhex("1a45dfa3"):
+            return "mkv"
+        if len(head) >= 12 and head[:4] == b'RIFF' and head[8:12] == b'AVI ':
+            return "avi"
+        return ""
+    except Exception:
+        return ""
+
+
+def _needs_slow_encode(fsize, fname, audio_lang, sub_lang, streaming, input_path=None) -> bool:
+    """¿Este fichero pediría ffmpeg LENTO (2-pass/encode) en _normalize_video?
+    Solo esos van a la cola central; los remux rápidos (-c copy) siguen inline.
+    El contenedor se verifica por MAGIA (no por extensión): un MKV llamado
+    .mp4 pedía remux, fallaba y degradaba a conversión inline de horas.
+    Espejo barato de la regla need_encode (sin ffprobe)."""
+    try:
+        if sub_lang:
+            return True  # quemar subs → re-encode
+        if int(fsize or 0) > _MAX_UPLOAD_MIB:
+            return True  # 2-pass por tamaño
+        cont = ""
+        if input_path:
+            cont = _sniff_container(input_path)
+        ext = os.path.splitext(fname or "")[1].lower()
+        if not cont:
+            if ext in (".mp4", ".m4v"):
+                cont = "mp4"
+            elif ext == ".mkv":
+                cont = "mkv"
+            elif ext in (".avi", ".mov", ".wmv", ".flv", ".webm", ".ts",
+                         ".m2ts", ".mpg", ".mpeg"):
+                return True  # conversión libx265 segura
+        # El remux inline decide por EXTENSIÓN: si el contenido real es otro
+        # contenedor, el copy falla y degrada a conversión inline de horas.
+        # Ante contradicción, a la cola (allí se convierte bien, sin bloquear).
+        ext_cont = ("mp4" if ext in (".mp4", ".m4v") else
+                    "mkv" if ext == ".mkv" else "")
+        if cont and ext_cont and cont != ext_cont:
+            return True
+        if cont == "mp4":
+            return False  # remux faststart
+        if cont == "mkv":
+            return not bool(streaming)  # streaming: remux cues_to_front
+        return True  # resto/desconocido → conversión
+    except Exception:
+        return False
+
+
+def _recode_should_defer(job, msg_id, input_path, fname, audio_lang, sub_lang, streaming) -> bool:
+    """¿Este fichero va a la cola central en vez de recodificarse inline?
+    No si ya falló antes en la cola (fallback inline, comportamiento anterior)."""
+    try:
+        if job is None:
+            return False
+        key = _recode_key(job.get("id"), msg_id)
+        if ((job or {}).get("_recode_failed") or {}).get(key):
+            return False
+        try:
+            fsize = os.path.getsize(input_path) if input_path else 0
+        except Exception:
+            fsize = 0
+        return _needs_slow_encode(fsize, fname, audio_lang, sub_lang, streaming,
+                                  input_path=input_path)
+    except Exception:
+        return False
+
+
+def _recode_marker(job, msg_id, chat_id, input_path, fname, audio_lang, sub_lang, streaming) -> dict:
+    """Marcador que viaja en media_data en lugar del fichero: el worker lo
+    encola y suelta el job hasta que la cola central termine."""
+    try:
+        fsize = os.path.getsize(input_path) if input_path else 0
+    except Exception:
+        fsize = 0
+    return {"recode_pending": True, "job_id": str((job or {}).get("id")),
+            "msg_id": int(msg_id or 0), "chat_id": chat_id,
+            "input_path": input_path, "fname": fname or "video.mp4",
+            "audio_lang": audio_lang or "", "sub_lang": sub_lang or "",
+            "streaming": bool(streaming), "file_size": int(fsize or 0),
+            "file_name": fname or "video.mp4"}
+
+
 async def _download_episode_media(client, episode: dict, source_channel_id, progress_callback=None,
                                    normalize_mp4: bool = False, audio_lang: str = "", sub_lang: str = "",
-                                   streaming_mkv: bool = False, job: dict = None) -> List[dict]:
+                                   streaming_mkv: bool = False, job: dict = None,
+                                   defer_recode: bool = False) -> List[dict]:
     """Descarga los ficheros adjuntos de un episodio.
     Si normalize_mp4 y es vídeo, normaliza a MP4 compatible (remux/conversión/2-pass).
     Además, los vídeos no-MP4 (AVI, WMV, MOV, WEBM...) se convierten SIEMPRE a MP4.
@@ -8049,6 +8872,26 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
                 job["encode_progress"] = 0.0
                 job["status_text"] = "Normalizando vídeo..."
                 _persist_job(job)
+            if defer_recode and _recode_should_defer(
+                    job, msg_id, raw_cache, raw_fname,
+                    audio_lang, sub_lang, streaming_mkv):
+                # Cola central: no bloquear el worker con el encode.
+                # Solo se devuelven marcadores si el worker de recode está
+                # vivo; si no, se sigue en línea (comportamiento anterior).
+                try:
+                    await _ensure_recode_worker()
+                except Exception:
+                    pass
+                try:
+                    _rw_alive = (_recode_worker_task is not None
+                                 and not _recode_worker_task.done())
+                except Exception:
+                    _rw_alive = False
+                if _rw_alive:
+                    print(f"[TGHirayi_v2] [CACHE] ep.{msg_id} a cola de recode "
+                          f"({os.path.getsize(raw_cache) / (1024**3):.2f}GB)", flush=True)
+                    return [_recode_marker(job, msg_id, chat_id, raw_cache, raw_fname,
+                                           audio_lang, sub_lang, streaming_mkv)]
             norm_out = await asyncio.to_thread(_normalize_video, raw_cache, raw_fname,
                                                    audio_lang=audio_lang, sub_lang=sub_lang, progress_log=_norm_log,
                                                    on_progress_pct=_norm_pct,
@@ -8423,6 +9266,25 @@ async def _download_episode_media(client, episode: dict, source_channel_id, prog
                     job["encode_progress"] = 0.0
                     job["status_text"] = "Normalizando vídeo..."
                     _persist_job(job)
+                if defer_recode and _recode_should_defer(
+                        job, msg_id, raw_cache, fname,
+                        audio_lang, sub_lang, streaming_mkv):
+                    # Cola central: no bloquear el worker con el encode.
+                    # Solo con worker vivo; si no, en línea (anterior).
+                    try:
+                        await _ensure_recode_worker()
+                    except Exception:
+                        pass
+                    try:
+                        _rw_alive = (_recode_worker_task is not None
+                                     and not _recode_worker_task.done())
+                    except Exception:
+                        _rw_alive = False
+                    if _rw_alive:
+                        print(f"[TGHirayi_v2] [NORM] ep.{msg_id} a cola de recode "
+                              f"({os.path.getsize(raw_cache) / (1024**3):.2f}GB)", flush=True)
+                        return [_recode_marker(job, msg_id, chat_id, raw_cache, fname,
+                                               audio_lang, sub_lang, streaming_mkv)]
                 norm_out = await asyncio.to_thread(_normalize_video, raw_cache, fname,
                                                    audio_lang=audio_lang, sub_lang=sub_lang, progress_log=_norm_log,
                                                    on_progress_pct=_norm_pct,
@@ -9002,6 +9864,7 @@ async def _copy_episode_from_origin(client, source_channel_id, episode: dict, ta
             return sent_ids
         mid = await _svc().copy_message(target_dest["channel_id"], src_chat, int(msg_id),
                                         reply_to_msg_id=topic_id if topic_id else None,
+                                        queue_priority=_svc_qhigh(),
                                         **_svc_creds(job))
         if mid:
             sent_ids.append(int(mid))
@@ -9020,6 +9883,7 @@ async def _copy_episode_from_first(client, source_dest: dict, target_dest: dict,
                 return
             _mid = await _svc().copy_message(target_dest["channel_id"], source_dest["channel_id"], int(mid),
                                              reply_to_msg_id=topic_id if topic_id else None,
+                                             queue_priority=_svc_qhigh(),
                                              **_svc_creds(job))
             if _mid:
                 await asyncio.sleep(delay)

@@ -2871,7 +2871,17 @@ function renderPluginList(container, plugins) {
     }
 
     var html = '';
+    // Orden de secciones fijo (no el de aparición): estable entre arranques.
+    var SECTION_ORDER = ['Orígenes', 'Destinos', 'Catálogo', 'Hero Page'];
     var sectionKeys = Object.keys(sections);
+    sectionKeys.sort(function(a, b) {
+        var ia = SECTION_ORDER.indexOf(a);
+        var ib = SECTION_ORDER.indexOf(b);
+        if (ia === -1) ia = 999;
+        if (ib === -1) ib = 999;
+        if (ia !== ib) return ia - ib;
+        return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+    });
     for (var s = 0; s < sectionKeys.length; s++) {
         var secName = sectionKeys[s];
         var secPlugins = sections[secName];
@@ -6316,6 +6326,11 @@ window.changeScreenColumns = function(val) {
         localStorage.setItem('tvcat_columns', val);
     }
 };
+window.changeCardSize = function(val) {
+    if (window.UI && window.UI.changeCardSize) {
+        window.UI.changeCardSize(val);
+    }
+};
 
 function syncNavbarAvatar() {
     var avatarEl = document.getElementById('side-avatar');
@@ -6676,6 +6691,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 // 3. Obtener plugins
             window.API.getPlugins(function(data) {
                 var allPlugins = data.plugins || [];
+                // Orden canónico del manifiesto ANTES de cargar scripts: así el
+                // orden no depende de la llegada de red de cada JS.
+                try {
+                    if (window.pluginSystem && window.pluginSystem.setManifestOrder) {
+                        var _mn = [];
+                        for (var _mi = 0; _mi < allPlugins.length; _mi++) _mn.push(allPlugins[_mi].name);
+                        window.pluginSystem.setManifestOrder(_mn);
+                    }
+                } catch (e) {}
                 // Solo cargar JS/CSS de plugins habilitados
                 var enabledPlugins = [];
                 for (var pi = 0; pi < allPlugins.length; pi++) {
@@ -6808,8 +6832,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Restaurar perfil guardado
         restoreProfile();
-        // Restaurar columnas
-        if (window.UI && window.UI.applyScreenColumns) {
+        // Restaurar tamaño de carátula (con migración desde columnas legacy)
+        if (window.UI && window.UI.resolveCardSize && window.UI.applyCardSize) {
+            try {
+                window.UI.applyCardSize(window.UI.resolveCardSize());
+                window.UI.initCardSizeResize();
+            } catch (eCS) {}
+        } else if (window.UI && window.UI.applyScreenColumns) {
             var savedCols = localStorage.getItem('tvcat_grid_columns') || 'auto';
             window.UI.applyScreenColumns(savedCols);
         }

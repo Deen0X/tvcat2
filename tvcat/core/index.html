@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title data-i18n="TVCat 2">TVCat 2</title>
     <link rel="icon" type="image/png" href="static/TVCat.png">
-    <link rel="stylesheet" href="style.css?v=20260923a">
+    <link rel="stylesheet" href="style.css?v=20260930a">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css">
     <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
@@ -301,20 +301,13 @@
                 </div>
                 <div class="tab-pane hidden" id="pane-screen">
                     <div class="settings-input-group">
-                        <label for="screen-columns-select">Columnas de Carátulas en Pantalla</label>
-                        <p class="setting-desc" style="margin-bottom: 12px;">Configura cuántas columnas quieres forzar en este dispositivo de forma local.</p>
-                        <select id="screen-columns-select" class="variant-select" style="max-width: 100%;" onchange="changeScreenColumns(this.value)">
-                            <option value="auto">Automático (Predeterminado responsivo)</option>
-                            <option value="2">2 Columnas</option>
-                            <option value="3">3 Columnas</option>
-                            <option value="4">4 Columnas</option>
-                            <option value="5">5 Columnas</option>
-                            <option value="6">6 Columnas</option>
-                            <option value="7">7 Columnas</option>
-                            <option value="8">8 Columnas</option>
-                            <option value="9">9 Columnas</option>
-                            <option value="10">10 Columnas</option>
-                        </select>
+                        <label for="screen-card-size">Tamaño de carátulas</label>
+                        <p class="setting-desc" style="margin-bottom: 12px;">Ancho de cada carátula en este dispositivo, en píxeles. El número de columnas se ajusta solo al ancho de la ventana.</p>
+                        <div style="display:flex;align-items:center;gap:12px;">
+                            <input type="range" id="screen-card-size" min="110" max="220" step="5" value="150" style="flex:1;accent-color:#e11d48;" oninput="changeCardSize(this.value)" onchange="changeCardSize(this.value)">
+                            <span id="screen-card-size-val" style="min-width:52px;text-align:right;font-size:0.85rem;">150 px</span>
+                        </div>
+                        <div id="card-size-preview" style="margin-top:12px;display:flex;justify-content:center;"></div>
                     </div>
 
                     <div class="settings-input-group" style="margin-top: 20px; border-top: 1px solid #27272a; padding-top: 20px;">
@@ -1088,13 +1081,13 @@
     <!-- Core JS -->
     <script src="js/translate.js?v=20260801"></script>
     <script src="js/api.js?v=20260801"></script>
-    <script src="js/plugin_system.js?v=20260910"></script>
+    <script src="js/plugin_system.js?v=20260923a"></script>
     <script src="js/assistants.js?v=20260910a"></script>    <script src="js/navEngine.js?v=20260923a"></script>
     <script src="js/keyMapper.js?v=20260801"></script>
     <script src="js/inputHelper.js?v=20260903q"></script>
-    <script src="js/catalog.js?v=20260923s"></script>
+    <script src="js/catalog.js?v=20260930a"></script>
     <script src="js/player.js?v=20260923b"></script>
-    <script src="js/ui2.js?v=20260923c"></script>
-    <script src="js/app.js?v=20260923s"></script>
+    <script src="js/ui2.js?v=20260930a"></script>
+    <script src="js/app.js?v=20260930a"></script>
 </body>
 </html>

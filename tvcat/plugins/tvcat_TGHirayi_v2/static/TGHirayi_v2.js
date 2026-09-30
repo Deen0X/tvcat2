@@ -645,6 +645,16 @@
             var current = res && res.current_job;
             var paused = res && res.worker_paused;
             var html = '';
+            // Job descargando y recodificando EN VIVO (pueden no coincidir
+            // con `current`: recode en 2o plano + descargas en paralelo).
+            var downloadingId = (res && res.downloading_job_id != null) ? String(res.downloading_job_id) : null;
+            var recodingId = null;
+            if (res && res.encode_job_id != null && res.encode_active) {
+                recodingId = String(res.encode_job_id);
+            } else if (res && res.recode_active) {
+                recodingId = String(res.recode_active).split(':')[0];
+            }
+            var liveState = { downloadingId: downloadingId, recodingId: recodingId };
 
             // ─── Estado del worker ───
             var wstate = res.worker_state || (paused ? 'pausada' : 'activa');
@@ -661,6 +671,28 @@
                 html += '<button onclick="window._tgcopy2SetWorkerState(\'activa\')" style="padding:4px 10px;background:#22c55e;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;">Reanudar</button>';
             }
             html += '</div>';
+            // ─── Qué se está descargando / recodificando en vivo ───
+            // (puede no ser el job `current`: el recode va en 2o plano).
+            (function() {
+                function titleOf(id) {
+                    if (id == null) return null;
+                    for (var qi = 0; qi < queue.length; qi++) {
+                        if (String(queue[qi].id) === String(id)) return queue[qi].title || ('#' + id);
+                    }
+                    return '#' + id;
+                }
+                var curId = (current && current.id != null) ? String(current.id) : null;
+                if (downloadingId && downloadingId !== curId) {
+                    html += '<div style="display:flex;align-items:center;gap:6px;padding:2px 8px 6px;font-size:11px;color:#60a5fa;">';
+                    html += '<span>\u2193 Descargando: ' + escHtml(titleOf(downloadingId)) + '</span>';
+                    html += '</div>';
+                }
+                if (recodingId && recodingId !== curId) {
+                    html += '<div style="display:flex;align-items:center;gap:6px;padding:2px 8px 6px;font-size:11px;color:#93c5fd;">';
+                    html += '<span>\uD83D\uDD1F Recodificando: ' + escHtml(titleOf(recodingId)) + '</span>';
+                    html += '</div>';
+                }
+            })();
             // ─── Estado de archives (procesado en paralelo) ───
             var pArch = res.pending_archives || 0;
             if (pArch > 0) {
@@ -841,7 +873,7 @@ html += '</div>';
                 html += '<input class="tgcopy2-filter-input" placeholder="Filtrar…" value="' + escHtml(window._queue_filter || '') + '" oninput="window._queueFilterInput(this)" style="flex:1;min-width:60px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:3px 8px;font-size:12px;">';
                 html += '</div>';
                 for (var i = 0; i < shown.length; i++) {
-                    html += renderJobRow(shown[i], current);
+                    html += renderJobRow(shown[i], current, false, liveState);
                 }
             } else {
                 html += '<div style="color:#a1a1aa;text-align:center;padding:12px;font-size:13px;">No hay trabajos pendientes.</div>';
@@ -856,7 +888,7 @@ html += '</div>';
                 html += '<div style="text-align:right;margin:2px 0 4px;"><button onclick="window._tgcopy2CleanCompleted()" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:11px;padding:3px 8px;">Limpiar finalizados</button></div>';
                 html += '<div id="' + doneId + '" style="display:' + (doneOpen ? 'block' : 'none') + ';">';
                 for (var i = done.length - 1; i >= 0; i--) {
-                    html += renderJobRow(done[i], current, true);
+                    html += renderJobRow(done[i], current, true, liveState);
                 }
                 html += '</div>';
             }
@@ -892,10 +924,29 @@ html += '</div>';
     }
 
     // ─── Helper para renderizar fila de job ───
-    function renderJobRow(j, current, isDone) {
-        var isCurrent = current && current.id === j.id;
+    function renderJobRow(j, current, isDone, live) {
+        live = live || {};
+        var isCurrent = !!(current && current.id === j.id);
+        // Descargando en vivo (backend); si no hay dato vivo, el current manda.
+        var isDownloading = (live.downloadingId != null)
+            ? (String(j.id) === live.downloadingId)
+            : isCurrent;
+        // Recodificando en vivo (ffmpeg con proceso vivo o item en curso).
+        var liveRecode = (live.recodingId != null) && (String(j.id) === live.recodingId);
+        var recWaiting = !!((j.recode_waiting && j.recode_waiting.length) || j.recode_active);
         var pausedCls = j.paused ? 'opacity:0.5;' : '';
-        var bgCls = isCurrent ? 'background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.2);' : 'background:rgba(255,255,255,0.04);';
+        // Precedencia: recode vivo (azul) > descargando (verde) > current >
+        // en espera de recode (azul suave) > resto.
+        var bgCls = 'background:rgba(255,255,255,0.04);';
+        if (liveRecode) {
+            bgCls = 'background:rgba(59,130,246,0.16);border:1px solid rgba(59,130,246,0.45);';
+        } else if (isDownloading) {
+            bgCls = 'background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.2);';
+        } else if (isCurrent) {
+            bgCls = 'background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.2);';
+        } else if (recWaiting) {
+            bgCls = 'background:rgba(59,130,246,0.10);border:1px solid rgba(59,130,246,0.3);';
+        }
         if (j.status === 'completed') bgCls += 'border-left:3px solid #22c55e;';
         if (j.status === 'skipped') bgCls += 'border-left:3px solid #eab308;';
         if (j.status === 'error') bgCls += 'border-left:3px solid #ef4444;';
@@ -946,6 +997,20 @@ html += '</div>';
         } else {
             _pyroBadge = '<span aria-hidden="true" style="' + _stPyro + 'visibility:hidden;">🐍</span>';
         }
+        var _stRec = 'background:rgba(251,146,60,0.15);color:#fdba74;border:1px solid rgba(251,146,60,0.4);border-radius:4px;font-size:11px;padding:1px 5px;white-space:nowrap;display:inline-block;text-align:center;';
+        var _recodeBadge = '';
+        if (j.needs_recode) {
+            _recodeBadge = '<span title="Requiere recodificación (fichero >3.99GB)" style="' + _stRec + '">🗜️</span>';
+        } else {
+            _recodeBadge = '<span aria-hidden="true" style="' + _stRec + 'visibility:hidden;">🗜️</span>';
+        }
+        var _stRecWait = 'background:rgba(234,179,8,0.15);color:#fde68a;border:1px solid rgba(234,179,8,0.4);border-radius:4px;font-size:10px;padding:1px 5px;white-space:nowrap;display:inline-block;text-align:center;';
+        var _recodeWait = '';
+        if (j.recode_waiting && j.recode_waiting.length) {
+            _recodeWait = '<span title="Episodio en la cola central de recodificación" style="' + _stRecWait + '">⏳ cola recode</span>';
+        } else {
+            _recodeWait = '<span aria-hidden="true" style="' + _stRecWait + 'visibility:hidden;">⏳</span>';
+        }
         var _stCat = 'font-size:11px;background:rgba(34,197,94,0.12);color:#86efac;border:1px solid rgba(34,197,94,0.4);border-radius:4px;padding:1px 5px;white-space:nowrap;display:inline-block;text-align:center;';
         var _catBadge = '';
         if (j.title) {
@@ -967,7 +1032,7 @@ html += '</div>';
         // izquierda + badges fijos a la derecha.
         h += '<div style="display:flex;align-items:center;gap:4px;">' + _prioBtns
             + '<span style="flex:1;min-width:0;"></span>'
-            + _tb + _destBadge + _epsBadge + _pyroBadge + _catBadge + '</div>';
+            + _tb + _destBadge + _epsBadge + _pyroBadge + _recodeBadge + _recodeWait + _catBadge + '</div>';
         // Cuerpo: asa + cover a la izquierda, contenido flexible, botones a la derecha.
         h += '<div style="display:flex;align-items:center;gap:6px;margin-top:4px;">';
         if (!isDone) {
@@ -992,9 +1057,27 @@ html += '</div>';
         if (j.progress > 0 && j.progress < 100) {
             var p = Math.round(j.progress);
             h += '<div style="background:#27272a;border-radius:3px;height:4px;overflow:hidden;margin-top:3px;"><div style="width:' + p + '%;height:100%;background:linear-gradient(90deg,#3b82f6,#22c55e);border-radius:3px;"></div></div>';
+        // Barra de descarga en la fila que descarga en vivo (margen inferior).
+        if (isDownloading && j.download_progress > 0 && j.download_progress < 100) {
+            var dp = Math.round(j.download_progress);
+            var dsp = '';
+            try {
+                var _dbps = Number(j.download_speed || 0);
+                if (_dbps > 0) {
+                    var _dmb = _dbps / (1024 * 1024);
+                    dsp = ' \u00B7 ' + (_dmb >= 1 ? _dmb.toFixed(1) + ' MB/s' : Math.round(_dbps / 1024) + ' KB/s');
+                }
+            } catch (_eSp) {}
+            h += '<div style="display:flex;align-items:center;gap:4px;margin-top:3px;">';
+            h += '<span style="font-size:10px;color:#60a5fa;white-space:nowrap;">\u2193 ' + dp + '%' + dsp + '</span>';
+            h += '</div>';
+            h += '<div style="background:#27272a;border-radius:3px;height:5px;overflow:hidden;margin-top:2px;"><div style="width:' + dp + '%;height:100%;background:#3b82f6;border-radius:3px;transition:width 0.5s;"></div></div>';
         }
-        // Métricas de encode en vivo para archives en procesado en 2º plano
-        if (j.archive_phase === 'processing') {
+        // La condicion de recode incluye ffmpeg vivo (liveRecode, ver abajo).
+        }
+        // Métricas de encode en vivo: archives en 2º plano + jobs normales
+        // con episodio en la cola central de recodificación.
+        if (j.archive_phase === 'processing' || (j.recode_waiting && j.recode_waiting.length) || j.recode_active || liveRecode) {
             var ep = j.encode_progress || 0;
             var rem = [];
             if (j.encode_size > 0) rem.push(fmtBytes(j.encode_size));
@@ -1040,7 +1123,7 @@ html += '</div>';
 
         if (!isDone) {
             if (j.paused) h += '<span style="font-size:10px;color:#eab308;font-weight:600;">PAUSADO</span>';
-            if (j.archive_phase === 'processing') h += '<button onclick="window._tgcopy2KillEncode(\'' + j.id + '\')" title="Matar el ffmpeg en curso y re-encodar" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:10px;padding:2px 6px;white-space:nowrap;">✕ Kill</button>';
+            if (j.archive_phase === 'processing' || j.recode_active) h += '<button onclick="window._tgcopy2KillEncode(\'' + j.id + '\')" title="Matar el ffmpeg en curso y re-encodar" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:10px;padding:2px 6px;white-space:nowrap;">✕ Kill</button>';
             h += '<button onclick="window._tgcopy2TogglePause(\'' + j.id + '\',' + (!j.paused) + ')" title="' + (j.paused ? 'Reanudar' : 'Pausar') + '" style="background:none;border:1px solid #3f3f46;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">' + (j.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
             h += '<button onclick="window._tgcopy2RemoveRest(\'' + j.id + '\')" title="Eliminar desde aquí el resto" style="background:none;border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">&#10005;&#11015;</button>';
         }

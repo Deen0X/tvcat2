@@ -27,7 +27,8 @@ CONNECT_TIMEOUT = 15        # un secundario debe conectar en <15s
 
 
 def _client_type(client, hint: str = None) -> str:
-    """Detecta 'telethon' o 'pyrogram' (hint explícito manda)."""
+    """Detecta 'telethon' o 'pyrogram' (hint explícito manda). Sin pista,
+    el preferido global: nunca telethon hardcodeado."""
     if hint in ("telethon", "pyrogram"):
         return hint
     try:
@@ -38,7 +39,15 @@ def _client_type(client, hint: str = None) -> str:
             return "telethon"
     except Exception:
         pass
-    return "telethon"
+    try:
+        from services.userbot_service import get_preferred_client_type as _pct
+        return _pct()
+    except Exception:
+        try:
+            from tvcat.services.userbot_service import get_preferred_client_type as _pct2
+            return _pct2()
+        except Exception:
+            return "telethon"
 
 
 def _report(progress, cur, tot):
@@ -53,6 +62,66 @@ def _report(progress, cur, tot):
     return None
 
 
+_ACT_MARK = {"t": 0.0}
+_BULK_ACTIVE = {"t": 0.0}
+
+
+def bulk_active_recent(secs: float = 30.0) -> bool:
+    """True si hubo tráfico bulk (descarga/subida de ficheros) hace menos
+    de `secs` segundos. La sonda lo usa para ceder el paso a la cola de
+    episodios (que no pasa por TransferService y el BulkGate solo la ve a
+    ráfagas por chunk)."""
+    try:
+        import time as _t
+        return (_t.monotonic() - float(_BULK_ACTIVE.get("t") or 0.0)) < float(secs or 30.0)
+    except Exception:
+        return False
+
+
+def _touch_activity():
+    """Marca actividad Telegram (estrangulada a 1/5s): el tráfico bulk en
+    curso queda visible para feeder/sonda sin spamear."""
+    try:
+        now = time.monotonic()
+        try:
+            _BULK_ACTIVE["t"] = now
+        except Exception:
+            pass
+        if now - float(_ACT_MARK.get("t") or 0.0) < 5.0:
+            return
+        _ACT_MARK["t"] = now
+        try:
+            from services.tg_activity import mark as _mk
+        except Exception:
+            from tvcat.services.tg_activity import mark as _mk
+        _mk()
+    except Exception:
+        pass
+
+
+def _tracked(progress):
+    """Envuelve el callback de progreso del llamador marcando actividad."""
+    if progress is None:
+        def _p(cur, tot):
+            _touch_activity()
+            return None
+        return _p
+
+    def _p2(cur, tot):
+        _touch_activity()
+        return progress(cur, tot)
+    return _p2
+
+
+def _mbps(nbytes, seconds):
+    try:
+        if seconds <= 0:
+            return 0.0
+        return (float(nbytes) / 1048576.0) / float(seconds)
+    except Exception:
+        return 0.0
+
+
 # ─── Descarga ────────────────────────────────────────────────────
 
 async def download_file(client, chat_id, msg_id, dest_path: str,
@@ -64,6 +133,8 @@ async def download_file(client, chat_id, msg_id, dest_path: str,
     None si no se pudo (el llamador aplica su fallback).
     `pre_msg`: mensaje ya resuelto (evita un get_messages)."""
     ctype = _client_type(client, client_type)
+    _t0 = time.monotonic()
+    _tprogress = _tracked(progress)
     if ctype == "pyrogram":
         from services import fast_download as _fd
         workers = _fd.resolve_workers(threads, "tg_fastdl_workers", _fd.DEFAULT_WORKERS)
@@ -73,9 +144,16 @@ async def download_file(client, chat_id, msg_id, dest_path: str,
             if pre_msg is None:
                 return None
             got = await _fd.fast_download_media(client, pre_msg, dest_path,
-                                                workers=workers, progress=progress,
+                                                workers=workers, progress=_tprogress,
                                                 bulk_priority=bulk_priority)
             if got and os.path.isfile(got):
+                try:
+                    _sz = os.path.getsize(got)
+                    print(f"[FT-DL] {_sz/1048576.0:.1f}MB en {time.monotonic()-_t0:.1f}s"
+                          f" = {_mbps(_sz, time.monotonic()-_t0):.1f}MB/s"
+                          f" (fast pyro, workers={workers})", flush=True)
+                except Exception:
+                    pass
                 return got
         except Exception as e:
             print(f"[FILE-TRANSFER] fast download falló, fallback telethon/secuencial: {e}", flush=True)
@@ -97,9 +175,18 @@ async def download_file(client, chat_id, msg_id, dest_path: str,
         except Exception:
             pass
         return None
-    return await _telethon_parallel_download(client, chat_id, msg_id, dest_path,
-                                             threads=threads, progress=progress,
+    _got = await _telethon_parallel_download(client, chat_id, msg_id, dest_path,
+                                             threads=threads, progress=_tprogress,
                                              pre_msg=pre_msg)
+    if _got and os.path.isfile(_got):
+        try:
+            _sz = os.path.getsize(_got)
+            print(f"[FT-DL] {_sz/1048576.0:.1f}MB en {time.monotonic()-_t0:.1f}s"
+                  f" = {_mbps(_sz, time.monotonic()-_t0):.1f}MB/s"
+                  f" (telethon 1-conexion, threads={threads})", flush=True)
+        except Exception:
+            pass
+    return _got
 
 
 async def _telethon_parallel_download(client, chat_id, msg_id, file_path: str,
@@ -317,6 +404,7 @@ async def upload_file(client, chat_id, src, file_name: str = "file.bin",
     import io as _io
     import tempfile as _tmp
     ctype = _client_type(client, client_type)
+    _t0 = time.monotonic()
 
     if isinstance(src, str) and os.path.isfile(src):
         tmp_name = src
@@ -341,6 +429,7 @@ async def upload_file(client, chat_id, src, file_name: str = "file.bin",
             _uw = _fd.resolve_workers(threads, "tg_fastul_workers", _fd.DEFAULT_WORKERS)
 
             def _p(cur, tot):
+                _touch_activity()
                 if progress:
                     try:
                         r = progress(cur, tot)
@@ -349,13 +438,20 @@ async def upload_file(client, chat_id, src, file_name: str = "file.bin",
                     except Exception:
                         pass
 
-            return await _fd.fast_send_media(
+            _mid = await _fd.fast_send_media(
                 client, int(chat_id), tmp_name, bool(is_video),
                 file_name=file_name, caption=caption,
                 duration=int(duration or 0), width=int(width or 0),
                 height=int(height or 0), thumb_bytes=thumb_bytes,
                 reply_to_msg_id=reply_to_msg_id, workers=_uw, progress=_p,
                 bulk_priority=bulk_priority)
+            try:
+                print(f"[FT-UL] {fsize/1048576.0:.1f}MB en {time.monotonic()-_t0:.1f}s"
+                      f" = {_mbps(fsize, time.monotonic()-_t0):.1f}MB/s"
+                      f" (fast pyro, workers={_uw}) -> msg {_mid}", flush=True)
+            except Exception:
+                pass
+            return _mid
 
         # Telethon
         from telethon.tl.types import DocumentAttributeVideo
@@ -372,6 +468,7 @@ async def upload_file(client, chat_id, src, file_name: str = "file.bin",
             attrs = None
 
         async def _ul_progress(cur, tot):
+            _touch_activity()
             if progress:
                 try:
                     r = progress(cur, tot)
@@ -392,9 +489,16 @@ async def upload_file(client, chat_id, src, file_name: str = "file.bin",
             sent = await client.send_file(entity, tmp_name, caption=caption or None,
                                           attributes=attrs, thumb=thumb,
                                           reply_to=reply_to_msg_id if reply_to_msg_id else None,
-                                          supports_streaming=bool(is_video),
-                                          progress_callback=_ul_progress)
-        return int(getattr(sent, 'id', 0) or 0)
+                                           supports_streaming=bool(is_video),
+                                           progress_callback=_ul_progress)
+        _mid2 = int(getattr(sent, 'id', 0) or 0)
+        try:
+            print(f"[FT-UL] {fsize/1048576.0:.1f}MB en {time.monotonic()-_t0:.1f}s"
+                  f" = {_mbps(fsize, time.monotonic()-_t0):.1f}MB/s"
+                  f" (telethon 1-conexion, threads={threads}) -> msg {_mid2}", flush=True)
+        except Exception:
+            pass
+        return _mid2
     finally:
         if _is_temp:
             try:
@@ -560,6 +664,7 @@ async def _telethon_range(client, msg, offset: int, length: int, chunk_size: int
         except Exception as e:
             if type(e).__name__ in ("FloodWaitError", "FloodWait", "FloodPremiumWait"):
                 gate.bulk_flood_report(float(getattr(e, 'seconds', getattr(e, 'value', 0)) or 0))
+            print(f" [TG-RANGE] GetFile offset={cur} falló: {type(e).__name__}: {str(e)[:150]}", flush=True)
             break
         finally:
             await gate.bulk_release()
@@ -585,6 +690,11 @@ async def _pyro_range(client, msg, offset: int, length: int, chunk_size: int,
     except Exception:
         doc = getattr(msg, "document", None)
     if doc is None:
+        try:
+            _attrs = [a for a in ("document", "video", "audio", "animation", "voice", "video_note", "photo", "sticker", "media", "empty") if getattr(msg, a, None) is not None]
+        except Exception:
+            _attrs = ["?"]
+        print(f" [PYRO-RANGE] sin documento (attrs={_attrs})", flush=True)
         return b""
     try:
         if hasattr(doc, "file_id") and getattr(doc, "file_id"):

@@ -12,6 +12,7 @@ import sys
 from typing import Dict, Any, Optional, List
 
 PLUGINS_DIR = os.path.join(os.path.dirname(__file__), "plugins")
+PLUGINS_DEVELOP_DIR = os.path.join(os.path.dirname(__file__), "plugins_develop")
 
 
 class PluginLoader:
@@ -20,13 +21,21 @@ class PluginLoader:
         self.registry: Dict[str, Any] = {}
 
     def scan(self):
-        """Escanea plugins/ y registra todos los plugins disponibles."""
-        if not os.path.isdir(self.plugins_dir):
-            print(f" [PLUGIN LOADER] Carpeta de plugins no encontrada: {self.plugins_dir}")
+        """Escanea plugins/ y plugins_develop/ y registra todos los plugins.
+        Si un nombre existe en ambas, gana plugins_develop (override de
+        desarrollo) y se informa en el log."""
+        self._scan_dir(self.plugins_dir, origin="plugins")
+        self._scan_dir(PLUGINS_DEVELOP_DIR, origin="plugins_develop")
+
+    def _scan_dir(self, plugins_dir: str, origin: str):
+        """Escanea UNA carpeta de plugins."""
+        if not os.path.isdir(plugins_dir):
+            if origin == "plugins":
+                print(f" [PLUGIN LOADER] Carpeta de plugins no encontrada: {plugins_dir}")
             return
 
-        for folder_name in sorted(os.listdir(self.plugins_dir)):
-            plugin_dir = os.path.join(self.plugins_dir, folder_name)
+        for folder_name in sorted(os.listdir(plugins_dir)):
+            plugin_dir = os.path.join(plugins_dir, folder_name)
             if not os.path.isdir(plugin_dir):
                 continue
 
@@ -57,6 +66,7 @@ class PluginLoader:
                     "type": plugin_type,
                     "enabled": enabled,
                     "_dir": plugin_dir,
+                    "_origin": origin,
                     "load_error": None,
                 }
 
@@ -67,9 +77,11 @@ class PluginLoader:
                 else:
                     self._load_plugin_module(entry, plugin_dir, "routes")
 
+                overridden = plugin_name in self.registry
                 self.registry[plugin_name] = entry
                 status = "OK" if not entry["load_error"] else f"ERROR: {entry['load_error']}"
-                print(f" [PLUGIN LOADER] [{status}] {plugin_name} ({plugin_type}) enabled={enabled}")
+                extra = " (override plugins_develop)" if overridden else ""
+                print(f" [PLUGIN LOADER] [{status}] {plugin_name} ({plugin_type}) enabled={enabled} [{origin}]{extra}")
 
             except Exception as e:
                 import traceback

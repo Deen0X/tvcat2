@@ -1164,12 +1164,34 @@ body[class*="cols-"] .catalog-grid {
 .grid-item-badge-maudio { top: 44px; }
 .grid-item-badge-subs { top: 80px; }
 
+/* Dos puntos tras la etiqueta en la ficha técnica */
+.spec-item .spec-label::after {
+    content: ':';
+}
+
 .grid-item-badge-maudio img,
 .grid-item-badge-subs img {
     width: 32px;
     height: 32px;
     object-fit: contain;
     filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6));
+}
+
+/* Tamaño de carátula por densidad (GridCardSize F1): en tarjetas estrechas
+   los badges secundarios tapaban el cover; se ocultan y queda MEDIA + fav. */
+#catalog-grid.density-s .grid-item-badge-maudio,
+#catalog-grid.density-s .grid-item-badge-subs,
+.grid-item.density-s .grid-item-badge-maudio,
+.grid-item.density-s .grid-item-badge-subs {
+    display: none;
+}
+
+/* Táctil (móvil/TV): área mínima de fav (hoy 32px, bajo el dedo) */
+@media (pointer: coarse) {
+    .grid-item-fav {
+        min-width: 36px;
+        min-height: 36px;
+    }
 }
 
 /* Badges media en hero (misma línea que favoritos) */
@@ -1188,6 +1210,29 @@ body[class*="cols-"] .catalog-grid {
     height: 28px;
     object-fit: contain;
     filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6));
+}
+
+/* LED de sonda en curso (esquina del recuadro ficha técnica) */
+.extra-specs-container {
+    position: relative;
+}
+
+.probe-led {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 6px #22c55e;
+    animation: probe-led-pulse 1.2s ease-in-out infinite;
+    z-index: 5;
+}
+
+@keyframes probe-led-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.25; }
 }
 
 .grid-item-badge-queue img,

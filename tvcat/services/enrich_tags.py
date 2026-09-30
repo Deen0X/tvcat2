@@ -69,6 +69,19 @@ def _season_number(det: dict) -> str:
         return ""
 
 
+def _season_alt_number(det: dict) -> str:
+    """Nº de temporada salvo la 1 ("" si es 1 o no hay dato): base del custom
+    {fseasonalt}, que rinde igual que {fseason} pero no añade nada en
+    season 1 (título limpio, sin coletilla)."""
+    try:
+        s = _season_number(det or {})
+        if s and int(str(s).strip()) == 1:
+            return ""
+        return s
+    except Exception:
+        return _season_number(det or {})
+
+
 def _foreignname(api_title, api_original, det: dict, season_suffix: str = "") -> str:
     """Port de enricher.js foreignNameValue: títulos con caracteres CJK /
     hangul / cirílico / devanagari / tailandés / árabe expanden a 2 líneas;
@@ -120,6 +133,15 @@ def _foreignnameseason(api_title, api_original, det: dict) -> str:
     Sin temporada => idéntico a foreignname (título limpio)."""
     det = det or {}
     season = _season_number(det)
+    suffix = (" - Season " + season) if season else ""
+    return _foreignname(api_title, api_original, det, suffix)
+
+
+def _foreignnameseasonalt(api_title, api_original, det: dict) -> str:
+    """Gemelo de foreignnameseason que omite la coletilla en season 1
+    (título limpio): para covers de primeras temporadas sin " - Season 1"."""
+    det = det or {}
+    season = _season_alt_number(det)
     suffix = (" - Season " + season) if season else ""
     return _foreignname(api_title, api_original, det, suffix)
 
@@ -216,13 +238,16 @@ def get_base_tags(title: str = "", total_episodes: int = 0, details: dict = None
         "episodes": episodes,
         "season": season,
         "temporada": season,
+        "seasonalt": _season_alt_number(details),
         "season_episodes": season_episodes,
         "ext": "",
         "extension": "",
         "foreignname": _foreignname(details.get("api_title") or title,
                                      details.get("api_original_title"), details),
         "foreignnameseason": _foreignnameseason(details.get("api_title") or title,
-                                                details.get("api_original_title"), details),
+                                                 details.get("api_original_title"), details),
+        "foreignnameseasonalt": _foreignnameseasonalt(details.get("api_title") or title,
+                                                      details.get("api_original_title"), details),
         "_resolution": str(_md.get("resolution") or ""),
         "_resolutionx": str(_md.get("resolutionx") or ""),
         "_resolutiony": str(_md.get("resolutiony") or ""),
@@ -361,6 +386,7 @@ def _legacy_defaults() -> dict:
         "release_year": "Year: {value}",
         "season": "Season: {value}",
         "temporada": "Season: {value}",
+        "seasonalt": "Season: {value}",
         "season_episodes": "Season episodes: {value}",
         "rating": "Rating: {value}",
         "rating_count": "Rating count: {value}",
@@ -583,7 +609,7 @@ def strip_media_line(text: str) -> str:
     if not text or "\U0001F39E" not in text:
         return text
     try:
-        out = re.sub(r"\U0001F39E\uFE0F?\sM1\|[^\n\U0001F63A]*\|?\U0001F63A",
+        out = re.sub(r"\U0001F39E\uFE0F?\sM[12]\|[^\n\U0001F63A]*\|?\U0001F63A",
                      "", text)
         out = re.sub(r"\n{3,}", "\n\n", out)
         return out.strip()

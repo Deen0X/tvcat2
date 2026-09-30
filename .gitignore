@@ -91,3 +91,10 @@ tvcat/plugins/tvcat_TGHirayi/data/TGHirayi.json
 **/TGHirayi.json
 tvcat/downloads/
 **/downloads/
+# Carpetas de plugins fuera de versionado: obsoletos y desarrollo local
+tvcat/plugins_obsolete/
+**/plugins_obsolete/
+plugins_obsolete/
+tvcat/plugins_develop/
+**/plugins_develop/
+plugins_develop/

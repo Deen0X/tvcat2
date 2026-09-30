@@ -3541,11 +3541,10 @@ async def _hls_ensure_header_cache(ubot, msg, dc_id, file_size, episode_key):
 
 
 async def _hls_download_bytes_parallel(ubot, msg, offset, length, threads):
-    """Descarga [offset, offset+length) a bytes vía servicio central
-    (file_transfer.download_range). Sin librerías directas: el central
-    despacha Telethon/Pyrofork según el cliente. Se usa para el moov."""
+    """Descarga [offset, offset+length) a bytes vía SERVICIO CENTRAL
+    (telegram_service.download_range: cola + throttle + preferido, prioridad
+    NORMAL por ser lectura de reproducción). Se usa para el moov."""
     try:
-        from services import file_transfer as _ft
         chat_id, mid = None, getattr(msg, 'id', None)
         _chat = getattr(msg, 'chat', None)
         if _chat is not None and getattr(_chat, 'id', None) is not None:
@@ -3560,13 +3559,13 @@ async def _hls_download_bytes_parallel(ubot, msg, offset, length, threads):
                 chat_id = getattr(msg, 'chat_id', None)
         if not chat_id or not mid:
             return b""
-        client = getattr(ubot, '_client', ubot)
-        ctype = getattr(ubot, '_type', None)
-        data = await _ft.download_range(client, int(chat_id), int(mid), int(offset), int(length),
-                                        client_type=ctype, pre_msg=msg)
+        from services.telegram_service import get_telegram_service, PRIORITY_NORMAL
+        svc = get_telegram_service()
+        data = await svc.download_range(int(chat_id), int(mid), int(offset), int(length),
+                                        queue_priority=PRIORITY_NORMAL)
         return bytes(data or b"")
     except Exception as e:
-        print(f" [HLS-DL] bytes_parallel vía central falló: {e}", flush=True)
+        print(f" [HLS-DL] bytes_parallel vía servicio falló: {e}", flush=True)
         return b""
 async def _hls_resolve_episode(episode_key):
     """Resuelve episodio por episode_key (channelid_msgid) → (msg, chat_entity, file_size, dc_id)."""
@@ -3734,8 +3733,11 @@ async def _hls_parallel_download_tgh(client, msg, file_path, threads, progress_c
 
 
 async def _hls_download_range(ubot, msg, dc_id, offset, length):
-    """Descarga un rango de bytes de Telegram (.bin temp). Telethon: multi-conexión paralela.
-    Pyrogram: iter_download del wrapper (ya por rangos). Retorna path o None."""
+    """Descarga un rango de bytes de Telegram (.bin temp) vía SERVICIO CENTRAL
+    (telegram_service.download_range: cola + throttle + preferido; prioridad
+    NORMAL por ser lectura de reproducción). ubot/dc_id se mantienen en firma
+    por compatibilidad con los llamadores (ya no se usan directos).
+    Retorna path o None."""
     import tempfile
     fd, tmp_path = tempfile.mkstemp(suffix=".bin", dir=_HLS_SEG_DIR)
     os.close(fd)
@@ -3743,22 +3745,45 @@ async def _hls_download_range(ubot, msg, dc_id, offset, length):
         try: os.remove(tmp_path)
         except Exception: pass
         return None
-    async with _HLS_DOWNLOAD_LOCK:
-        # Descarga secuencial exacta (respeta length). Se usa para ftyp/moov/cabecera,
-        # que necesitan tamaño exacto (la multi-conexión re-alinea length a 4096).
+    try:
+        chat_id, mid = None, getattr(msg, 'id', None)
+        _chat = getattr(msg, 'chat', None)
+        if _chat is not None and getattr(_chat, 'id', None) is not None:
+            chat_id = int(_chat.id)
+        else:
+            _peer = getattr(msg, 'peer_id', None)
+            if _peer is not None:
+                _cid = getattr(_peer, 'channel_id', None) or getattr(_peer, 'chat_id', None)
+                if _cid is not None:
+                    chat_id = int("-100" + str(_cid)) if int(_cid) > 0 else int(_cid)
+            if chat_id is None:
+                chat_id = getattr(msg, 'chat_id', None)
+        if not chat_id or not mid:
+            try: os.remove(tmp_path)
+            except Exception: pass
+            return None
+        from services.telegram_service import get_telegram_service
+        from services.telegram_service import PRIORITY_NORMAL
+        svc = get_telegram_service()
+        data = await svc.download_range(int(chat_id), int(mid), int(offset), int(length),
+                                        queue_priority=PRIORITY_NORMAL)
+        if not data:
+            try: os.remove(tmp_path)
+            except Exception: pass
+            return None
         collected = 0
         with open(tmp_path, "wb") as f:
-            async for chunk in ubot.iter_download(msg, offset=offset, chunk_size=min(length, 1024*1024), dc_id=dc_id):
-                if chunk:
-                    remaining = length - collected
-                    if len(chunk) > remaining:
-                        chunk = chunk[:remaining]
-                    f.write(chunk)
-                    collected += len(chunk)
-                    if collected >= length:
-                        break
+            remaining = length - collected
+            chunk = bytes(data or b"")[:remaining]
+            if chunk:
+                f.write(chunk)
+                collected += len(chunk)
+        # Contrato original: path si llegó algo (los llamadores amplían si
+        # falta para moov), None si vacío.
         if collected > 0:
             return tmp_path
+    except Exception as e:
+        print(f" [HLS-DL] range vía servicio falló: {e}", flush=True)
     try:
         os.remove(tmp_path)
     except Exception:
@@ -9287,20 +9312,28 @@ async def media_item_flags(item_id: str, request: Request):
     try:
         from services.media_probe_queue import (
             probe_status as _st, ensure_probed as _ens,
-            get_title_media as _gtm, media_flags as _mfl)
+            get_title_media as _gtm, media_flags as _mfl,
+            diagnose as _mdiag)
         st = _st(item_id)
+        try:
+            detail = _mdiag(item_id)
+        except Exception:
+            detail = {"state": st}
         if st == "pending":
             try:
                 _ens(item_id)
             except Exception:
                 pass
-            return {"has_multi_audio": 0, "has_subtitles": 0, "ready": False}
-        if st == "na":
-            return {"has_multi_audio": 0, "has_subtitles": 0, "ready": True}
+            return {"has_multi_audio": 0, "has_subtitles": 0, "ready": False,
+                    "state": "pending", "detail": detail}
+        if st in ("na", "parked"):
+            return {"has_multi_audio": 0, "has_subtitles": 0, "ready": True,
+                    "state": st, "detail": detail}
         fl = _mfl(_gtm(item_id))
         return {"has_multi_audio": 1 if fl.get("multi_audio") else 0,
                 "has_subtitles": 1 if fl.get("has_subs") else 0,
-                "ready": True, "tech_specs": _movie_tech_specs(item_id)}
+                "ready": True, "state": "ready",
+                "detail": detail, "tech_specs": _movie_tech_specs(item_id)}
     except Exception:
         return {"has_multi_audio": 0, "has_subtitles": 0, "ready": False}
 

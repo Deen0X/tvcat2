@@ -460,6 +460,14 @@ async def search(query: str, category: str = "", subcategory: str = "",
                     found = await provider.search(attempt, media_type=mt, year=year)
                     print(f"[ENRICH] provider.search('{attempt}', media_type={mt}, year={year}) -> {len(found) if found else 0} resultados", flush=True)
                     if found:
+                        # Etiquetar el namespace (un mismo id numérico existe en
+                        # movie Y en tv: sin esto el detalle puede pedirse cruzado).
+                        for _c in found:
+                            try:
+                                if isinstance(_c, dict) and not _c.get("media_type"):
+                                    _c["media_type"] = mt
+                            except Exception:
+                                pass
                         raw_candidates.extend(found)
             else:
                 found = await provider.search(attempt)
@@ -474,9 +482,11 @@ async def search(query: str, category: str = "", subcategory: str = "",
     seen = set()
     for c in raw_candidates:
         cid = c.get("id")
-        if not cid or cid in seen:
+        # En tmdb el mismo id numérico vive en movie y en tv: dedup por pareja.
+        dkey = (c.get("media_type"), cid) if provider_name == "tmdb" else cid
+        if not cid or dkey in seen:
             continue
-        seen.add(cid)
+        seen.add(dkey)
         # El título localizado puede no parecerse a la query ("Batman vuelve"
         # vs "Batman Returns"): puntuar también contra el original y quedarse
         # con la mejor nota para no filtrar candidatos válidos por idioma.

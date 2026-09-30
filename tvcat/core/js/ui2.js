@@ -827,13 +827,14 @@ var UI = {
     // Cargar configuraciones iniciales
     loadSettings: function() {
         try {
-            // Cargar columnas guardadas para este dispositivo en el select
-            var colsSetting = localStorage.getItem('tvcat_grid_columns') || 'auto';
-            var select = document.getElementById('screen-columns-select');
-            if (select) {
-                select.value = colsSetting;
-            }
-            this.applyScreenColumns(colsSetting);
+            // Tamaño de carátula por dispositivo (px CSS) con migración desde columnas legacy
+            var cardSize = this.resolveCardSize();
+            var cardSlider = document.getElementById('screen-card-size');
+            if (cardSlider) { cardSlider.value = String(cardSize); }
+            var cardLab = document.getElementById('screen-card-size-val');
+            if (cardLab) { cardLab.textContent = cardSize + ' px'; }
+            this.applyCardSize(cardSize);
+            this.initCardSizeResize();
 
             // Cargar tipo de reproductor preferido
             var playerSetting = localStorage.getItem('tvcat_preferred_player') || 'auto';
@@ -1444,9 +1445,178 @@ var UI = {
     },
 
     // Cambiar columnas e interactuar con localStorage
+    // LEGACY (compat): el ajuste es ahora tamaño en px (changeCardSize).
     changeScreenColumns: function(value) {
         localStorage.setItem('tvcat_grid_columns', value);
         this.applyScreenColumns(value);
+    },
+
+    // ─── Tamaño de carátula (GridCardSize F1): slider en px CSS + columnas
+    // derivadas (cols = floor(anchoContenedor / tamaño), cap 10). Reutiliza el
+    // sistema body.cols-N existente (compatible TV vieja). ES5.
+    gridWidth: function() {
+        try {
+            var g = document.getElementById('catalog-grid');
+            if (g && g.clientWidth > 0) return g.clientWidth;
+            var cc = document.getElementById('catalog-container');
+            if (cc && cc.clientWidth > 0) return cc.clientWidth;
+        } catch (e) {}
+        try { if (window.innerWidth) return window.innerWidth; } catch (e2) {}
+        return 900;
+    },
+    isCoarseMobile: function() {
+        try {
+            if (window.matchMedia && window.matchMedia('(pointer:coarse)').matches && window.innerWidth < 600) return true;
+        } catch (e) {}
+        return false;
+    },
+    isSmartTVDevice: function() {
+        try {
+            var ua = navigator.userAgent || '';
+            if (/Tizen|WebOS|SmartTV|Android TV|Philips|SonyBravia|Roku|SamsungBrowser|NetCast|SMART-TV|Smart-TV|Opera TV|Maple|Obigo|Espial|CE-HTML/i.test(ua)) return true;
+        } catch (e) {}
+        return false;
+    },
+    clampCardSize: function(v) {
+        var n = parseInt(v, 10);
+        if (isNaN(n)) n = 150;
+        if (n < 110) n = 110;
+        if (n > 220) n = 220;
+        return Math.round(n / 5) * 5;
+    },
+    // Valor inicial por dispositivo: TV=5 cols, móvil táctil=2.5, PC=6.
+    // CSS px ya abstrae DPR/resolución; manda distancia + puntero.
+    recommendCardSize: function() {
+        var target = this.isSmartTVDevice() ? 5 : (this.isCoarseMobile() ? 2.5 : 6);
+        var n = Math.round((this.gridWidth() / target) / 5) * 5;
+        if (n < 120) n = 120;
+        if (n > 200) n = 200;
+        return n;
+    },
+    storedCardSize: function() {
+        try {
+            var s = localStorage.getItem('tvcat_grid_card_size');
+            if (s !== null && s !== '') {
+                var n = parseInt(s, 10);
+                if (n >= 110 && n <= 220) return n;
+            }
+        } catch (e) {}
+        return null;
+    },
+    resolveCardSize: function() {
+        var s = this.storedCardSize();
+        if (s !== null) return s;
+        // Migración una sola vez desde columnas legacy (cols -> px).
+        try {
+            var legacy = localStorage.getItem('tvcat_grid_columns');
+            if (legacy && legacy !== 'auto') {
+                var cols = parseInt(legacy, 10);
+                if (cols >= 1 && cols <= 10) {
+                    var m = this.clampCardSize(Math.round(this.gridWidth() / cols));
+                    try { localStorage.setItem('tvcat_grid_card_size', String(m)); } catch (e2) {}
+                    return m;
+                }
+            }
+        } catch (e) {}
+        var r = this.recommendCardSize();
+        try { localStorage.setItem('tvcat_grid_card_size', String(r)); } catch (e3) {}
+        return r;
+    },
+    applyCardSize: function(sizePx) {
+        var size = this.clampCardSize(sizePx);
+        var w = this.gridWidth();
+        var cols = Math.floor(w / size);
+        if (cols < 1) cols = 1;
+        if (cols > 10) cols = 10;
+        var classes = document.body.className.split(' ');
+        var nc = [];
+        for (var i = 0; i < classes.length; i++) {
+            if (classes[i].slice(0, 5) !== 'cols-') nc.push(classes[i]);
+        }
+        document.body.className = nc.join(' ').trim();
+        try { document.documentElement.style.setProperty('--grid-columns', String(cols)); } catch (e) {}
+        document.body.className = (document.body.className + ' cols-' + cols).trim();
+        try { document.documentElement.style.setProperty('--card-min', size + 'px'); } catch (e2) {}
+        var dens = size < 135 ? 'density-s' : (size < 170 ? 'density-m' : 'density-l');
+        try {
+            var g = document.getElementById('catalog-grid');
+            if (g) {
+                var gc = (' ' + g.className + ' ').split(' density-s ').join(' ').split(' density-m ').join(' ').split(' density-l ').join(' ');
+                g.className = (gc.trim() + ' ' + dens).replace(/^\s+/, '');
+            }
+        } catch (e3) {}
+        try {
+            var lab = document.getElementById('screen-card-size-val');
+            if (lab) lab.textContent = size + ' px';
+            var sl = document.getElementById('screen-card-size');
+            if (sl && sl.value !== String(size)) sl.value = String(size);
+        } catch (e4) {}
+        this.renderCardSizePreview(size);
+        return cols;
+    },
+    changeCardSize: function(value) {
+        var size = this.clampCardSize(value);
+        try { localStorage.setItem('tvcat_grid_card_size', String(size)); } catch (e) {}
+        this.applyCardSize(size);
+    },
+    // Recalcula columnas con el tamaño guardado (resize, tras pintar el grid).
+    refreshCardSizeCols: function() {
+        var s = this.storedCardSize();
+        if (s === null) s = this.resolveCardSize();
+        this.applyCardSize(s);
+    },
+    initCardSizeResize: function() {
+        if (this._cardResizeInit) return;
+        this._cardResizeInit = true;
+        var self = this;
+        var t = null;
+        var onR = function() {
+            if (t) { try { clearTimeout(t); } catch (e) {} }
+            t = setTimeout(function() { try { self.refreshCardSizeCols(); } catch (e2) {} }, 150);
+        };
+        try {
+            if (window.addEventListener) window.addEventListener('resize', onR);
+            else if (window.attachEvent) window.attachEvent('onresize', onR);
+        } catch (e) {}
+    },
+    renderCardSizePreview: function(sizePx) {
+        try {
+            var box = document.getElementById('card-size-preview');
+            if (!box) return;
+            var size = this.clampCardSize(sizePx);
+            var item = null;
+            try {
+                var cur = (window.Catalog && window.Catalog.currentItems) || window.currentItems || [];
+                for (var i = 0; i < cur.length; i++) {
+                    var c = cur[i] || {};
+                    var u = c.cover_url || '';
+                    if ((c.item_id || c.id) && u && u.indexOf('-1') === -1 && u.indexOf('-2') === -1 && u.indexOf('-3') === -1 && u.indexOf('TVCat.png') === -1) { item = c; break; }
+                }
+                if (!item && cur.length) item = cur[0];
+            } catch (e) {}
+            if (!item) {
+                item = { item_id: 'preview', title: 'Abyss (Special Edition con título largo)', year: '1989', category: 'media', episode_count: 12, has_multi_audio: 1, has_subtitles: 1, cover_url: '/static/TVCat.png' };
+            }
+            var esc = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+            var title = item.title || 'Sin título';
+            var cat = item.category || 'media';
+            var year = item.year || '';
+            var src = item.cover_url || ('/api/cover/' + (item.item_id || ''));
+            var dens = size < 135 ? 'density-s' : (size < 170 ? 'density-m' : 'density-l');
+            // !important inline: las reglas body.cols-N usan !important y si no ganarían al preview.
+            var h = '<div class="grid-item ' + dens + '" style="width:' + size + 'px !important;max-width:' + size + 'px !important;flex:0 0 auto !important;margin:0 !important;float:none;">' +
+                '<div class="grid-item-cover">' +
+                '<img src="' + esc(src) + '" style="width:100%;display:block;" onerror="this.style.display=\'none\'">' +
+                '<div class="grid-item-badge">' + esc(cat.charAt(0).toUpperCase() + cat.slice(1)) + '</div>' +
+                (((item.episode_count || 0) > 0) ? '<div class="grid-item-badge-eps"><span>' + item.episode_count + '</span></div>' : '') +
+                '<button class="grid-item-fav" tabindex="-1" onclick="return false;" style="pointer-events:none;">' +
+                '<svg viewBox="0 0 24 24" fill="rgba(255, 255, 255, 0.4)"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg></button>' +
+                (item.has_multi_audio ? '<div class="grid-item-badge-maudio"><img src="/static/multi_audio.png" onerror="this.outerHTML=\'🔊\'"></div>' : '') +
+                (item.has_subtitles ? '<div class="grid-item-badge-subs"><img src="/static/subtitles.png" onerror="this.outerHTML=\'💬\'"></div>' : '') +
+                '</div><div class="grid-item-info"><div class="grid-item-title">' + esc(title) + '</div>' +
+                (year ? '<div class="grid-item-year">' + esc(year) + '</div>' : '') + '</div></div>';
+            box.innerHTML = h;
+        } catch (e) {}
     },
 
     // Botones hero: escala 30-100 por dispositivo + modo botón/badge.
@@ -2835,6 +3005,7 @@ window.switchSettingsTab = function(t) { UI.switchSettingsTab(t); };
 window.saveUserProfileChanges = function() { UI.saveUserProfileChanges(); };
 window.saveGlobalSettings = function() { UI.saveGlobalSettings(); };
 window.changeScreenColumns = function(v) { UI.changeScreenColumns(v); };
+window.changeCardSize = function(v) { UI.changeCardSize(v); };
 window.changeHeroScale = function(v) {
     var n = parseInt(v, 10);
     if (!(n >= 30 && n <= 100)) return;

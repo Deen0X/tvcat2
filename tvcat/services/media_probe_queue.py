@@ -6,9 +6,14 @@ Lectores (tags de cover): `get_title_media`.
 """
 import os
 import sqlite3
+import time
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DB_PATH = os.path.join(BASE_DIR, "data", "tvcat.db")
+
+# Versión del sondador: al subir, los aparcados antiguos reintentan.
+PROBE_CODE = 3
+PARK_TTL_SECS = 7 * 86400
 
 _VIDEO_EXTS = (".mp4", ".m4v", ".mkv", ".avi", ".mov", ".wmv", ".flv",
               ".webm", ".ts", ".m2ts", ".mpg", ".mpeg")
@@ -60,6 +65,80 @@ def _chat_of(link: str):
     return ""
 
 
+def _ensure_park_table(conn):
+    """Crea probe_parked si falta (auto-reparación si init_db no la creó)."""
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS probe_parked ("
+            "episode_key TEXT PRIMARY KEY,"
+            " parked_at INTEGER DEFAULT (unixepoch()),"
+            " attempts INTEGER DEFAULT 0,"
+            " reason TEXT DEFAULT '',"
+            " code INTEGER DEFAULT 0)")
+        conn.commit()
+    except Exception as e:
+        print(f" [PROBE] sin tabla probe_parked: {e}", flush=True)
+        raise
+
+
+def is_freshly_parked(episode_key: str) -> bool:
+    """¿Aparcado vigente (TTL y código)? Si sí, no re-encolar."""
+    try:
+        if not episode_key:
+            return False
+        conn = _conn()
+        try:
+            _ensure_park_table(conn)
+            row = conn.execute(
+                "SELECT parked_at, code FROM probe_parked WHERE episode_key=?",
+                (str(episode_key),)).fetchone()
+            if not row:
+                return False
+            try:
+                age = int(time.time()) - int(row[0] or 0)
+            except Exception:
+                return False
+            if age > PARK_TTL_SECS:
+                return False
+            try:
+                return int(row[1] or 0) >= PROBE_CODE
+            except Exception:
+                return False
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f" [PROBE] is_freshly_parked: {e}", flush=True)
+        return False
+    return False
+
+
+def park_episode(episode_key: str, attempts: int = 0, reason: str = ""):
+    """Aparca un episodio (frena el bucle encolar->aparcar)."""
+    try:
+        if not episode_key:
+            return
+        conn = _conn()
+        try:
+            _ensure_park_table(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO probe_parked"
+                " (episode_key, parked_at, attempts, reason, code)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (str(episode_key), int(time.time()), int(attempts or 0),
+                 str(reason or "")[:200], PROBE_CODE))
+            conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f" [PROBE] park_episode: {e}", flush=True)
+
+
 def enqueue_title(item_id: str) -> bool:
     """Encola la sonda del primer episodio (idempotente, ~1ms, sin red).
     Solo media de vídeo/audio. MKV sale antes por orden de cola."""
@@ -94,6 +173,8 @@ def enqueue_title(item_id: str) -> bool:
                 msg = None
             if not chat or not msg:
                 return False
+            if is_freshly_parked(key):
+                return False
             conn.execute(
                 "INSERT OR IGNORE INTO media_probe_queue"
                 " (episode_key, item_id, chat_id, msg_id, ext)"
@@ -121,12 +202,15 @@ def prioritize_title(item_id: str) -> bool:
                 "UPDATE media_probe_queue SET priority=1 WHERE item_id=?",
                 (str(item_id),))
             conn.commit()
-            return (cur.rowcount or 0) > 0
+            n = (cur.rowcount or 0) > 0
         finally:
             try:
                 conn.close()
             except Exception:
                 pass
+        if n:
+            print(f" [PROBE-BOOST] {item_id} al frente", flush=True)
+        return n
     except Exception:
         return False
 
@@ -195,6 +279,19 @@ def probe_status(item_id: str) -> str:
                 msg = None
             if not chat or not msg:
                 return "na"
+            if is_freshly_parked(key):
+                return "parked"
+            try:
+                from services.media_probe_worker import is_claimed as _claimed
+                if _claimed(key):
+                    return "probing"
+            except Exception:
+                try:
+                    from tvcat.services.media_probe_worker import is_claimed as _claimed2
+                    if _claimed2(key):
+                        return "probing"
+                except Exception:
+                    pass
             return "pending"
         finally:
             try:
@@ -275,3 +372,62 @@ def media_flags(media: dict) -> dict:
     except Exception:
         pass
     return out
+
+
+def diagnose(item_id: str) -> dict:
+    """Por qué un título no tiene sonda: estado + detalle (ext, chat, msg,
+    en cola, sondado). Para el LED de la hero y diagnóstico."""
+    d = {"state": "na", "ext": "", "has_chat": False, "has_msg": False,
+         "queued": False, "probed": False, "park_reason": ""}
+    try:
+        if not item_id:
+            return d
+        d["state"] = probe_status(item_id)
+        conn = _conn()
+        try:
+            ep = _first_episode(conn, item_id)
+            if not ep:
+                return d
+            e = dict(ep)
+            key = str(e.get("episode_key") or "")
+            ext = _ext_of(e.get("file_name") or e.get("title"))
+            d["ext"] = ext
+            chat = _chat_of(e.get("telegram_link"))
+            try:
+                msg = int(e.get("telegram_msg_id") or 0) or None
+            except Exception:
+                msg = None
+            d["has_chat"] = bool(chat)
+            d["has_msg"] = bool(msg)
+            if key:
+                try:
+                    r = conn.execute(
+                        "SELECT 1 FROM episode_media WHERE episode_key=?",
+                        (key,)).fetchone()
+                    d["probed"] = bool(r)
+                except Exception:
+                    pass
+                try:
+                    r = conn.execute(
+                        "SELECT 1 FROM media_probe_queue WHERE episode_key=?",
+                        (key,)).fetchone()
+                    d["queued"] = bool(r)
+                except Exception:
+                    pass
+                if d["state"] == "parked":
+                    try:
+                        r = conn.execute(
+                            "SELECT reason FROM probe_parked WHERE episode_key=?",
+                            (key,)).fetchone()
+                        if r and r[0]:
+                            d["park_reason"] = str(r[0])[:200]
+                    except Exception:
+                        pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return d

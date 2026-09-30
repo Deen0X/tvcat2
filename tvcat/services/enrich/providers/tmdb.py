@@ -120,6 +120,16 @@ class TMDBProvider:
         temporada (también mandan en el nombre del topic), el póster de la
         temporada queda primero en la lista de covers."""
         air = (s.get("air_date") or "").strip()
+        # Conservar el año de la SERIE antes de sobreescribir: el auto-enrich
+        # compara el año del item (año de la serie) contra el detalle; sin esto
+        # un item de temporada posterior nunca haría match por año.
+        try:
+            if api_data.get("api_year") is not None and "api_series_year" not in api_data:
+                api_data["api_series_year"] = api_data.get("api_year")
+            if api_data.get("api_release_date") and "api_series_release_date" not in api_data:
+                api_data["api_series_release_date"] = api_data.get("api_release_date")
+        except Exception:
+            pass
         if air and air[:4].isdigit():
             api_data["api_season_year"] = int(air[:4])
             api_data["api_year"] = int(air[:4])

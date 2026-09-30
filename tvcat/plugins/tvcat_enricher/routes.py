@@ -614,6 +614,174 @@ def _auto_clean_title(title: str):
         return str(title or "").strip(), None
 
 
+def _auto_norm(s: str) -> str:
+    """Normalizado idéntico a scoring.normalize_final (NFD, ASCII, lower)."""
+    try:
+        import unicodedata as _ud
+        t = "".join(c for c in _ud.normalize("NFD", str(s or ""))
+                    if _ud.category(c) != "Mn")
+        t = t.encode("ascii", "ignore").decode("ascii")
+        t = t.lower().replace("'", "").replace("&", "and")
+        t = re.sub(r"[^a-z0-9\s]", " ", t)
+        return " ".join(t.split()).strip()
+    except Exception:
+        return str(s or "").strip().lower()
+
+
+def _auto_aliases(details: dict, candidate_title: str = "") -> list:
+    """Bolsa de títulos del detalle contra los que debe aparecer el original:
+    api_title, original, en/es/latam, alt_titles (+ genérico por clave)."""
+    out = []
+    try:
+        det = details or {}
+        fixed = ["api_title", "api_original_title", "api_title_en",
+                 "api_title_es", "api_title_latam", "title", "original_title"]
+        for k in fixed:
+            v = det.get(k)
+            if v and str(v).strip():
+                out.append(str(v).strip())
+        raw_alts = det.get("api_alt_titles")
+        if raw_alts:
+            try:
+                alts = json.loads(raw_alts) if isinstance(raw_alts, str) else raw_alts
+                for a in (alts or []):
+                    if a and str(a).strip():
+                        out.append(str(a).strip())
+            except Exception:
+                pass
+        for k, v in det.items():
+            try:
+                kl = str(k).lower()
+                if (("title" in kl or "name" in kl or "alt" in kl
+                        or "original" in kl or "latam" in kl)
+                        and isinstance(v, str) and v.strip()
+                        and v.strip() not in out):
+                    out.append(v.strip())
+            except Exception:
+                continue
+        if candidate_title and str(candidate_title).strip() \
+                and str(candidate_title).strip() not in out:
+            out.append(str(candidate_title).strip())
+    except Exception:
+        pass
+    seen, res = set(), []
+    for a in out:
+        if a and a not in seen:
+            seen.add(a)
+            res.append(a)
+    return res
+
+
+def _auto_strip_season(title: str) -> str:
+    """Quita la coletilla final de temporada para COMPARAR (no para buscar):
+    " - Season 2", "Temporada 2", "Temp 2", "S02", "T2", etc. TMDB devuelve
+    la serie base ("Locke & Key"), nunca "Locke & Key - Season 2", así que
+    la igualdad debe probarse sin ese sufijo. Solo sufijo final; "Rocky 2"
+    (número pelado, sin palabra temporada) NO se toca. El shorthand S/T
+    solo vale en mayúsculas ("S02", "T2"): en minúscula colisiona con
+    palabras ("Ghosts 2" no es una temporada)."""
+    try:
+        t = str(title or "").strip()
+        if not t:
+            return t
+        for _ in range(2):
+            nt = re.sub(r"\s*[-–—:|·]\s*(?:seasons?|temporadas?|temps?\.?|tda\.?|series?)\s*:?\s*\d{1,2}\s*$", "", t, flags=re.IGNORECASE)
+            if nt == t:
+                nt = re.sub(r"\s+(?:seasons?|temporadas?|temps?\.?|tda\.?)\s*:?\s*\d{1,2}\s*$", "", t, flags=re.IGNORECASE)
+            if nt == t:
+                nt = re.sub(r"\s*[-–—:|]\s*[ST]\s*0?\d{1,2}\s*$", "", t)
+            if nt == t:
+                nt = re.sub(r"\s+[ST]\s*0?\d{1,2}\s*$", "", t)
+            if nt == t:
+                break
+            t = nt.strip(" -–—:|·\t")
+            if not t:
+                break
+        return t.strip() or str(title or "").strip()
+    except Exception:
+        return str(title or "").strip()
+
+
+def _auto_season_number(title: str):
+    """Nº de temporada del sufijo final ("Season 2", "Temporada 2", "Temp 2",
+    "S02", "T2"...). None si no hay. Espejo de _auto_strip_season: lo que
+    aquella quita, esta lo devuelve como número."""
+    try:
+        t = str(title or "").strip()
+        if not t:
+            return None
+        m = re.search(r"(?:seasons?|temporadas?|temps?\.?|tda\.?|series?)\s*:?\s*(\d{1,2})\s*$", t, flags=re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"[\s\-_]+[ST]\s*0?(\d{1,2})\s*$", t)
+        if m and t[:m.start()].strip(" \t-_"):
+            return int(m.group(1))
+        return None
+    except Exception:
+        return None
+
+
+def _auto_match_score(a: str, b: str) -> float:
+    """Copia local de scoring.get_match_score (evita import circular en plugin)."""
+    try:
+        na, nb = _auto_norm(a), _auto_norm(b)
+        if not na or not nb:
+            return 0.0
+        if na == nb:
+            return 1.0
+        import re as _re2
+        ma = _re2.search(r"\b(\d+)\b$", na)
+        mb = _re2.search(r"\b(\d+)\b$", nb)
+        ia = int(ma.group(1)) if ma else None
+        ib = int(mb.group(1)) if mb else None
+        if ia != ib:
+            return 0.0
+        if len(na) < 7:
+            return 0.0
+        sa, sb = set(na.split()), set(nb.split())
+        inter = sa.intersection(sb)
+        if not inter:
+            return 0.0
+        return len(inter) / max(len(sa), len(sb))
+    except Exception:
+        return 0.0
+
+
+def _auto_verify_title(clean: str, title_raw: str, details: dict,
+                       candidate_title: str = "", threshold: float = 0.6):
+    """(ok, best, matched): el original debe aparecer en la bolsa de aliases
+    (igualdad normalizada) o solaparse con score >= threshold.
+    La comparativa se hace SIN la coletilla final de temporada ("- Season 2",
+    "Temporada 2", "S02"...): TMDB lista la serie base, no temporadas."""
+    try:
+        aliases = _auto_aliases(details, candidate_title)
+        nclean, nraw = _auto_norm(clean), _auto_norm(title_raw)
+        clean_s, raw_s = _auto_strip_season(clean), _auto_strip_season(title_raw)
+        nclean_s, nraw_s = _auto_norm(clean_s), _auto_norm(raw_s)
+        normed = [_auto_norm(a) for a in aliases]
+        normed_s = [_auto_norm(_auto_strip_season(a)) for a in aliases]
+        for q in (nclean, nraw):
+            if q and q in normed:
+                return True, 1.0, q
+        for q in (nclean_s, nraw_s):
+            if q and (q in normed or q in normed_s):
+                return True, 1.0, q
+        best, best_a = 0.0, ""
+        for a in aliases:
+            try:
+                a_s = _auto_strip_season(a)
+                s = max(_auto_match_score(clean, a), _auto_match_score(title_raw, a),
+                        _auto_match_score(clean_s, a), _auto_match_score(raw_s, a),
+                        _auto_match_score(clean_s, a_s), _auto_match_score(raw_s, a_s))
+            except Exception:
+                s = 0.0
+            if s > best:
+                best, best_a = s, a
+        return (best >= threshold), best, best_a
+    except Exception:
+        return False, 0.0, ""
+
+
 @router.post("/api/enricher/item/{item_id}/auto-enrich")
 async def auto_enrich(item_id: str, request: Request):
     """Auto-enriquecido en 1 clic (botón hero): buscar título+año (fallback
@@ -695,14 +863,70 @@ async def auto_enrich(item_id: str, request: Request):
                 "count": len(cands), "provider": provider,
                 "year_hits": len(year_hits)}
     # Detalle + plantilla (configurada por nombre o fallback) + save local.
+    # El candidato trae el namespace (media_type) que lo produjo: usarlo como
+    # hint (un mismo id numérico existe en movie y en tv; sin hint el detalle
+    # puede pedirse cruzado, ej. tv/49009 Los Goldberg vs movie/49009).
+    # Temporada como el botón Aplicar: la que dedujo el search del sufijo
+    # ("Season 2" → 2), si no la columna BD, si no el propio título. Sin esto
+    # el detalle venía sin fusionar (nº total de temporadas) en vez de la
+    # temporada del item.
     try:
+        _mt_hint = str((chosen or {}).get("media_type") or "")
+        if _mt_hint not in ("movie", "tv"):
+            _mt_hint = ""
+        try:
+            _rs = (res or {}).get("season")
+            req_season = int(_rs) if _rs is not None and str(_rs).strip() not in ("", "None") else None
+        except Exception:
+            req_season = None
+        if req_season is None:
+            req_season = season
+        if req_season is None:
+            req_season = _auto_season_number(clean) or _auto_season_number(title_raw)
         details = await es.get_details(provider, str(chosen.get("id") or ""),
-                                       category, subcategory, season=season)
+                                       category, subcategory, season=req_season,
+                                       media_type_hint=_mt_hint)
     except Exception as e:
         return {"ok": False, "error": str(e)[:200], "query": clean}
     if not details:
         return {"ok": True, "applied": False, "none": True, "query": clean,
                 "provider": provider}
+    # Control mínimo anti-falso-positivo: el título original debe aparecer en la
+    # bolsa de aliases del detalle y el año debe coincidir si tenemos el dato.
+    # Si no pasa → ambiguous (el frontal abre el modal y lanza la búsqueda).
+    # Exentas: queries URL directa (la URL es la autoridad, igual que en search).
+    try:
+        _is_url_q = bool(re.search(
+            r"themoviedb\.org|igdb\.com|google\.|openlibrary\.org|comicvine",
+            str(title_raw or "") + " " + str(clean or ""), re.IGNORECASE))
+    except Exception:
+        _is_url_q = False
+    if not _is_url_q:
+        try:
+            # Año de la SERIE si el detalle fusionó temporada (api_year pasa a
+            # ser el de la temporada tras _merge_season).
+            det_year = str(details.get("api_series_year")
+                            if details.get("api_series_year") is not None
+                            else (details.get("api_year") or ""))[:4]
+        except Exception:
+            det_year = ""
+        if year and det_year and det_year != year:
+            return {"ok": True, "applied": False, "ambiguous": True, "query": clean,
+                    "count": len(cands), "provider": provider,
+                    "year_hits": len(year_hits), "reason": "year_mismatch",
+                    "item_year": year, "candidate_year": det_year,
+                    "candidate": str(chosen.get("title") or "")}
+        try:
+            _ok, _best, _matched = _auto_verify_title(
+                clean, title_raw, details, str(chosen.get("title") or ""))
+        except Exception:
+            _ok, _best, _matched = False, 0.0, ""
+        if not _ok:
+            return {"ok": True, "applied": False, "ambiguous": True, "query": clean,
+                    "count": len(cands), "provider": provider,
+                    "year_hits": len(year_hits), "reason": "title_mismatch",
+                    "score": round(float(_best or 0.0), 3),
+                    "candidate": str(chosen.get("title") or "")}
     try:
         beh = es._load_behavior()
         tpl_name = str((beh or {}).get("auto_enrich_template") or "").strip().lower()

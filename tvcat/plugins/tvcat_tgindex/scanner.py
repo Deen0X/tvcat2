@@ -229,6 +229,8 @@ def _ensure_plugin_schema(conn):
         "ALTER TABLE item_episodes ADD COLUMN video_codec TEXT DEFAULT ''",
         "ALTER TABLE item_episodes ADD COLUMN is_mkv INTEGER DEFAULT 0",
         "ALTER TABLE unified_catalog ADD COLUMN has_mkv INTEGER DEFAULT 0",
+        "ALTER TABLE item_episodes ADD COLUMN is_archive INTEGER DEFAULT 0",
+        "ALTER TABLE unified_catalog ADD COLUMN has_archive INTEGER DEFAULT 0",
         "ALTER TABLE unified_catalog ADD COLUMN rorder INTEGER",
         "ALTER TABLE unified_catalog ADD COLUMN is_collection INTEGER DEFAULT 0",
         "ALTER TABLE unified_catalog ADD COLUMN collection_raw TEXT DEFAULT ''",
@@ -719,10 +721,11 @@ def insert_scanned_item(title, subcategory, category, description, telegram_msg_
         )
         cursor.execute(
             """INSERT INTO item_episodes
-               (item_id, episode_number, season_number, title, telegram_msg_id, telegram_link, duration, file_size, file_name, caption, tg_user_id, is_mkv)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (item_id, episode_number, season_number, title, telegram_msg_id, telegram_link, duration, file_size, file_name, caption, tg_user_id, is_mkv, is_archive)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (cat_id, ep_number, 1, ep_title, msg.id, ep_link, duration, file_size, file_name, msg.text or "", tg_user_id,
-             1 if (file_name or "").lower().endswith(".mkv") else 0),
+             1 if (file_name or "").lower().endswith(".mkv") else 0,
+             1 if (((file_name or "").lower().endswith((".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".tbz", ".tbz2", ".xz", ".txz", ".cab", ".ace", ".arj", ".lzh", ".lha", ".001"))) or bool(re.search(r"\.(r\d\d|z\d\d|part\d+\.rar)$", (file_name or "").lower()))) else 0),
         )
 
     # Normalización: episodios del ítem secuenciales 1..N por telegram_msg_id.
@@ -843,12 +846,13 @@ def _save_scanned_medialine(description, files, is_collection, fallback_link="")
             conn.execute(
                 "INSERT OR IGNORE INTO episode_media"
                 " (episode_key, media_json, media_date, probed_at,"
-                " has_multi_audio, has_subs)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                " has_multi_audio, has_subs, src)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (key, _js.dumps(media, ensure_ascii=False),
                  mdate, int(_t.time()),
                  1 if _fl2.get("multi_audio") else 0,
-                 1 if _fl2.get("has_subs") else 0))
+                 1 if _fl2.get("has_subs") else 0,
+                 "scanline"))
             conn.commit()
             add_log(f"    → medialine {key} (cover, sin sonda)")
         finally:

@@ -11,6 +11,41 @@ window.pluginSystem = (function() {
     var loadedStyles = {};
     var _booting = false;
     var _bootCallbacks = [];
+    // Orden canónico = manifiesto del servidor (estable entre arranques).
+    // Sin esto, el orden lo dictaba la llegada de red de cada script.
+    var manifestOrder = [];
+    var manifestIndex = {};
+
+    function setManifestOrder(names) {
+        manifestOrder = [];
+        manifestIndex = {};
+        for (var i = 0; i < (names || []).length; i++) {
+            var n = names[i];
+            if (!manifestIndex.hasOwnProperty(n)) {
+                manifestIndex[n] = manifestOrder.length;
+                manifestOrder.push(n);
+            }
+        }
+        // Reordenar acumulados según el canónico (por si ya registraron).
+        decoratorsOrder.sort(cmpNames);
+    }
+
+    function cmpNames(a, b) {
+        var ia = manifestIndex.hasOwnProperty(a) ? manifestIndex[a] : 99999;
+        var ib = manifestIndex.hasOwnProperty(b) ? manifestIndex[b] : 99999;
+        if (ia !== ib) return ia - ib;
+        return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+    }
+
+    // Nombres del registry en orden canónico (para iterar en vez de for..in).
+    function registryOrdered() {
+        var names = [];
+        for (var name in registry) {
+            if (registry.hasOwnProperty(name)) names.push(name);
+        }
+        names.sort(cmpNames);
+        return names;
+    }
 
     function registerPlugin(pluginDef) {
         var name = pluginDef.name;
@@ -20,9 +55,11 @@ window.pluginSystem = (function() {
 
         if (pluginDef.type === 'grid-decorator') {
             decoratorsOrder.push(name);
+            decoratorsOrder.sort(cmpNames);
         }
         if (pluginDef.type === 'heropage-action' || pluginDef.type === 'player') {
             heroActions.push(name);
+            heroActions.sort(cmpNames);
         }
     }
 
@@ -32,32 +69,30 @@ window.pluginSystem = (function() {
 
     function getPluginsByType(type) {
         var result = [];
-        for (var name in registry) {
-            if (registry[name].type === type) {
-                result.push(registry[name]);
+        var names = registryOrdered();
+        for (var i = 0; i < names.length; i++) {
+            if (registry[names[i]].type === type) {
+                result.push(registry[names[i]]);
             }
         }
         return sortByPluginOrder(result);
     }
 
     // Ordena los plugins por el orden guardado del usuario (plugins_order.json) para consistencia.
-    // Los plugins sin entrada en pluginOrder van al final, manteniendo su orden relativo de
-    // registro de forma ESTABLE (el sort nativo con índices iguales es inestable y reordena
-    // de forma aleatoria los plugins nuevos no listados).
+    // Base y desempate: orden canónico del manifiesto (estable entre arranques),
+    // nunca el orden de llegada de red.
     function sortByPluginOrder(result) {
         if (pluginOrder.length > 0) {
-            // Registrar orden de aparición original como tie-breaker estable
-            var regIndex = {};
-            for (var i = 0; i < result.length; i++) { regIndex[result[i].name] = i; }
             var indexMap = {};
             for (var i2 = 0; i2 < pluginOrder.length; i2++) { indexMap[pluginOrder[i2]] = i2; }
             result.sort(function(a, b) {
                 var ia = indexMap.hasOwnProperty(a.name) ? indexMap[a.name] : 99999;
                 var ib = indexMap.hasOwnProperty(b.name) ? indexMap[b.name] : 99999;
                 if (ia !== ib) return ia - ib;
-                // Mismo grupo (ambos listados o ambos no listados): mantener orden de registro
-                return (regIndex[a.name] - regIndex[b.name]);
+                return cmpNames(a.name, b.name);
             });
+        } else {
+            result.sort(function(a, b) { return cmpNames(a.name, b.name); });
         }
         return result;
     }
@@ -78,8 +113,9 @@ window.pluginSystem = (function() {
 
     function getActionsForCategory(category) {
         var actions = [];
-        for (var name in registry) {
-            var p = registry[name];
+        var names = registryOrdered();
+        for (var i = 0; i < names.length; i++) {
+            var p = registry[names[i]];
             if ((p.type === 'heropage-action' || p.type === 'player')
                 && p.action_category === category
                 && (!p.applies_to || p.applies_to.length === 0 || p.applies_to.indexOf(category) >= 0)) {
@@ -92,8 +128,9 @@ window.pluginSystem = (function() {
     function getHeroPageActions(itemData) {
         var buttons = [];
         var candidates = [];
-        for (var name in registry) {
-            var p = registry[name];
+        var names = registryOrdered();
+        for (var i = 0; i < names.length; i++) {
+            var p = registry[names[i]];
             if (p.type === 'heropage-action' && p.enabled !== false && p.getHeroButtons) {
                 candidates.push(p);
             }
@@ -132,8 +169,9 @@ window.pluginSystem = (function() {
     function getCollectionPageActions(collectionData) {
         var buttons = [];
         var candidates = [];
-        for (var name in registry) {
-            var p = registry[name];
+        var cnames = registryOrdered();
+        for (var ci = 0; ci < cnames.length; ci++) {
+            var p = registry[cnames[ci]];
             if ((p.type === 'collectionpage-action' || p.type === 'heropage-action') && p.enabled !== false && p.getCollectionButtons) {
                 candidates.push(p);
             }
@@ -241,6 +279,7 @@ window.pluginSystem = (function() {
         getCollectionPageActions: getCollectionPageActions,
         setDecoratorOrder: setDecoratorOrder,
         setPluginOrder: function(order) { pluginOrder = order || []; },
+        setManifestOrder: setManifestOrder,
         loadPluginResources: loadPluginResources,
         setPluginEnabled: setPluginEnabled,
         get registry() { return registry; }

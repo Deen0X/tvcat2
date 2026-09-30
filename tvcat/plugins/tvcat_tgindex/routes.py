@@ -641,9 +641,8 @@ async def add_channel(payload: ChannelRequest):
         _category_map = {"media": "media", "ebook": "kiosko", "audiolibro": "media", "game": "game"}
         category = (payload.category or "").strip() or _category_map.get(content_type, "media")
         custom_sub = payload.custom_subcategory.strip() if payload.custom_subcategory else None
-        # Si no hay subcategoría personalizada, usar topic_name como subcategoría (incluyendo "General")
-        if not custom_sub:
-            custom_sub = (payload.topic_name or "").strip() or None
+        # Vacio es valido: el algoritmo (tag del cover y n. de episodios)
+        # decide Movie/TV Show. El topic_name solo aplica en scan con topic_only.
         auto_refresh = None  # Deshabilitado por ciclos de refresco
         enabled = payload.enabled if payload.enabled is not None else 1
         topic_only = (payload.topic_only or 0) and 1 or 0

@@ -514,20 +514,20 @@ class TelegramService:
         # Carril bulk (control exclusivo del bulk: nadie invoca GetFile/SavePart
         # directo sin slot). Presupuesto configurable, prioridades por uso.
         self._bulk = None
-        self._bulk_base = 12
+        self._bulk_base = 20
 
     def bulk_gate(self) -> BulkGate:
         """Puerta bulk global (lazy, ligada al loop en curso)."""
         if self._bulk is None:
             try:
-                base = int(self._cfg("tg_bulk_inflight", 12))
+                base = int(self._cfg("tg_bulk_inflight", 20))
             except Exception:
-                base = 12
+                base = 20
             self._bulk_base = max(4, min(base, 32))
             self._bulk = BulkGate(self._bulk_base)
         else:
             try:
-                base = int(self._cfg("tg_bulk_inflight", 12))
+                base = int(self._cfg("tg_bulk_inflight", 20))
                 base = max(4, min(base, 32))
                 self._bulk_base = base
                 self._bulk.maybe_recover(base)
@@ -895,7 +895,15 @@ class TelegramService:
             if task is None:
                 continue
             try:
+                _t0 = time.time()
                 await self._execute_task(task)
+                _dt = time.time() - _t0
+                if _dt > 30:
+                    try:
+                        print(f" [TELEGRAM SERVICE] tarea lenta {task.get('action')} ({_dt:.0f}s)",
+                              flush=True)
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f" [TELEGRAM SERVICE] Error en tarea {task.get('action')} : {e}", flush=True)
                 # FloodWait por usuario: cooldown + endurecer + reencolar (presupuesto 3).
@@ -945,6 +953,10 @@ class TelegramService:
             await self._do_download_media(task)
         elif action == "fetch_scan":
             await self._do_fetch_scan(task)
+        elif action == "fetch_message_info":
+            await self._do_fetch_message_info(task)
+        elif action == "download_range":
+            await self._do_download_range(task)
         elif action == "get_entity":
             await self._do_get_entity(task)
         elif action == "get_pinned":
@@ -2202,6 +2214,165 @@ class TelegramService:
         }, priority=PRIORITY_HIGH)
         return await fut
 
+    async def fetch_message_info(self, chat, msg_id: int,
+                                 tg_user_id: int = None,
+                                 client_type: str = None) -> Optional[Dict]:
+        """Info ligera de UN mensaje (sin precache): {date, file_size,
+        has_media} o None. Para sondas que solo necesitan frescura/tamaño."""
+        fut = asyncio.get_event_loop().create_future()
+        async def callback(info):
+            if not fut.done():
+                fut.set_result(info)
+        await self.queue.put({
+            "action": "fetch_message_info",
+            "chat": chat,
+            "msg_id": int(msg_id or 0),
+            "tg_user_id": tg_user_id,
+            "client_type": client_type,
+            "callback": callback
+        }, priority=PRIORITY_NORMAL)
+        return await fut
+
+    async def download_range(self, chat, msg_id: int, offset: int, length: int,
+                             chunk_size: int = 1024 * 1024,
+                             tg_user_id: int = None,
+                             client_type: str = None,
+                             bulk_priority: int = 2,
+                             queue_priority: int = None) -> bytes:
+        """Lee [offset, offset+length) de un documento vía servicio central
+        (cola + throttle + cliente preferido del pool). b"" si falla.
+        queue_priority: PRIORITY_* (default LOW; reproducción usa NORMAL)."""
+        fut = asyncio.get_event_loop().create_future()
+        async def callback(data):
+            if not fut.done():
+                fut.set_result(data if isinstance(data, (bytes, bytearray)) else b"")
+        try:
+            _qp = int(queue_priority) if queue_priority in (
+                PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW) else PRIORITY_LOW
+        except Exception:
+            _qp = PRIORITY_LOW
+        await self.queue.put({
+            "action": "download_range",
+            "chat": chat,
+            "msg_id": int(msg_id or 0),
+            "offset": max(0, int(offset or 0)),
+            "length": max(0, int(length or 0)),
+            "chunk_size": int(chunk_size or 1024 * 1024),
+            "tg_user_id": tg_user_id,
+            "client_type": client_type,
+            "bulk_priority": bulk_priority,
+            "callback": callback
+        }, priority=_qp)
+        return await fut
+
+    async def _do_fetch_message_info(self, task: Dict):
+        chat = task["chat"]
+        msg_id = int(task.get("msg_id") or 0)
+        callback = task.get("callback")
+        client, need_disc = await self._get_temp_or_pool_client(task)
+        _uid = self._user_key(task)
+        try:
+            ctype_task = task.get("client_type") or _preferred_client_type()
+            is_pyro = self._is_pyro(client, ctype_task)
+            ctype = "pyrogram" if is_pyro else "telethon"
+            await self._throttle(_uid)
+            if is_pyro:
+                msg = await client.get_messages(self._pyro_chat_id(chat), msg_id)
+                if isinstance(msg, list):
+                    msg = msg[0] if msg else None
+            else:
+                entity = await client.get_entity(self._to_entity_id(chat))
+                await self._throttle(_uid)
+                msg = await client.get_messages(entity, ids=msg_id)
+            if msg is None:
+                if callback:
+                    await callback(None)
+                return
+            has_media = False
+            fsize = 0
+            try:
+                if is_pyro:
+                    from services.userbot_service import pyro_media as _pm
+                    doc = _pm(msg)
+                    has_media = doc is not None
+                    if doc is not None:
+                        fsize = int(getattr(doc, "file_size", 0) or 0)
+                else:
+                    media = getattr(msg, "media", None)
+                    doc = getattr(media, "document", None) if media else None
+                    if doc is None:
+                        doc = getattr(msg, "document", None)
+                    has_media = doc is not None
+                    if doc is not None:
+                        fsize = int(getattr(doc, "size", 0) or 0)
+            except Exception:
+                pass
+            try:
+                _date = str(getattr(msg, "date", "") or "")
+            except Exception:
+                _date = ""
+            if callback:
+                await callback({"date": _date, "file_size": fsize,
+                                "has_media": has_media, "client_type": ctype})
+        finally:
+            if need_disc:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+    async def _do_download_range(self, task: Dict):
+        chat = task["chat"]
+        msg_id = int(task.get("msg_id") or 0)
+        offset = max(0, int(task.get("offset") or 0))
+        length = max(0, int(task.get("length") or 0))
+        chunk_size = int(task.get("chunk_size") or 1024 * 1024)
+        bulk_priority = int(task.get("bulk_priority") or 2)
+        callback = task.get("callback")
+
+        async def _done(payload):
+            if callback:
+                try:
+                    await callback(payload)
+                except Exception:
+                    pass
+
+        if length <= 0:
+            await _done(b"")
+            return
+        client, need_disc = await self._get_temp_or_pool_client(task)
+        _uid = self._user_key(task)
+        try:
+            ctype_task = task.get("client_type") or _preferred_client_type()
+            is_pyro = self._is_pyro(client, ctype_task)
+            ctype = "pyrogram" if is_pyro else "telethon"
+            await self._throttle(_uid)
+            if is_pyro:
+                msg = await client.get_messages(self._pyro_chat_id(chat), msg_id)
+                if isinstance(msg, list):
+                    msg = msg[0] if msg else None
+            else:
+                entity = await client.get_entity(self._to_entity_id(chat))
+                await self._throttle(_uid)
+                msg = await client.get_messages(entity, ids=msg_id)
+            if msg is None:
+                await _done(b"")
+                return
+            from services import file_transfer as _ft
+            if is_pyro:
+                data = await _ft._pyro_range(client, msg, offset, length,
+                                             chunk_size, bulk_priority)
+            else:
+                data = await _ft._telethon_range(client, msg, offset, length,
+                                                 chunk_size, bulk_priority)
+            await _done(bytes(data or b""))
+        finally:
+            if need_disc:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
     async def _do_fetch_cover(self, task: Dict):
         """Operación cover completa = 1 token: raw exacto (hit 0 llamadas) + descarga.
         Devuelve SIEMPRE dict: {"ok": True, "data": bytes|None} (None = sin foto real)
@@ -3252,19 +3423,25 @@ class TelegramService:
 
     async def fetch_cover_messages(self, channel_id, msg_id: int, topic_id=None,
                                    tg_user_id=None, client_type="telethon",
-                                   session_string=None, api_id=None, api_hash=None) -> list:
+                                   session_string=None, api_id=None, api_hash=None,
+                                   queue_priority: int = None) -> list:
         fut = asyncio.get_event_loop().create_future()
 
         async def callback(result):
             if not fut.done():
                 fut.set_result(result)
+        try:
+            _qp = int(queue_priority) if queue_priority in (
+                PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW) else PRIORITY_NORMAL
+        except Exception:
+            _qp = PRIORITY_NORMAL
         await self.queue.put({
             "action": "fetch_cover_messages", "channel_id": channel_id,
             "msg_id": int(msg_id), "topic_id": topic_id,
             "tg_user_id": tg_user_id, "client_type": client_type,
             "session_string": session_string, "api_id": api_id, "api_hash": api_hash,
             "callback": callback
-        }, priority=PRIORITY_NORMAL)
+        }, priority=_qp)
         return await fut
 
     async def _do_get_file_info(self, task: Dict):
@@ -3368,18 +3545,24 @@ class TelegramService:
 
     async def get_file_info(self, chat, msg_id: int, tg_user_id=None,
                             client_type="telethon",
-                            session_string=None, api_id=None, api_hash=None) -> dict:
+                            session_string=None, api_id=None, api_hash=None,
+                            queue_priority: int = None) -> dict:
         fut = asyncio.get_event_loop().create_future()
 
         async def callback(result):
             if not fut.done():
                 fut.set_result(result)
+        try:
+            _qp = int(queue_priority) if queue_priority in (
+                PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW) else PRIORITY_NORMAL
+        except Exception:
+            _qp = PRIORITY_NORMAL
         await self.queue.put({
             "action": "get_file_info", "chat": chat, "msg_id": int(msg_id),
             "tg_user_id": tg_user_id, "client_type": client_type,
             "session_string": session_string, "api_id": api_id, "api_hash": api_hash,
             "callback": callback
-        }, priority=PRIORITY_NORMAL)
+        }, priority=_qp)
         return await fut
 
     async def _do_copy_message(self, task: Dict):
@@ -3435,12 +3618,18 @@ class TelegramService:
 
     async def copy_message(self, chat, from_chat, msg_id: int, reply_to_msg_id=None,
                            caption=None, tg_user_id=None, client_type="telethon",
-                           session_string=None, api_id=None, api_hash=None) -> int:
+                           session_string=None, api_id=None, api_hash=None,
+                           queue_priority: int = None) -> int:
         fut = asyncio.get_event_loop().create_future()
 
         async def callback(result):
             if not fut.done():
                 fut.set_result(result)
+        try:
+            _qp = int(queue_priority) if queue_priority in (
+                PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW) else PRIORITY_NORMAL
+        except Exception:
+            _qp = PRIORITY_NORMAL
         await self.queue.put({
             "action": "copy_message", "chat": chat, "from_chat": from_chat,
             "msg_id": int(msg_id), "reply_to_msg_id": reply_to_msg_id,
@@ -3448,7 +3637,7 @@ class TelegramService:
             "tg_user_id": tg_user_id, "client_type": client_type,
             "session_string": session_string, "api_id": api_id, "api_hash": api_hash,
             "callback": callback
-        }, priority=PRIORITY_NORMAL)
+        }, priority=_qp)
         return await fut
 
     async def _do_forward_message(self, task: Dict):

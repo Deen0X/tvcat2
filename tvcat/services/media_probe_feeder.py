@@ -43,7 +43,23 @@ _MISSING_WHERE = (
     "(SELECT e2.episode_key FROM item_episodes e2 WHERE "
     "(e2.item_id = uc.item_id OR e2.item_id = CAST(uc.id AS TEXT)) "
     "ORDER BY COALESCE(e2.episode_number, 999999), e2.id LIMIT 1))"
+    " AND NOT EXISTS (SELECT 1 FROM probe_parked p WHERE p.episode_key = "
+    "(SELECT e2.episode_key FROM item_episodes e2 WHERE "
+    "(e2.item_id = uc.item_id OR e2.item_id = CAST(uc.id AS TEXT)) "
+    "ORDER BY COALESCE(e2.episode_number, 999999), e2.id LIMIT 1)"
+    " AND (strftime('%s','now') - p.parked_at) < {ttl} AND p.code >= {code})"
 )
+
+
+def _missing_where():
+    try:
+        from services.media_probe_queue import PARK_TTL_SECS as _ttl, PROBE_CODE as _code
+    except Exception:
+        try:
+            from tvcat.services.media_probe_queue import PARK_TTL_SECS as _ttl, PROBE_CODE as _code
+        except Exception:
+            _ttl, _code = 604800, 2
+    return _MISSING_WHERE.format(ttl=int(_ttl), code=int(_code))
 
 
 def missing_count() -> int:
@@ -51,7 +67,7 @@ def missing_count() -> int:
         conn = _conn()
         try:
             row = conn.execute(
-                "SELECT COUNT(*) FROM unified_catalog uc WHERE " + _MISSING_WHERE
+                "SELECT COUNT(*) FROM unified_catalog uc WHERE " + _missing_where()
             ).fetchone()
             return int(row[0] or 0)
         finally:
@@ -69,7 +85,7 @@ def _candidates(after_id: int, limit: int):
         try:
             return [(int(r["id"]), str(r["item_id"])) for r in conn.execute(
                 "SELECT uc.id, uc.item_id FROM unified_catalog uc WHERE uc.id > ?"
-                " AND " + _MISSING_WHERE + " ORDER BY uc.id ASC LIMIT ?",
+                " AND " + _missing_where() + " ORDER BY uc.id ASC LIMIT ?",
                 (after_id, limit)).fetchall()]
         finally:
             try:
