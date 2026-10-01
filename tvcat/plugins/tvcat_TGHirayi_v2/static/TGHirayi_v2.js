@@ -805,7 +805,7 @@
                 if (dlElapsed) dlMeta.push(dlElapsed);
                 html += '<span style="font-size:11px;color:#60a5fa;">\u2193 Descarga (' + dlMeta.join(' \u2022 ') + ')</span>';
                 html += '<span style="flex:1;"></span>';
-                html += '<span style="font-size:11px;color:#a1a1aa;">' + pctDownload + '%</span>';
+                html += '<span style="font-size:11px;color:#a1a1aa;">' + fmtDlUp(current.download_bytes, current.download_total) + pctDownload + '%</span>';
                 html += '</div>';
                 html += '<div style="background:#27272a;border-radius:4px;height:6px;overflow:hidden;margin-bottom:6px;">';
                 html += '<div style="width:' + pctDownload + '%;height:100%;background:#3b82f6;border-radius:4px;transition:width 0.3s;"></div>';
@@ -820,7 +820,7 @@
                 if (ulElapsed) ulMeta.push(ulElapsed);
                 html += '<span style="font-size:11px;color:#4ade80;">\u2191 Subida (' + ulMeta.join(' \u2022 ') + ')</span>';
                 html += '<span style="flex:1;"></span>';
-                html += '<span style="font-size:11px;color:#a1a1aa;">' + pctUpload + '%</span>';
+                html += '<span style="font-size:11px;color:#a1a1aa;">' + fmtDlUp(current.upload_bytes, current.upload_total) + pctUpload + '%</span>';
                 html += '</div>';
                 html += '<div style="background:#27272a;border-radius:4px;height:6px;overflow:hidden;margin-bottom:4px;position:relative;">';
                 html += '<div style="width:' + pctUpload + '%;height:100%;background:#22c55e;border-radius:4px;transition:width 0.3s;"></div>';
@@ -921,6 +921,18 @@ html += '</div>';
         var mb = b / (1024 * 1024);
         if (mb >= 1) return mb.toFixed(1) + ' MB';
         return (b / 1024).toFixed(1) + ' KB';
+    }
+
+    // "subidos/totales · " a la izquierda del % en barras de cabecera.
+    function fmtDlUp(cur, tot) {
+        try {
+            cur = Number(cur || 0);
+            tot = Number(tot || 0);
+            if (cur <= 0 && tot <= 0) return '';
+            var a = cur > 0 ? fmtBytes(cur) : '0 KB';
+            var b = tot > 0 ? fmtBytes(tot) : '?';
+            return a + '/' + b + ' · ';
+        } catch (e) { return ''; }
     }
 
     // ─── Helper para renderizar fila de job ───
@@ -1109,6 +1121,16 @@ html += '</div>';
             h += '<span>Next:</span>';
             h += '<input type="text" class="tgcopy2-next-input" value="' + nextVal + '" onfocus="this.select()" onchange="window._tgcopy2SetNext(\'' + j.id + '\',this.value)" onkeydown="if(event.key===\'Enter\'){this.blur();return false;}" style="width:52px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
             h += '<span>Audio:</span><input type="text" list="tgcopy2-langs" class="tgcopy2-norm-input" value="' + audioVal + '" placeholder="original" onchange="window._tgcopy2SetNorm(\'' + j.id + '\',\'audio_lang\',this.value)" style="width:64px;background:#18181b;border:1px solid #3f3f46;color:#f4f4f5;border-radius:4px;padding:1px 4px;font-size:11px;">';
+            // Tamaño del fichero original (GB sin decimales; tooltip con el valor exacto).
+            try {
+                var _fszB = Number(j.file_size || j.download_total || 0);
+                if (_fszB > 0) {
+                    var _fszGB = _fszB / (1024 * 1024 * 1024);
+                    var _fszLbl = (_fszGB >= 1) ? (Math.round(_fszGB) + ' GB') : (Math.round(_fszB / (1024 * 1024)) + ' MB');
+                    var _fszTip = _fszB.toLocaleString('en-US').replace(/,/g, '.') + ' bytes (' + _fszGB.toFixed(2) + ' GB)';
+                    h += '<span title="' + _fszTip.replace(/"/g, '&quot;') + '" style="color:#a1a1aa;">(' + _fszLbl + ')</span>';
+                }
+            } catch (_eFsz) {}
             h += '</div>';
         }
         // Archive protegido con contraseña: campo password + reintentar

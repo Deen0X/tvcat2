@@ -625,8 +625,18 @@ async def get_active_client(client_type: str = None) -> 'UserbotClient':
                         await _asyncio.wait_for(c.connect(), timeout=30)
                     except (_asyncio.TimeoutError, TimeoutError) as e:
                         print(f" [USERBOT] Reconnect {client_type} colgado (30s), se devuelve stale: {e}")
+                        try:
+                            from services import watchdog_service as _wd3
+                            _wd3.record("reconnect_fail", "%s colgado 30s" % client_type)
+                        except Exception:
+                            pass
                     except Exception as e:
                         print(f" [USERBOT] Reconnect fallido {client_type}: {e}")
+                        try:
+                            from services import watchdog_service as _wd4
+                            _wd4.record("reconnect_fail", "%s: %s" % (client_type, str(e)[:120]))
+                        except Exception:
+                            pass
                 return c
         sess = get_active_session()
         if sess and sess.get("client_type") == client_type:

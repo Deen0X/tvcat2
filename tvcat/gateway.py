@@ -391,7 +391,7 @@ CORE_DIR = os.path.join(BASE_DIR, "core")
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
 DB_PATH = os.path.join(BASE_DIR, "data", "tvcat.db")
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "tvcat_config.json")
-__version__ = "2.2"
+__version__ = "2.3"
 __codename__ = "SoulCalibur DC"
 
 from services.translate_service import xTranslate, load_translations
@@ -651,6 +651,13 @@ async def lifespan(app_instance):
         _spawn(_mpf_run())
     except Exception as _e_mpf:
         print(f" [PROBE-FEED] no iniciado: {_e_mpf}")
+    # Watchdog de salud Telegram + auto-reinicio de emergencia (observa
+    # siempre; solo reinicia si está armado en ajustes + en ventana + cooldown).
+    try:
+        from services.watchdog_service import run as _wd_run
+        _spawn(_wd_run())
+    except Exception as _e_wd:
+        print(f" [WATCHDOG] no iniciado: {_e_wd}")
     print(f" [TVCAT2] Listo. Plugins cargados: {len(_plugin_loader.registry)}")
     yield
     print(" [TVCAT2] Apagando...")
@@ -8692,6 +8699,26 @@ async def admin_restart(request: Request):
             sys.exit(1)
     asyncio.create_task(_do_restart())
     return {"success": True, "message": "Reiniciando..."}
+
+@app.get(api_url("/api/watchdog/status"))
+async def watchdog_status(request: Request):
+    from services.auth_service import get_session
+    session = get_session(request.cookies.get("tvcat_session",""))
+    if not session or session.get("role") != "admin":
+        raise HTTPException(403, "Solo admin")
+    try:
+        from services import watchdog_service as _wd
+        pending = 0
+        try:
+            from services.telegram_service import get_telegram_service as _gts
+            q = getattr(_gts(), "queue", None)
+            if q is not None and hasattr(q, "qsize"):
+                pending = int(q.qsize() or 0)
+        except Exception:
+            pending = 0
+        return _wd.status(pending)
+    except Exception as e:
+        raise HTTPException(500, str(e)[:200])
 
 @app.post(api_url("/api/admin/restart-custom"))
 async def admin_restart_custom(request: Request):

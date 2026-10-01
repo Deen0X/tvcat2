@@ -898,6 +898,11 @@ class TelegramService:
                 _t0 = time.time()
                 await self._execute_task(task)
                 _dt = time.time() - _t0
+                try:
+                    from services import watchdog_service as _wd
+                    _wd.note_completion()
+                except Exception:
+                    pass
                 if _dt > 30:
                     try:
                         print(f" [TELEGRAM SERVICE] tarea lenta {task.get('action')} ({_dt:.0f}s)",
@@ -906,6 +911,12 @@ class TelegramService:
                         pass
             except Exception as e:
                 print(f" [TELEGRAM SERVICE] Error en tarea {task.get('action')} : {e}", flush=True)
+                try:
+                    from services import watchdog_service as _wd2
+                    _wd2.record(_wd2.classify_error(e),
+                                "%s: %s: %s" % (task.get("action"), type(e).__name__, str(e)[:120]))
+                except Exception:
+                    pass
                 # FloodWait por usuario: cooldown + endurecer + reencolar (presupuesto 3).
                 # Sin sleep global: wait_ready salta los usuarios en cooldown y el resto fluye.
                 _is_flood = False

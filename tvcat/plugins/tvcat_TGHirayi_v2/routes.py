@@ -52,6 +52,9 @@ _worker_running = False
 # tocar todos los chequeos existentes.
 _WORKER_STATES = ("activa", "pausada", "detenida", "detenida_plus")
 _worker_state = "pausada"
+# La cola se detiene entera si pyro no está (sin fallback a telethon para
+# >1.9GB, pausar jobs sueltos no sirve). Solo la automatización la reanuda.
+_paused_for_pyro = False
 
 
 def _set_worker_state(state: str) -> str:
@@ -730,10 +733,9 @@ except Exception:
 _TERMINAL_STATUSES = ("completed", "error", "skipped")
 
 # Umbral a partir del cual un fichero SOLO puede subirse con Pyrogram
-# (Telethon no sube >2GB; 1.9GB deja margen). Jobs con algún fichero por
-# encima se pausan si no hay sesión Pyrogram válida (no bloquean la cola).
+# (Telethon no sube >2GB; 1.9GB deja margen). Sin pyro se detiene la cola
+# entera (no hay fallback: pausar jobs sueltos no sirve).
 _PYRO_REQUIRED_BYTES = int(1.9 * 1024 * 1024 * 1024)
-_PYRO_PAUSE_TEXT = "Pausado: sin sesión Pyrogram válida (fichero >1.9GB)"
 
 # Subcadenas de error transitorio de cliente (merecen reintento del episodio
 # con refresh + backoff en vez de abortar el job).
@@ -1200,35 +1202,17 @@ async def _pyro_available(timeout: float = 15.0) -> bool:
         return False
 
 
-def _pause_job_for_pyro(job: dict, max_bytes: int = 0):
-    """Pausa un job por falta de Pyrogram sin bloquear la cola.
-    Usa el flag `paused` (lo único que respeta el picker) + `paused_pyro`
-    para distinguirlo de la pausa manual y poder auto-reanudarlo."""
-    job["paused"] = True
-    job["paused_pyro"] = True
-    job["needs_pyro"] = True
-    job["status"] = "paused"
-    txt = _PYRO_PAUSE_TEXT
-    try:
-        if max_bytes and float(max_bytes) > 0:
-            txt = ("Pausado: sin sesión Pyrogram válida "
-                   f"({float(max_bytes) / (1024 ** 3):.2f}GB > 1.9GB)")
-    except Exception:
-        pass
-    job["status_text"] = txt
-    print(f"[TGHirayi_v2] Job {job.get('id')} pausado por falta de Pyrogram", flush=True)
-
-
 async def _refresh_pyro_paused_jobs(db: dict):
-    """Backfill de `needs_pyro` + pausar/reanudar por disponibilidad de pyro.
-    Una sola comprobación de pyro por pasada. No toca jobs en `processing`
-    (podrían estar a mitad de subida) ni pausas manuales (sin flag)."""
+    """Backfill de `needs_pyro` + parada/reanudación de la COLA por pyro.
+    Sin fallback a telethon (>1.9GB imposible), pausar jobs sueltos no sirve:
+    si pyro no está, se detiene la cola entera (pausada) y se reanuda sola al
+    volver. La pausa manual manda: solo auto-pausa en activa y solo reanuda lo
+    que pausó ella (flag `_paused_for_pyro`)."""
+    global _paused_for_pyro
     try:
         cands = [j for j in (db.get("queue", []) or [])
                  if isinstance(j, dict) and j.get("status") not in _TERMINAL_STATUSES]
     except Exception:
-        return
-    if not cands:
         return
     changed = False
     for j in cands:
@@ -1239,35 +1223,50 @@ async def _refresh_pyro_paused_jobs(db: dict):
             except Exception:
                 j["needs_pyro"] = False
             changed = True
-    to_pause = [j for j in cands
-                if j.get("needs_pyro") and not j.get("paused_pyro")
-                and not j.get("paused") and j.get("status") == "queued"]
-    to_resume = [j for j in cands if j.get("paused_pyro")]
-    if not to_pause and not to_resume:
-        if changed:
-            try:
-                _save_db(db)
-            except Exception:
-                pass
-        return
-    pyro_ok = await _pyro_available()
-    for j in to_pause:
-        if not pyro_ok:
-            _pause_job_for_pyro(j)
-            changed = True
-    for j in to_resume:
-        if pyro_ok:
-            j["paused"] = False
+        # Migración: la pausa por job ya no existe; liberar restos antiguos.
+        if j.get("paused_pyro"):
             j["paused_pyro"] = False
-            j["status"] = "queued"
-            j["status_text"] = "En cola"
+            if j.get("status") == "paused":
+                j["paused"] = False
+                j["status"] = "queued"
+                j["status_text"] = "En cola"
+                print(f"[TGHirayi_v2] Job {j.get('id')} liberado de pausa pyro (ahora para la cola)", flush=True)
             changed = True
-            print(f"[TGHirayi_v2] Job {j.get('id')} reanudado (Pyrogram disponible)", flush=True)
+    pyro_ok = await _pyro_available()
+    if not pyro_ok:
+        if _worker_state == "activa" and not _paused_for_pyro:
+            _set_worker_state("pausada")
+            _paused_for_pyro = True
+            changed = True
+            print("[TGHirayi_v2] Cola detenida: sin sesión Pyrogram válida (ficheros >1.9GB). Se reanudará sola.", flush=True)
+    else:
+        if _paused_for_pyro:
+            _paused_for_pyro = False
+            if _worker_state == "pausada":
+                _set_worker_state("activa")
+            changed = True
+            print("[TGHirayi_v2] Pyrogram disponible: cola reanudada", flush=True)
     if changed:
         try:
             _save_db(db)
         except Exception:
             pass
+
+
+def _stop_queue_for_pyro(reason: str = ""):
+    """Detiene la cola entera por falta de pyro (auto; se reanuda sola al
+    volver). Sin fallback a telethon, pausar jobs sueltos no sirve."""
+    global _paused_for_pyro
+    try:
+        if _worker_state == "activa" and not _paused_for_pyro:
+            _set_worker_state("pausada")
+            _paused_for_pyro = True
+            _extra = (" (" + str(reason or "")[:120] + ")") if reason else ""
+            print("[TGHirayi_v2] Cola detenida: sin sesión Pyrogram válida%s. Se reanudará sola." % _extra, flush=True)
+            return True
+        return False
+    except Exception:
+        return False
 
 
 async def _refresh_pyrogram_client():
@@ -3301,8 +3300,9 @@ async def toggle_worker(request: Request):
     session = _session_user(request)
     if not session or session["role"] != "admin":
         raise HTTPException(403, "Solo admin")
-    global _worker_paused, _worker_task, _worker_running, _current_job, _worker_gen
+    global _worker_paused, _worker_task, _worker_running, _current_job, _worker_gen, _paused_for_pyro
     _set_worker_state("activa" if _worker_paused else "pausada")
+    _paused_for_pyro = False  # orden manual: la automatización no reanuda
     if not _worker_paused:
         # Al reanudar: refrescar pausas por Pyrogram (misma pasada que al arrancar).
         try:
@@ -3330,8 +3330,9 @@ async def set_worker_state(request: Request):
     except Exception:
         body = {}
     state = str((body or {}).get("state") or "pausada")
-    global _worker_task, _worker_running, _current_job, _worker_gen
+    global _worker_task, _worker_running, _current_job, _worker_gen, _paused_for_pyro
     _set_worker_state(state)
+    _paused_for_pyro = False  # orden manual: la automatización no reanuda
     if _worker_state == "activa":
         try:
             await _refresh_pyro_paused_jobs(_load_db())
@@ -3540,9 +3541,18 @@ async def _start_worker(gen: int = 0):
         print(f" [TGHirayi_v2] Error en refresh pyro: {e}", flush=True)
 
     try:
+        _pyro_recheck = 0.0
         while _worker_running:
             if _worker_paused:
                 await asyncio.sleep(1)
+                # Si la paró la automatización por pyro, re-chequear cada 60s
+                # para reanudar sola al volver (la pausa manual no se toca).
+                try:
+                    if _paused_for_pyro and time.time() - _pyro_recheck >= 60:
+                        _pyro_recheck = time.time()
+                        await _refresh_pyro_paused_jobs(_load_db())
+                except Exception:
+                    pass
                 continue
 
             db = _load_db()
@@ -3794,7 +3804,9 @@ async def _process_job(job: dict, db: dict):
             job["needs_pyro"] = True
             _persist_job(job)
             if not await _pyro_available():
-                _pause_job_for_pyro(job, _max_b)
+                _stop_queue_for_pyro("fichero >1.9GB sin pyro")
+                job["status"] = "queued"
+                job["status_text"] = "En cola (esperando Pyrogram)"
                 _persist_job(job)
                 return
 
@@ -4196,6 +4208,13 @@ async def _process_job(job: dict, db: dict):
                 job["download_progress"] = pct
                 job["download_episode"] = dl_ep["n"]
                 try:
+                    job["download_bytes"] = int(current)
+                    job["download_total"] = int(total_bytes)
+                    if int(total_bytes or 0) > 0:
+                        job["file_size"] = int(total_bytes)
+                except Exception:
+                    pass
+                try:
                     job["_dl_tick"] = time.time()
                 except Exception:
                     pass
@@ -4205,6 +4224,11 @@ async def _process_job(job: dict, db: dict):
             else:
                 job["upload_progress"] = pct
                 job["upload_episode"] = ul_ep["n"]
+                try:
+                    job["upload_bytes"] = int(current)
+                    job["upload_total"] = int(total_bytes)
+                except Exception:
+                    pass
                 txt = f"Subiendo ep.{_disp_ep(ul_ep['n'])} {pct}%"
                 if dl_ep["n"] and dl_ep["n"] != ul_ep["n"]:
                     txt += f" · Descargando ep.{_disp_ep(dl_ep['n'])}"
@@ -4734,8 +4758,10 @@ async def _process_job(job: dict, db: dict):
         traceback.print_exc()
         if "requiere Pyrogram" in str(e):
             # Red de seguridad (p. ej. archives: el tamaño final solo se sabe
-            # tras extraer): pausar con flag en vez de error para no bloquear.
-            _pause_job_for_pyro(job)
+            # tras extraer): detener la cola en vez de error para no bloquear.
+            _stop_queue_for_pyro("requiere Pyrogram en proceso")
+            job["status"] = "queued"
+            job["status_text"] = "En cola (esperando Pyrogram)"
             job["error"] = str(e)[:300]
             _persist_job(job)
         elif _is_auth_dead(str(e)):

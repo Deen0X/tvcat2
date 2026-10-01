@@ -578,6 +578,46 @@
                         </div>
                     </div>
 
+                    <!-- 4b. Watchdog auto-reinicio (colapsable) -->
+                    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden;">
+                        <div onclick="toggleUserbotCollap('watchdog');refreshWatchdogStatus()" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;background:var(--bg-card);user-select:none;">
+                            <h4 style="margin:0;font-size:0.85rem;">🛟 Watchdog auto-reinicio</h4>
+                            <span id="collap-watchdog-ind" style="font-size:0.7rem;transition:transform 0.2s;display:inline-block;">▼</span>
+                        </div>
+                        <div id="collap-watchdog-body" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+                            <div id="watchdog-status" style="font-size:0.75rem;color:var(--text-secondary);">Sin datos (pulsa para actualizar).</div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="OFF = solo observa y registra (recomendado al principio). ON = reinicia solo ante fallo sistémico.">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Armado:</label>
+                                <input type="checkbox" id="setting-watchdog-enabled" style="accent-color:var(--accent);">
+                                <span style="font-size:0.72rem;color:var(--text-secondary);">reinicio automático de emergencia</span>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Solo se reinicia dentro de este rango (hora del servidor). Admite cruce de medianoche, ej. 02:00-06:00.">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Horas permitidas:</label>
+                                <input type="text" id="setting-watchdog-hours" value="02:00-06:00" placeholder="02:00-06:00" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Nº de fallos de transporte en la ventana para disparar.">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Fallos para disparar:</label>
+                                <input type="number" id="setting-watchdog-threshold" min="2" max="100" step="1" value="8" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Ventana de conteo de fallos (minutos).">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Ventana (min):</label>
+                                <input type="number" id="setting-watchdog-window" min="2" max="120" step="1" value="15" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Cola con trabajo pendiente y cero completadas durante estos minutos (+ algún fallo) también dispara.">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Cola parada (min):</label>
+                                <input type="number" id="setting-watchdog-stall" min="2" max="180" step="1" value="20" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Tiempo mínimo entre auto-reinicios (minutos). Evita bucles.">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Enfriamiento (min):</label>
+                                <input type="number" id="setting-watchdog-cooldown" min="10" max="1440" step="1" value="180" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                            <div style="display:flex;align-items:center;gap:8px;" title="Comando de reinicio de emergencia (mismo que Reinicio custom).">
+                                <label style="font-size:0.75rem;color:var(--text-secondary);min-width:140px;">Comando reinicio:</label>
+                                <input type="text" id="setting-watchdog-cmd" value="docker restart tvcat2" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.8rem;">
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- 5. Login con Google (colapsable, oculto por defecto) -->
                     <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden;">
                         <div onclick="toggleUserbotCollap('google')" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;background:var(--bg-card);user-select:none;">
@@ -914,18 +954,12 @@
                             <div style="flex:1 1 200px;display:flex;flex-direction:column;align-items:flex-start;gap:10px;min-width:200px;">
                                 <div style="font-size:1.1rem;font-weight:700;">TVCat2 — Telegram Visual Catalog</div>
                                 <a href="https://github.com/Deen0X/tvcat2" target="_blank" rel="noopener" style="font-size:0.85rem;color:var(--accent);text-decoration:none;">dnx.projects</a>
-                                <button id="about-version-btn" class="btn-secondary" onclick="toggleAboutUpdate()" title="Pulsa para ver opciones de actualización" style="padding:8px 18px;font-size:0.85rem;">v…</button>
-                                <div id="about-update-box" style="display:none;width:100%;border:1px solid var(--border-color);border-radius:8px;padding:12px;box-sizing:border-box;">
-                                    <div id="about-update-info" style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:10px;">Comprobando versión…</div>
-                                    <label style="display:flex;align-items:center;gap:8px;font-size:0.8rem;cursor:pointer;margin-bottom:10px;">
-                                        <input type="checkbox" id="about-update-dev" style="accent-color:var(--accent);"> Descargar versión en desarrollo (rama main)
-                                    </label>
-                                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                                        <button class="btn-secondary" onclick="checkAboutUpdate()" style="padding:6px 12px;font-size:0.8rem;">Comprobar actualización</button>
-                                        <button class="btn-primary" onclick="applyAboutUpdate()" style="padding:6px 12px;font-size:0.8rem;" disabled>Descargar y actualizar</button>
-                                    </div>
-                                    <div id="about-update-status" style="font-size:0.75rem;color:var(--text-secondary);margin-top:8px;"></div>
-                                </div>
+                                <span id="about-version-txt" style="font-size:0.85rem;color:var(--text);">v…</span>
+                                <button class="btn-secondary" onclick="checkAboutUpdate()" style="padding:6px 12px;font-size:0.8rem;">Comprobar actualización</button>
+                                <div id="about-update-info" onclick="showAboutUpdateDetail()" title="Pulsa para ver el detalle" style="font-size:0.8rem;color:var(--text-secondary);cursor:pointer;">Sin comprobar.</div>
+                                <button class="btn-primary" id="about-apply-btn" onclick="applyAboutUpdate('stable')" style="padding:6px 12px;font-size:0.8rem;" disabled>Descargar y actualizar</button>
+                                <button class="btn-secondary" onclick="applyAboutUpdate('dev')" style="padding:6px 12px;font-size:0.8rem;">Descargar versión en desarrollo</button>
+                                <div id="about-update-status" style="font-size:0.75rem;color:var(--text-secondary);margin-top:8px;"></div>
                             </div>
                         </div>
                         <div id="about-md-box" style="width:100%;max-height:300px;overflow-y:auto;text-align:left;font-size:0.8rem;line-height:1.5;color:var(--text-secondary);border:1px solid var(--border-color);border-radius:8px;padding:12px 14px;box-sizing:border-box;background:rgba(0,0,0,0.2);"></div>

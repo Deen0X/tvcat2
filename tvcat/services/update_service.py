@@ -8,7 +8,10 @@ Flujo apply: descargar a staging -> verificar ZIP -> backup con timestamp ->
 copiar encima excluyendo protegidos (DBs activas, config, sesiones, logs) ->
 registrar versión -> restart del proceso (lo supervisa el launcher/Docker).
 
-Sin tokens: el repo es público (API 60 req/h, de sobra para checks manuales).
+Sin tokens: el repo es público. El check estable evita api.github.com
+(rate limit de 60 req/h compartido) resolviendo la redirección de
+github.com/.../releases/latest -> .../tag/<tag>; solo si eso falla se
+usa la API como último recurso.
 """
 import io
 import json
@@ -80,6 +83,47 @@ def _ver_tuple(v: str):
         return ()
 
 
+def _latest_tag_redirect():
+    """Tag de la última release SIN api.github.com: la URL
+    github.com/<owner>/<repo>/releases/latest redirige (302) a
+    .../releases/tag/<tag>. Sin releases responde 404. Lanza en fallo
+    de red para distinguirlo del 'sin releases'."""
+    import httpx
+    from urllib.parse import unquote
+    with httpx.Client(timeout=20, follow_redirects=True,
+                      headers={"User-Agent": "TVCat2-updater"}) as c:
+        r = c.get("https://github.com/%s/%s/releases/latest"
+                  % (GITHUB_OWNER, GITHUB_REPO))
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        m = re.search(r"/releases/tag/([^/?#]+)", str(r.url))
+        if m:
+            return unquote(m.group(1)) or None
+        return None
+
+
+def _release_notes(tag: str) -> tuple:
+    """(zip_url, notes) de una release por su tag, intentando no usar la
+    API (solo como último recurso)."""
+    # Sin API no hay asset list: el ZIP se resuelve por patrón estándar.
+    zip_url = ("https://github.com/%s/%s/archive/refs/tags/%s.zip"
+               % (GITHUB_OWNER, GITHUB_REPO, tag))
+    notes = ""
+    try:
+        r = _http_get(API + "/releases/tags/" + tag)
+        rel = r.json() or {}
+        notes = rel.get("body") or ""
+        for a in (rel.get("assets") or []):
+            n = str(a.get("name") or "")
+            if n.lower().endswith(".zip"):
+                zip_url = a.get("browser_download_url") or zip_url
+                break
+    except Exception:
+        pass
+    return zip_url, notes
+
+
 def _http_get(url: str, timeout: int = 20):
     import httpx
     with httpx.Client(timeout=timeout, follow_redirects=True,
@@ -113,24 +157,31 @@ def check(channel: str = "stable") -> dict:
         return {"ok": True, "current": cur["version"], "codename": cur.get("codename", ""),
                 "remote": sha or None, "update": bool(sha and sha != local_sha)}
     # stable: última release; sin releases => al día (D4).
+    # Sin api.github.com (rate limit): redirección web; la API solo como
+    # último recurso para notas/assets.
+    tag = None
+    via_redirect = False
     try:
-        r = _http_get(API + "/releases/latest")
-        rel = r.json() or {}
-    except Exception as e:
-        return {"ok": False, "error": "Sin acceso a GitHub: %s" % str(e)[:120],
-                "current": cur["version"], "remote": None, "update": False}
-    tag = str(rel.get("tag_name") or "")
-    assets = rel.get("assets") or []
-    zip_url = ""
-    for a in assets:
-        n = str(a.get("name") or "")
-        if n.lower().endswith(".zip"):
-            zip_url = a.get("browser_download_url") or ""
-            break
+        tag = _latest_tag_redirect()
+        via_redirect = True
+    except Exception:
+        tag = None
+    if tag is None and not via_redirect:
+        try:
+            r = _http_get(API + "/releases/latest")
+            rel = r.json() or {}
+            tag = str(rel.get("tag_name") or "") or None
+        except Exception as e:
+            return {"ok": False, "error": "Sin acceso a GitHub",
+                    "current": cur["version"], "remote": None, "update": False}
+    if tag is None:
+        return {"ok": True, "current": cur["version"], "codename": cur.get("codename", ""),
+                "remote": None, "update": False}
+    zip_url, notes = _release_notes(tag)
     rv, cv = _ver_tuple(tag), _ver_tuple(cur["version"])
     upd = bool(rv and cv and rv > cv)
     return {"ok": True, "current": cur["version"], "codename": cur.get("codename", ""),
-            "remote": tag or None, "notes": rel.get("body") or "",
+            "remote": tag or None, "notes": notes,
             "zip_url": zip_url, "update": upd}
 
 

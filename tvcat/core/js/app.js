@@ -743,8 +743,43 @@ function loadUserbotConfig() {
             if (blo) blo.value = settings.tg_buf_low || '24';
             var bhi = document.getElementById('setting-tg-buf-high');
             if (bhi) bhi.value = settings.tg_buf_high || '60';
+            var wde = document.getElementById('setting-watchdog-enabled');
+            if (wde) wde.checked = String(settings.watchdog_enabled || '0') === '1';
+            var wdh = document.getElementById('setting-watchdog-hours');
+            if (wdh && settings.watchdog_hours) wdh.value = settings.watchdog_hours;
+            var wdt = document.getElementById('setting-watchdog-threshold');
+            if (wdt && settings.watchdog_fail_threshold) wdt.value = settings.watchdog_fail_threshold;
+            var wdw = document.getElementById('setting-watchdog-window');
+            if (wdw && settings.watchdog_window_min) wdw.value = settings.watchdog_window_min;
+            var wds = document.getElementById('setting-watchdog-stall');
+            if (wds && settings.watchdog_stall_min) wds.value = settings.watchdog_stall_min;
+            var wdc = document.getElementById('setting-watchdog-cooldown');
+            if (wdc && settings.watchdog_cooldown_min) wdc.value = settings.watchdog_cooldown_min;
+            var wdcmd = document.getElementById('setting-watchdog-cmd');
+            if (wdcmd && settings.watchdog_restart_cmd) wdcmd.value = settings.watchdog_restart_cmd;
         }
     });
+
+    window.refreshWatchdogStatus = function() {
+        var box = document.getElementById('watchdog-status');
+        if (!box) return;
+        window.API.ajax({
+            url: '/api/watchdog/status',
+            success: function(r) {
+                if (!r || !r.ok) { box.textContent = 'Sin datos.'; return; }
+                var bits = [];
+                bits.push(r.enabled ? 'ARMADO' : 'observando (no armado)');
+                bits.push(r.in_window ? 'en ventana' : 'fuera de ventana');
+                bits.push('docker: ' + ((r.docker && r.docker.ok) ? 'OK' : 'NO'));
+                if (r.would_fire) bits.push('DISPARARÍA AHORA: ' + (r.fire_reason || ''));
+                if (r.last_fire) bits.push('último: ' + r.last_fire + ' (' + (r.last_reason || '') + ')');
+                var c = r.counts_15m || {};
+                bits.push('fallos 15m: T' + (c.transport_fail || 0) + '/R' + (c.reconnect_fail || 0) + '/F' + (c.flood || 0));
+                box.textContent = bits.join(' · ');
+            },
+            error: function() { box.textContent = 'Sin datos.'; }
+        });
+    };
 
     // Cargar configuración de Google (client_id/secret/redirect del sistema)
     window.API.ajax({
@@ -1146,64 +1181,69 @@ function loadUserbotConfig() {
         });
     };
     window.loadAboutVersion = function() {
-        var btn = document.getElementById('about-version-btn');
-        if (!btn) return;
+        var txt = document.getElementById('about-version-txt');
+        if (!txt) return;
         window.API.ajax({
             url: '/api/server/info',
             success: function(r) {
                 var v = (r && r.version) || '?';
                 var c = (r && r.codename) || '';
-                btn.textContent = 'v' + v + (c ? ' ' + c : '');
+                txt.textContent = 'v' + v + (c ? ' ' + c : '');
             },
-            error: function() { btn.textContent = 'v?'; }
+            error: function() { txt.textContent = 'v?'; }
         });
     };
-    window.toggleAboutUpdate = function() {
-        var box = document.getElementById('about-update-box');
-        if (!box) return;
-        var show = box.style.display === 'none' || !box.style.display;
-        box.style.display = show ? 'block' : 'none';
-        if (show) window.checkAboutUpdate();
+    window._aboutUpdateDetail = null;
+    window.showAboutUpdateDetail = function() {
+        var d = window._aboutUpdateDetail;
+        if (!d) return;
+        var ov = document.createElement('div');
+        ov.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box;';
+        ov.onclick = function() { try { ov.parentNode.removeChild(ov); } catch (e) {} };
+        var box = document.createElement('div');
+        box.style.cssText = 'background:#111113;border:1px solid var(--border-color,#3f3f46);border-radius:10px;max-width:520px;width:100%;padding:16px;box-sizing:border-box;font-size:0.8rem;color:var(--text);white-space:pre-wrap;word-break:break-word;';
+        box.textContent = d;
+        ov.appendChild(box);
+        document.body.appendChild(ov);
     };
+    window.toggleAboutUpdate = function() { window.checkAboutUpdate(); };
     window.checkAboutUpdate = function() {
         var info = document.getElementById('about-update-info');
-        var dev = document.getElementById('about-update-dev');
-        var applyBtn = document.querySelector('#about-update-box .btn-primary');
+        var applyBtn = document.getElementById('about-apply-btn');
         if (info) info.textContent = 'Comprobando versión…';
         if (applyBtn) applyBtn.disabled = true;
-        var channel = (dev && dev.checked) ? 'dev' : 'stable';
+        window._aboutUpdateDetail = null;
         window.API.ajax({
-            url: '/api/update/check?channel=' + channel,
+            url: '/api/update/check?channel=stable',
             success: function(r) {
                 if (!r) return;
-                if (!r.ok) {
-                    if (channel === 'dev') {
-                        if (info) info.textContent = 'No se pudo comprobar (' + (r.error || '?') + '). Puedes forzar la descarga directa igualmente.';
-                        if (applyBtn) applyBtn.disabled = false;
-                    } else {
-                        if (info) info.textContent = 'No se pudo comprobar: ' + (r.error || '?');
-                        if (applyBtn) applyBtn.disabled = true;
-                    }
-                    return;
+                var detail = 'Actual: v' + (r.current || '?') +
+                    '\nRemota: ' + (r.remote || '—') +
+                    (r.notes ? '\n\n' + r.notes : '') +
+                    (r.error ? '\n\n' + r.error : '');
+                window._aboutUpdateDetail = detail;
+                if (r.ok && r.update) {
+                    if (info) info.textContent = 'Hay actualización: ' + (r.remote || '');
+                    if (applyBtn) applyBtn.disabled = false;
+                } else {
+                    if (info) info.textContent = 'No hay versión nueva';
+                    if (applyBtn) applyBtn.disabled = true;
                 }
-                var txt = 'Actual: v' + (r.current || '?') + ' · ' +
-                    (channel === 'dev' ? ('Rama main @' + (r.remote || '?')) : ('Última release: ' + (r.remote || '?')));
-                if (r.update) txt += ' — HAY ACTUALIZACIÓN';
-                else txt += ' — estás al día';
-                if (info) info.textContent = txt;
-                if (applyBtn) applyBtn.disabled = !r.update;
             },
-            error: function() { if (info) info.textContent = 'No se pudo comprobar (¿sin internet?).'; }
+            error: function() {
+                if (info) info.textContent = 'No hay versión nueva';
+                window._aboutUpdateDetail = 'Sin respuesta del servidor.';
+            }
         });
     };
-    window.applyAboutUpdate = function() {
+    window.applyAboutUpdate = function(channel) {
         var st = document.getElementById('about-update-status');
-        var dev = document.getElementById('about-update-dev');
-        if (!confirm('Descargar y aplicar la actualización? El servidor se reiniciará.')) return;
+        channel = (channel === 'dev') ? 'dev' : 'stable';
+        if (!confirm('Descargar y aplicar la actualización (' + channel + ')? El servidor se reiniciará.')) return;
         if (st) st.textContent = 'Descargando…';
         window.API.ajax({
             method: 'POST', url: '/api/update/apply',
-            data: { channel: (dev && dev.checked) ? 'dev' : 'stable' },
+            data: { channel: channel },
             success: function(r) {
                 if (st) st.textContent = (r && r.ok) ? 'Actualizado. Reiniciando…' : ('Error: ' + ((r && r.error) || '?'));
                 if (r && r.ok) setTimeout(function() { location.reload(); }, 8000);
@@ -1891,6 +1931,20 @@ window.saveTelegramSettings = function() {
     if (blo) data.tg_buf_low = String(Math.max(4, Math.min(120, parseInt(blo.value, 10) || 24)));
     var bhi = document.getElementById('setting-tg-buf-high');
     if (bhi) data.tg_buf_high = String(Math.max(8, Math.min(300, parseInt(bhi.value, 10) || 60)));
+    var wde = document.getElementById('setting-watchdog-enabled');
+    if (wde) data.watchdog_enabled = wde.checked ? '1' : '0';
+    var wdh = document.getElementById('setting-watchdog-hours');
+    if (wdh && wdh.value.trim()) data.watchdog_hours = wdh.value.trim().slice(0, 32);
+    var wdt = document.getElementById('setting-watchdog-threshold');
+    if (wdt) data.watchdog_fail_threshold = String(Math.max(2, Math.min(100, parseInt(wdt.value, 10) || 8)));
+    var wdw = document.getElementById('setting-watchdog-window');
+    if (wdw) data.watchdog_window_min = String(Math.max(2, Math.min(120, parseInt(wdw.value, 10) || 15)));
+    var wds = document.getElementById('setting-watchdog-stall');
+    if (wds) data.watchdog_stall_min = String(Math.max(2, Math.min(180, parseInt(wds.value, 10) || 20)));
+    var wdc = document.getElementById('setting-watchdog-cooldown');
+    if (wdc) data.watchdog_cooldown_min = String(Math.max(10, Math.min(1440, parseInt(wdc.value, 10) || 180)));
+    var wdcmd = document.getElementById('setting-watchdog-cmd');
+    if (wdcmd && wdcmd.value.trim()) data.watchdog_restart_cmd = wdcmd.value.trim().slice(0, 200);
     if (!Object.keys(data).length) return;
     window.API.ajax({
         method: 'POST',
@@ -1898,6 +1952,7 @@ window.saveTelegramSettings = function() {
         data: data,
         success: function() {
             if (st) { st.textContent = '✓ Guardado'; setTimeout(function(){ if(st) st.textContent=''; }, 2000); }
+            try { if (window.refreshWatchdogStatus) window.refreshWatchdogStatus(); } catch (e) {}
         },
         error: function(){ if(st) st.textContent = '✗ Error'; }
     });
